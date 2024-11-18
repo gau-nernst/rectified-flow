@@ -55,7 +55,7 @@ class MLPEmbedder(nn.Sequential):
         self.in_layer = nn.Linear(in_dim, hidden_dim)
         self.act = dict(
             silu=nn.SiLU,
-            gelu_tanh=partial(nn.GELU, approximation="tanh"),
+            gelu_tanh=partial(nn.GELU, approximate="tanh"),
         )[act]()
         self.out_layer = nn.Linear(hidden_dim, hidden_dim)
 

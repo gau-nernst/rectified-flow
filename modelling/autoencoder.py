@@ -7,6 +7,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from .utils import load_hf_state_dict
+
 
 @dataclass
 class AutoEncoderConfig:
@@ -228,8 +230,9 @@ def diagonal_gaussian(z: Tensor, sample: bool) -> Tensor:
 
 
 class AutoEncoder(nn.Module):
-    def __init__(self, config: AutoEncoderConfig):
+    def __init__(self, config: AutoEncoderConfig | None = None) -> None:
         super().__init__()
+        config = config or AutoEncoderConfig()
         self.encoder = Encoder(
             config.in_ch,
             config.ch,
@@ -259,3 +262,13 @@ class AutoEncoder(nn.Module):
 
     def forward(self, x: Tensor, sample: bool = False) -> Tensor:
         return self.decode(self.encode(x, sample))
+
+
+def load_autoencoder(repo_id: str, filename: str, scale_factor: float, shift_factor: float, dtype=torch.bfloat16):
+    config = AutoEncoderConfig(scale_factor=scale_factor, shift_factor=shift_factor)
+    with torch.device("meta"):
+        ae = AutoEncoder(config)
+
+    state_dict = load_hf_state_dict(repo_id, filename)
+    ae.load_state_dict(state_dict, assign=True)
+    return ae.to(dtype=dtype)
