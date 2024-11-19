@@ -2,7 +2,6 @@
 
 import math
 from dataclasses import dataclass
-from functools import partial
 
 import torch
 from einops import rearrange
@@ -50,13 +49,10 @@ def timestep_embedding(t: Tensor, dim, max_period=10000, time_factor: float = 10
 
 
 class MLPEmbedder(nn.Sequential):
-    def __init__(self, in_dim: int, hidden_dim: int, act: str = "silu") -> None:
+    def __init__(self, in_dim: int, hidden_dim: int) -> None:
         super().__init__()
         self.in_layer = nn.Linear(in_dim, hidden_dim)
-        self.act = dict(
-            silu=nn.SiLU,
-            gelu_tanh=partial(nn.GELU, approximate="tanh"),
-        )[act]()
+        self.silu = nn.SiLU()
         self.out_layer = nn.Linear(hidden_dim, hidden_dim)
 
 
@@ -138,14 +134,22 @@ class DoubleStreamBlock(nn.Module):
         self.img_attn = SelfAttention(dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias)
 
         self.img_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.img_mlp = MLPEmbedder(hidden_size, mlp_hidden_dim, act="gelu_tanh")
+        self.img_mlp = nn.Sequential(
+            nn.Linear(hidden_size, mlp_hidden_dim),
+            nn.GELU(approximate="tanh"),
+            nn.Linear(mlp_hidden_dim, hidden_size),
+        )
 
         self.txt_mod = Modulation(hidden_size, double=True)
         self.txt_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.txt_attn = SelfAttention(dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias)
 
         self.txt_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.txt_mlp = MLPEmbedder(hidden_size, mlp_hidden_dim, act="gelu_tanh")
+        self.txt_mlp = nn.Sequential(
+            nn.Linear(hidden_size, mlp_hidden_dim),
+            nn.GELU(approximate="tanh"),
+            nn.Linear(mlp_hidden_dim, hidden_size),
+        )
 
     def forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor) -> tuple[Tensor, Tensor]:
         img_mod1, img_mod2 = self.img_mod(vec)

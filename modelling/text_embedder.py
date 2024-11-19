@@ -27,5 +27,5 @@ class T5Embedder(TextEmbedder):
 
 class ClipTextEmbedder(TextEmbedder):
     def __init__(self, model_id: str = "openai/clip-vit-large-patch14", max_length: int = 77) -> None:
-        # NOTE: OpenAI CLIP was trained with FP16
+        # NOTE: OpenAI CLIP was trained with FP16, but Flux loads it in BF16
         super().__init__(model_id, max_length, CLIPTextModel, "pooler_output", dtype=torch.bfloat16)

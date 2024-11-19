@@ -30,44 +30,32 @@ class Flux(nn.Module):
         super().__init__()
         config = config or FluxConfig()
         self.config = config
-        self.in_channels = config.in_channels
-        self.out_channels = self.in_channels
         if config.hidden_size % config.num_heads != 0:
             raise ValueError(f"Hidden size {config.hidden_size} must be divisible by num_heads {config.num_heads}")
         pe_dim = config.hidden_size // config.num_heads
         if sum(config.axes_dim) != pe_dim:
             raise ValueError(f"Got {config.axes_dim} but expected positional dim {pe_dim}")
-        self.hidden_size = config.hidden_size
-        self.num_heads = config.num_heads
-        self.pe_embedder = EmbedND(dim=pe_dim, theta=config.theta, axes_dim=config.axes_dim)
-        self.img_in = nn.Linear(self.in_channels, self.hidden_size, bias=True)
-        self.time_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size)
-        self.vector_in = MLPEmbedder(config.vec_in_dim, self.hidden_size)
-        self.guidance_in = (
-            MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size) if config.guidance_embed else nn.Identity()
-        )
-        self.txt_in = nn.Linear(config.context_in_dim, self.hidden_size)
+
+        self.pe_embedder = EmbedND(pe_dim, config.theta, config.axes_dim)
+        self.img_in = nn.Linear(config.in_channels, config.hidden_size)
+        self.time_in = MLPEmbedder(256, config.hidden_size)
+        self.vector_in = MLPEmbedder(config.vec_in_dim, config.hidden_size)
+        self.guidance_in = MLPEmbedder(256, config.hidden_size) if config.guidance_embed else nn.Identity()
+        self.txt_in = nn.Linear(config.context_in_dim, config.hidden_size)
 
         self.double_blocks = nn.ModuleList(
             [
-                DoubleStreamBlock(
-                    self.hidden_size,
-                    self.num_heads,
-                    mlp_ratio=config.mlp_ratio,
-                    qkv_bias=config.qkv_bias,
-                )
+                DoubleStreamBlock(config.hidden_size, config.num_heads, config.mlp_ratio, config.qkv_bias)
                 for _ in range(config.depth)
             ]
         )
-
         self.single_blocks = nn.ModuleList(
             [
-                SingleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=config.mlp_ratio)
+                SingleStreamBlock(config.hidden_size, config.num_heads, config.mlp_ratio)
                 for _ in range(config.depth_single_blocks)
             ]
         )
-
-        self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels)
+        self.final_layer = LastLayer(config.hidden_size, 1, config.in_channels)
 
     def forward(
         self,
