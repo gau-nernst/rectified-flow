@@ -1,13 +1,14 @@
 import torch
 import torch.nn.functional as F
-from torch import Tensor
+from torch import Tensor, nn
 from tqdm import tqdm
 
 from modelling import AutoEncoder, ClipTextEmbedder, Flux, T5Embedder, load_autoencoder, load_flux
 
 
-class FluxGenerator:
+class FluxGenerator(nn.Module):
     def __init__(self):
+        super().__init__()
         self.ae = load_autoencoder(
             "black-forest-labs/FLUX.1-schnell",
             "ae.safetensors",
@@ -67,7 +68,7 @@ class FluxGenerator:
             torch.compile(flux_denoise_step, disable=not compile)(
                 self.flux, img, img_ids, txt, txt_ids, vec, t_curr, t_prev, guidance_vec
             )
-        self.flux.cpu()
+        self.flux.cpu()  # when compile=True, there is a weird dynamoc weakref error here.
 
         self.ae.cuda()
         img_u8 = torch.compile(flux_decode, disable=not compile)(self.ae, img, latent_h, latent_w)
@@ -88,7 +89,9 @@ def flux_denoise_step(
     guidance: Tensor,
 ) -> None:
     # NOTE: t_prev > t_curr
-    v = flux(img, img_ids, txt, txt_ids, t_curr.view(1).cuda(), vec, guidance)
+    # NOTE: t_curr and t_prev is FP32
+    t_vec = t_curr.to(img.dtype).view(1).cuda()
+    v = flux(img, img_ids, txt, txt_ids, t_vec, vec, guidance)
     img += (t_prev - t_curr) * v  # Euler's method
 
 
