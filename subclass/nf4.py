@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from torch import Tensor
+from torch import Tensor, nn
 
 aten = torch.ops.aten
 
@@ -109,7 +109,10 @@ class NF4Tensor(Tensor):
         if func is F.linear:
             input, weight = args[:2]
             bias = args[2] if len(args) > 2 else None
-            out = _NF4Linear.apply(input, weight)
+            # NOTE: we can also do F.linear(input, weight.dequantize(), bias)
+            # however, this will save dequantized weight for backward.
+            # will not matter if we use activation checkpointing.
+            out = _NF4LinearFunction.apply(input, weight)
             if bias is not None:  # autograd still works under torch_function.
                 out = out + bias  # let autograd handles bias.
             return out
@@ -159,7 +162,7 @@ class NF4Tensor(Tensor):
         raise NotImplementedError(f"{cls.__name__} dispatch: attempting to run {func}, this is not supported")
 
 
-class _NF4Linear(torch.autograd.Function):
+class _NF4LinearFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input: Tensor, weight: NF4Tensor):
         ctx.save_for_backward(input, weight)
@@ -176,3 +179,24 @@ class _NF4Linear(torch.autograd.Function):
             grad_weight = grad_output.view(-1, weight.shape[0]).T @ input.view(-1, weight.shape[1])
 
         return grad_input, grad_weight
+
+
+class NF4Linear(nn.Linear):
+    @staticmethod
+    def from_float(linear: nn.Linear):
+        linear.__class__ = NF4Linear
+        weight = linear.weight.detach()
+        del linear.weight
+
+        weight_nf4 = NF4Tensor.from_float(weight)
+        linear.register_buffer("codes", weight_nf4.codes)
+        linear.register_buffer("scale", weight_nf4.scale)
+        linear.register_buffer("qmap", weight_nf4.qmap)
+        linear.shape = weight.shape
+        linear.dtype = weight.dtype
+        return linear
+
+    def forward(self, input: Tensor) -> Tensor:
+        # NOTE: this will save dequantized weight for backward.
+        # will not matter if we use activation checkpointing.
+        return F.linear(input, NF4Tensor.dequantize(self), self.bias)

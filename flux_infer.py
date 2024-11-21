@@ -1,13 +1,14 @@
 import torch
 import torch.nn.functional as F
-from torch import Tensor, nn
+from torch import Tensor
 from tqdm import tqdm
 
-from modelling import AutoEncoder, ClipTextEmbedder, Flux, T5Embedder, load_autoencoder, load_flux
+from modelling import AutoEncoder, Flux, load_autoencoder, load_clip_text, load_flux, load_t5
+from offload import SequentialModelOffloadStream
 
 
-class FluxGenerator(nn.Module):
-    def __init__(self):
+class FluxGenerator:
+    def __init__(self, offload_t5: bool = False, offload_flux: bool = False) -> None:
         super().__init__()
         self.ae = load_autoencoder(
             "black-forest-labs/FLUX.1-schnell",
@@ -16,8 +17,26 @@ class FluxGenerator(nn.Module):
             shift_factor=0.1159,
         )  #  168 MB in BF16
         self.flux = load_flux()  # 23.8 GB in BF16
-        self.t5 = T5Embedder()  #  9.5 GB in BF16
-        self.clip = ClipTextEmbedder()  #  246 MB in BF16
+        self.t5 = load_t5()  #  9.5 GB in BF16
+        self.clip = load_clip_text()  #  246 MB in BF16
+
+        # autoencoder and clip are small, don't need to offload
+        self.t5_offloader = SequentialModelOffloadStream(self.t5, enable=offload_t5)
+        self.flux_offloader = SequentialModelOffloadStream(self.flux, enable=offload_flux)
+
+    def cpu(self):
+        self.ae.cpu()
+        self.clip.cpu()
+        self.t5_offloader.cpu()  # this only move some params
+        self.flux_offloader.cpu()
+        return self
+
+    def cuda(self):
+        self.ae.cuda()
+        self.clip.cuda()
+        self.t5_offloader.cuda()  # this only move some params
+        self.flux_offloader.cuda()
+        return self
 
     @torch.no_grad()
     def generate(
@@ -48,19 +67,14 @@ class FluxGenerator(nn.Module):
         img_ids = img_ids.view(1, latent_h * latent_w, 3).cuda()
 
         # TODO: might need to restrict txt length to avoid recompilation
-        self.t5.cuda()
-        txt = self.t5([t5_prompt])  # (B, L, 4096)
+        txt = self.t5([t5_prompt]).to(img.device)  # (B, L, 4096)
         txt_ids = torch.zeros(1, txt.shape[1], 3, device=img.device)
-        self.t5.cpu()
 
-        self.clip.cuda()
         vec = self.clip([t5_prompt])  # (B, 768)
-        self.clip.cpu()
 
         timesteps = torch.linspace(1, 0, num_steps + 1)
         guidance_vec = torch.full((1,), guidance, device=img.device, dtype=img.dtype)
 
-        self.flux.cuda()
         for i in tqdm(range(num_steps), disable=not pbar):
             # t_curr and t_prev must be Tensor (cpu is fine) to avoid recompilation
             t_curr = timesteps[i]
@@ -68,12 +82,8 @@ class FluxGenerator(nn.Module):
             torch.compile(flux_denoise_step, disable=not compile)(
                 self.flux, img, img_ids, txt, txt_ids, vec, t_curr, t_prev, guidance_vec
             )
-        self.flux.cpu()  # when compile=True, there is a weird dynamoc weakref error here.
 
-        self.ae.cuda()
         img_u8 = torch.compile(flux_decode, disable=not compile)(self.ae, img, latent_h, latent_w)
-        self.ae.cpu()
-
         return img_u8
 
 

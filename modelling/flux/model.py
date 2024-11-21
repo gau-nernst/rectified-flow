@@ -95,9 +95,10 @@ class Flux(nn.Module):
         return img
 
 
-def load_flux(dtype=torch.bfloat16):
+def load_flux(name: str = "dev", dtype=torch.bfloat16):
+    assert name in ("dev", "schnell")
     with torch.device("meta"):
         model = Flux()
-    state_dict = load_hf_state_dict("black-forest-labs/FLUX.1-dev", "flux1-dev.safetensors")
+    state_dict = load_hf_state_dict(f"black-forest-labs/FLUX.1-{name}", f"flux1-{name}.safetensors")
     model.load_state_dict(state_dict, assign=True)
     return model.to(dtype=dtype)

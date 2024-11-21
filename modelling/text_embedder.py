@@ -20,12 +20,19 @@ class TextEmbedder(nn.Module):
         return out[self.output_key]
 
 
-class T5Embedder(TextEmbedder):
-    def __init__(self, model_id: str = "mcmonkey/google_t5-v1_1-xxl_encoderonly", max_length: int = 512) -> None:
-        super().__init__(model_id, max_length, T5EncoderModel, "last_hidden_state", dtype=torch.bfloat16)
+def load_t5(
+    model_id: str = "mcmonkey/google_t5-v1_1-xxl_encoderonly",
+    max_length: int = 512,
+    dtype=torch.bfloat16,
+):
+    return TextEmbedder(model_id, max_length, T5EncoderModel, "last_hidden_state", dtype=dtype)
 
 
-class ClipTextEmbedder(TextEmbedder):
-    def __init__(self, model_id: str = "openai/clip-vit-large-patch14", max_length: int = 77) -> None:
-        # NOTE: OpenAI CLIP was trained with FP16, but Flux loads it in BF16
-        super().__init__(model_id, max_length, CLIPTextModel, "pooler_output", dtype=torch.bfloat16)
+def load_clip_text(
+    model_id: str = "openai/clip-vit-large-patch14",
+    max_length: int = 77,
+    dtype=torch.bfloat16,
+):
+    # NOTE: OpenAI CLIP was trained with FP16, but Flux loads it in BF16
+    # TODO: investigate FP16 vs BF16
+    return TextEmbedder(model_id, max_length, CLIPTextModel, "pooler_output", dtype=dtype)
