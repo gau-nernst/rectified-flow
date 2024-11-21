@@ -53,6 +53,8 @@ class PerLayerOffload:
             for p in self.manual_params:
                 p.data = p.data.cuda(non_blocking=True)
 
+        return self
+
     def cpu(self):
         if not self.enable:
             self.model.cpu()
@@ -62,6 +64,8 @@ class PerLayerOffload:
             # set pointer back to CPU pinned memory copy.
             for p in self.manual_params:
                 p.data = self.param_dict[p]
+
+        return self
 
 
 class PerLayerOffloadCUDAStream:
@@ -140,6 +144,8 @@ class PerLayerOffloadCUDAStream:
             for p in self.manual_params:
                 p.data = p.data.cuda(non_blocking=True)
 
+        return self
+
     def cpu(self):
         if not self.enable:
             self.model.cpu()
@@ -147,3 +153,5 @@ class PerLayerOffloadCUDAStream:
         else:
             for p in self.manual_params:
                 p.data = self.param_dict[p]
+
+        return self

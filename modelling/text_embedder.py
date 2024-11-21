@@ -15,8 +15,15 @@ class TextEmbedder(nn.Module):
 
     @torch.no_grad()
     def forward(self, texts: list[str]) -> Tensor:
-        out = self.tokenizer(texts, return_tensors="pt", return_attention_mask=False)["input_ids"]
-        out = self.model(out.to(self.model.device), output_hidden_states=False)
+        # following Flux, we will always pad or truncate to max_length
+        tokens = self.tokenizer(
+            texts,
+            truncation=True,
+            padding="max_length",
+            return_tensors="pt",
+            return_attention_mask=False,
+        )["input_ids"]
+        out = self.model(tokens.to(self.model.device), output_hidden_states=False)
         return out[self.output_key]
 
 
