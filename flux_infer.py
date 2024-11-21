@@ -4,7 +4,7 @@ from torch import Tensor
 from tqdm import tqdm
 
 from modelling import AutoEncoder, Flux, load_autoencoder, load_clip_text, load_flux, load_t5
-from offload import SequentialModelOffloadStream
+from offload import PerLayerOffloadCUDAStream
 
 
 class FluxGenerator:
@@ -21,8 +21,8 @@ class FluxGenerator:
         self.clip = load_clip_text()  #  246 MB in BF16
 
         # autoencoder and clip are small, don't need to offload
-        self.t5_offloader = SequentialModelOffloadStream(self.t5, enable=offload_t5)
-        self.flux_offloader = SequentialModelOffloadStream(self.flux, enable=offload_flux)
+        self.t5_offloader = PerLayerOffloadCUDAStream(self.t5, enable=offload_t5)
+        self.flux_offloader = PerLayerOffloadCUDAStream(self.flux, enable=offload_flux)
 
     def cpu(self):
         self.ae.cpu()

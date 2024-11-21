@@ -3,9 +3,10 @@ from torch import nn
 from tqdm import tqdm
 
 
-class SequentialModelOffload:
-    def __init__(self, model: nn.Module, enable: bool = True):
+class PerLayerOffload:
+    def __init__(self, model: nn.Module, enable: bool = True) -> None:
         self.enable = enable
+        self.model = model
         if not enable:
             return
 
@@ -45,29 +46,32 @@ class SequentialModelOffload:
 
     def cuda(self):
         if not self.enable:
-            return
+            self.model.cuda()
 
-        # CPU pinned memory -> CUDA.
-        for p in self.manual_params:
-            p.data = p.data.cuda(non_blocking=True)
+        else:
+            # CPU pinned memory -> CUDA.
+            for p in self.manual_params:
+                p.data = p.data.cuda(non_blocking=True)
 
     def cpu(self):
         if not self.enable:
-            return
+            self.model.cpu()
 
-        # simply throw CUDA params away.
-        # set pointer back to CPU pinned memory copy.
-        for p in self.manual_params:
-            p.data = self.param_dict[p]
+        else:
+            # simply throw CUDA params away.
+            # set pointer back to CPU pinned memory copy.
+            for p in self.manual_params:
+                p.data = self.param_dict[p]
 
 
-class SequentialModelOffloadStream:
+class PerLayerOffloadCUDAStream:
     """This version uses CUDA stream to overlap data transfer with computation.
     Since the hooks are quite different from non-CUDA-stream implementation,
     we use a separate class.
     """
 
-    def __init__(self, model: nn.Module, enable: bool = True, record_stream: bool = False):
+    def __init__(self, model: nn.Module, enable: bool = True, record_stream: bool = False) -> None:
+        self.model = model
         self.enable = enable
         if not enable:
             return
@@ -130,14 +134,16 @@ class SequentialModelOffloadStream:
 
     def cuda(self):
         if not self.enable:
-            return
+            self.model.cuda()
 
-        for p in self.manual_params:
-            p.data = p.data.cuda(non_blocking=True)
+        else:
+            for p in self.manual_params:
+                p.data = p.data.cuda(non_blocking=True)
 
     def cpu(self):
         if not self.enable:
-            return
+            self.model.cpu()
 
-        for p in self.manual_params:
-            p.data = self.param_dict[p]
+        else:
+            for p in self.manual_params:
+                p.data = self.param_dict[p]
