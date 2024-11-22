@@ -95,7 +95,7 @@ class Flux(nn.Module):
         return img
 
 
-def load_flux(name: str = "dev", dtype=torch.bfloat16):
+def load_flux(name: str = "dev", dtype: torch.dtype = torch.bfloat16):
     assert name in ("dev", "schnell")
     with torch.device("meta"):
         model = Flux()

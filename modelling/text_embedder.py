@@ -6,7 +6,14 @@ from transformers import AutoTokenizer, CLIPTextModel, T5EncoderModel
 
 
 class TextEmbedder(nn.Module):
-    def __init__(self, model_id: str, max_length: int, model_class, output_key: str, dtype=torch.float32) -> None:
+    def __init__(
+        self,
+        model_id: str,
+        max_length: int,
+        model_class,
+        output_key: str,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
         super().__init__()
         self.tokenizer = AutoTokenizer.from_pretrained(model_id, max_length=max_length)
         self.model = model_class.from_pretrained(model_id, torch_dtype=dtype)
@@ -30,7 +37,7 @@ class TextEmbedder(nn.Module):
 def load_t5(
     model_id: str = "mcmonkey/google_t5-v1_1-xxl_encoderonly",
     max_length: int = 512,
-    dtype=torch.bfloat16,
+    dtype: torch.dtype = torch.bfloat16,
 ):
     return TextEmbedder(model_id, max_length, T5EncoderModel, "last_hidden_state", dtype=dtype)
 
@@ -38,7 +45,7 @@ def load_t5(
 def load_clip_text(
     model_id: str = "openai/clip-vit-large-patch14",
     max_length: int = 77,
-    dtype=torch.bfloat16,
+    dtype: torch.dtype = torch.bfloat16,
 ):
     # NOTE: OpenAI CLIP was trained with FP16, but Flux loads it in BF16
     # TODO: investigate FP16 vs BF16

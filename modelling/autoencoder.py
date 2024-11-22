@@ -264,7 +264,13 @@ class AutoEncoder(nn.Module):
         return self.decode(self.encode(x, sample))
 
 
-def load_autoencoder(repo_id: str, filename: str, scale_factor: float, shift_factor: float, dtype=torch.bfloat16):
+def load_autoencoder(
+    repo_id: str,
+    filename: str,
+    scale_factor: float,
+    shift_factor: float,
+    dtype: torch.dtype = torch.bfloat16,
+):
     config = AutoEncoderConfig(scale_factor=scale_factor, shift_factor=shift_factor)
     with torch.device("meta"):
         ae = AutoEncoder(config)
@@ -272,3 +278,13 @@ def load_autoencoder(repo_id: str, filename: str, scale_factor: float, shift_fac
     state_dict = load_hf_state_dict(repo_id, filename)
     ae.load_state_dict(state_dict, assign=True)
     return ae.to(dtype=dtype)
+
+
+def load_flux_autoencoder(dtype: torch.dtype = torch.bfloat16):
+    return load_autoencoder(
+        "black-forest-labs/FLUX.1-schnell",
+        "ae.safetensors",
+        scale_factor=0.3611,
+        shift_factor=0.1159,
+        dtype=dtype,
+    )
