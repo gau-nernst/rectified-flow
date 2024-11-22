@@ -84,11 +84,7 @@ class FluxGenerator:
         rng = torch.Generator("cuda")
         rng.manual_seed(seed) if seed is not None else logger.info(f"Using seed={rng.seed()}")
         img = torch.randn(bsize, latent_h * latent_w, 64, device="cuda", dtype=torch.bfloat16, generator=rng)
-
-        img_ids = torch.zeros(latent_h, latent_w, 3)
-        img_ids[..., 1] = torch.arange(latent_h)[:, None]
-        img_ids[..., 2] = torch.arange(latent_w)[None, :]
-        img_ids = img_ids.view(1, latent_h * latent_w, 3).cuda().expand(bsize, -1, -1)
+        img_ids = flux_img_ids(bsize, latent_h, latent_w).cuda()
 
         txt = self.t5(t5_prompt).to(img.device)  # (B, 512, 4096)
         txt_ids = torch.zeros(bsize, txt.shape[1], 3, device=img.device)
@@ -109,6 +105,13 @@ class FluxGenerator:
 
         img_u8 = torch.compile(flux_decode, disable=not compile)(self.ae, img, (latent_h, latent_w))
         return img_u8
+
+
+def flux_img_ids(bsize: int, latent_h: int, latent_w: int):
+    img_ids = torch.zeros(latent_h, latent_w, 3)
+    img_ids[..., 1] = torch.arange(latent_h)[:, None]
+    img_ids[..., 2] = torch.arange(latent_w)[None, :]
+    return img_ids.view(1, latent_h * latent_w, 3).expand(bsize, -1, -1)
 
 
 # https://arxiv.org/abs/2403.03206
@@ -144,5 +147,5 @@ def flux_decode(ae: AutoEncoder, img: Tensor, latent_size: tuple[int, int]) -> T
     img = img.transpose(1, 2).unflatten(-1, latent_size)
     img = F.pixel_shuffle(img, 2)  # (B, 64, latent_h, latent_w) -> (B, 16, latent_h * 2, latent_w * 2)
     img = ae.decode(img)
-    img_u8 = img.clip(-1, 1).add(1).mul(127.5).to(torch.uint8)
+    img_u8 = img.float().add(1).mul(127.5).clip(0, 255).to(torch.uint8)
     return img_u8
