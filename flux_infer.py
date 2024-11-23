@@ -135,11 +135,13 @@ def flux_denoise_step(
     t_prev: Tensor,
     guidance: Tensor,
 ) -> None:
-    # NOTE: t_prev > t_curr
-    # NOTE: t_curr and t_prev is FP32
+    # NOTE: (latents) 0 <= t_prev < t_curr <= 1 (noise)
+    # NOTE: t_curr and t_prev are FP32
     t_vec = t_curr.to(img.dtype).view(1).cuda()
     v = flux(img, img_ids, txt, txt_ids, t_vec, vec, guidance)
-    img += (t_prev - t_curr) * v  # Euler's method
+
+    # Euler's method. move to t=0 direction (latents)
+    img += (t_prev - t_curr) * v
 
 
 def flux_decode(ae: AutoEncoder, img: Tensor, latent_size: tuple[int, int]) -> Tensor:

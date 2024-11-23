@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # improve memory usage
@@ -32,7 +33,7 @@ from modelling import (
     load_flux_autoencoder,
     load_t5,
 )
-from subclass import NF4Tensor
+from subclass import NF4Tensor, quantize_
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -99,8 +100,15 @@ class FluxDataset(Dataset):
 
 
 def save_images(
-    flux: Flux, ae: AutoEncoder, prompt_path: str, save_dir: Path, img_size: tuple[int, int], batch_size: int = 4
+    flux: Flux,
+    ae: AutoEncoder,
+    prompt_path: str,
+    save_dir: Path,
+    img_size: tuple[int, int],
+    batch_size: int = 4,
 ):
+    # NOTE: this has memory leak.
+    # TODO: pre-compute text embeddings like we did for training data.
     gen = FluxGenerator(flux=flux, ae=ae, offload_t5=True)
     # when tensor subclass + torch.compile() are used together, we can't do .cpu() or .cuda(), even if it doesn't
     # change device. hence, manually move sub-models to CUDA
@@ -151,8 +159,7 @@ def compute_loss(
     v = flux(interpolate.bfloat16(), img_ids, t5_embeds, txt_ids, t_vec.bfloat16(), clip_embeds, guidance)
 
     # TODO: add loss weight based as t (effectively same as distribution transform)
-    # rectified flow loss. predict velocity from noise to latents.
-    # TODO: figure out why it's noise - latents instead of latents - noise
+    # rectified flow loss. predict velocity from latents (t=0) to noise (t=1).
     return F.mse_loss(noise - latents, v.float())
 
 
@@ -199,11 +206,9 @@ if __name__ == "__main__":
 
     # QLoRA
     flux = load_flux().requires_grad_(False)
-    for name, m in flux.named_modules():
-        if isinstance(m, nn.Linear):
-            m.weight = nn.Parameter(NF4Tensor.from_float(m.weight.detach().cuda()), requires_grad=False)
-    LoRALinear.convert_model(flux.double_blocks, rank=args.lora)
-    LoRALinear.convert_model(flux.single_blocks, rank=args.lora)
+    quantize_(flux, NF4Tensor, "cuda")
+    LoRALinear.to_lora(flux.double_blocks, rank=args.lora)
+    LoRALinear.to_lora(flux.single_blocks, rank=args.lora)
     flux.cuda()
     ae = load_flux_autoencoder().cuda()
     optim = torch.optim.AdamW(flux.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True)
@@ -219,7 +224,7 @@ if __name__ == "__main__":
     txt_ids = torch.zeros(args.batch_size, 512, 3, device="cuda")
     guidance_vec = torch.full((args.batch_size,), 3.5, device="cuda", dtype=torch.bfloat16)  # sample guidance?
 
-    log_dir = args.log_dir / args.run_name
+    log_dir = args.log_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{args.run_name}"
     log_dir.mkdir(parents=True, exist_ok=True)
     ckpt_dir = log_dir / "checkpoints"
     ckpt_dir.mkdir(exist_ok=True)
@@ -228,8 +233,9 @@ if __name__ == "__main__":
     # inference before any training
     step = 0
     pbar = tqdm(total=args.num_steps)
+    torch.cuda.reset_peak_memory_stats()
     time0 = time.perf_counter()
-    save_images(flux, ae, args.test_prompt_path, img_dir / f"step{step:06d}", args.img_size)
+    # save_images(flux, ae, args.test_prompt_path, img_dir / f"step{step:06d}", args.img_size)
     while step < args.num_steps:
         images, t5_embeds, clip_embeds = next(dloader_iter)
         loss = torch.compile(compute_loss, disable=not args.compile)(
@@ -254,7 +260,12 @@ if __name__ == "__main__":
 
         if step % args.log_interval == 0:
             time1 = time.perf_counter()
-            wandb.log(dict(imgs_per_second=args.batch_size * args.log_interval / (time1 - time0)), step=step)
+            log_dict = dict(
+                imgs_per_second=args.batch_size * args.log_interval / (time1 - time0),
+                max_memory_allocated=torch.cuda.max_memory_allocated(),
+                memory_allocated=torch.cuda.memory_allocated(),
+            )
+            wandb.log(log_dict, step=step)
             time0 = time1
 
         if step % args.eval_interval == 0:
@@ -263,6 +274,6 @@ if __name__ == "__main__":
             torch.save(state_dict, ckpt_dir / f"step{step:06d}.pth")
 
             # infer with test prompts
-            save_images(flux, ae, args.test_prompt_path, img_dir / f"step{step:06d}", args.img_size)
+            # save_images(flux, ae, args.test_prompt_path, img_dir / f"step{step:06d}", args.img_size)
 
     wandb.finish()
