@@ -70,41 +70,57 @@ class FluxGenerator:
             clip_prompt = [clip_prompt] * bsize
         assert len(clip_prompt) == bsize
 
+        txt = self.t5(t5_prompt).cuda()  # (B, 512, 4096)
+        vec = self.clip(t5_prompt).cuda()  # (B, 768)
+
         if isinstance(img_size, int):
-            height = width = img_size
-        else:
-            height, width = img_size
+            img_size = [img_size, img_size]
+        return flux_generate(self.flux, self.ae, txt, vec, img_size, guidance, num_steps, seed, pbar, compile)
 
-        # TODO: support for initial image
-        # NOTE: Flux uses pixel unshuffle on latent image before passing it to Flux model,
-        # and pixel shuffle on Flux outputs before passing it to AE's decoder.
-        # prepare inputs and text conditioning
-        latent_h = height // 16
-        latent_w = width // 16
-        rng = torch.Generator("cuda")
-        rng.manual_seed(seed) if seed is not None else logger.info(f"Using seed={rng.seed()}")
-        img = torch.randn(bsize, latent_h * latent_w, 64, device="cuda", dtype=torch.bfloat16, generator=rng)
-        img_ids = flux_img_ids(bsize, latent_h, latent_w).cuda()
 
-        txt = self.t5(t5_prompt).to(img.device)  # (B, 512, 4096)
-        txt_ids = torch.zeros(bsize, txt.shape[1], 3, device=img.device)
-        vec = self.clip(t5_prompt)  # (B, 768)
+@torch.no_grad()
+def flux_generate(
+    flux: Flux,
+    ae: AutoEncoder,
+    txt: Tensor,
+    vec: Tensor,
+    img_size: tuple[int, int],
+    guidance: float = 3.5,
+    num_steps: int = 50,
+    seed: int | None = None,
+    pbar: bool = False,
+    compile: bool = False,
+):
+    height, width = img_size
+    bsize = txt.shape[0]
 
-        # only dev version has time shift
-        timesteps = torch.linspace(1, 0, num_steps + 1)
-        timesteps = flux_time_shift(timesteps, latent_h, latent_w)
-        guidance_vec = torch.full((bsize,), guidance, device=img.device, dtype=img.dtype)
+    # TODO: support for initial image
+    # NOTE: Flux uses pixel unshuffle on latent image before passing it to Flux model,
+    # and pixel shuffle on Flux outputs before passing it to AE's decoder.
+    # prepare inputs and text conditioning
+    latent_h = height // 16
+    latent_w = width // 16
+    rng = torch.Generator("cuda")
+    rng.manual_seed(seed) if seed is not None else logger.info(f"Using seed={rng.seed()}")
+    img = torch.randn(bsize, latent_h * latent_w, 64, device="cuda", dtype=torch.bfloat16, generator=rng)
+    img_ids = flux_img_ids(bsize, latent_h, latent_w).cuda()
+    txt_ids = torch.zeros(bsize, txt.shape[1], 3, device=img.device)
 
-        for i in tqdm(range(num_steps), disable=not pbar):
-            # t_curr and t_prev must be Tensor (cpu is fine) to avoid recompilation
-            t_curr = timesteps[i]
-            t_prev = timesteps[i + 1]
-            torch.compile(flux_denoise_step, disable=not compile)(
-                self.flux, img, img_ids, txt, txt_ids, vec, t_curr, t_prev, guidance_vec
-            )
+    # only dev version has time shift
+    timesteps = torch.linspace(1, 0, num_steps + 1)
+    timesteps = flux_time_shift(timesteps, latent_h, latent_w)
+    guidance_vec = torch.full((bsize,), guidance, device=img.device, dtype=img.dtype)
 
-        img_u8 = torch.compile(flux_decode, disable=not compile)(self.ae, img, (latent_h, latent_w))
-        return img_u8
+    for i in tqdm(range(num_steps), disable=not pbar):
+        # t_curr and t_prev must be Tensor (cpu is fine) to avoid recompilation
+        t_curr = timesteps[i]
+        t_prev = timesteps[i + 1]
+        torch.compile(flux_denoise_step, disable=not compile)(
+            flux, img, img_ids, txt, txt_ids, vec, t_curr, t_prev, guidance_vec
+        )
+
+    img_u8 = torch.compile(flux_decode, disable=not compile)(ae, img, (latent_h, latent_w))
+    return img_u8
 
 
 def flux_img_ids(bsize: int, latent_h: int, latent_w: int):

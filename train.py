@@ -15,19 +15,18 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 import wandb
-from torch import Tensor, nn
+from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader, Dataset, Sampler
 from torchvision.io import ImageReadMode, decode_image, write_png
 from torchvision.transforms import v2
 from tqdm import tqdm
 
-from flux_infer import FluxGenerator, flux_img_ids
+from flux_infer import flux_generate, flux_img_ids
 from modelling import (
     AutoEncoder,
     Flux,
     LoRALinear,
-    TextEmbedder,
     load_clip_text,
     load_flux,
     load_flux_autoencoder,
@@ -39,22 +38,33 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 
-def compute_and_cache_text_embeds(
-    model: TextEmbedder,
-    texts: list[str],
-    shape: tuple[int, ...],
-    save_path: str,
-    batch_size: int = 32,
-):
-    # numpy doesn't have BF16, so we use uint16 instead.
-    embeds = np.memmap(save_path, dtype=np.uint16, mode="w+", shape=shape)
-    for i in tqdm(range(0, len(texts), batch_size)):
-        s = slice(i, min(i + batch_size, len(texts)))
-        embeds[s] = model(texts[s]).cpu().view(torch.uint16).numpy()
-    embeds.flush()
+def compute_and_cache_text_embeds(model_name: str, texts: list[str], save_path: str, batch_size: int = 32):
+    if model_name == "t5":
+        model_loader = load_t5
+        shape = (len(texts), 512, 4096)
+    elif model_name == "clip":
+        model_loader = load_clip_text
+        shape = (len(texts), 768)
+    else:
+        raise ValueError(f"Unsupported {model_name=}")
+
+    if not Path(save_path).exists():
+        logger.info(f"Precompute {model_name} embeddings")
+        model = model_loader().cuda()
+
+        # numpy doesn't have BF16, so we use uint16 instead.
+        embeds = np.memmap(save_path, dtype=np.uint16, mode="w+", shape=shape)
+        for i in tqdm(range(0, len(texts), batch_size)):
+            s = slice(i, min(i + batch_size, len(texts)))
+            embeds[s] = model(texts[s]).cpu().view(torch.uint16).numpy()
+        embeds.flush()
+        del model
+
+    embeds = np.memmap(save_path, dtype=np.uint16, mode="r", shape=shape)
+    return torch.from_numpy(embeds).view(torch.bfloat16)
 
 
-class FluxDataset(Dataset):
+class FluxTrainDataset(Dataset):
     def __init__(self, meta_path: str, data_dir: str, img_size: tuple[int, int]) -> None:
         self.data_dir = Path(data_dir)
         self.img_size = img_size
@@ -62,26 +72,10 @@ class FluxDataset(Dataset):
 
         df = pd.read_csv(meta_path)
         self.img_paths = df["img_path"].tolist()
+        prompts = df["prompt"].tolist()
 
-        t5_embeds_path = f"{meta_path}.t5_embeds"
-        t5_shape = (len(df), 512, 4096)
-        if not Path(t5_embeds_path).exists():
-            logger.info("Precompute T5 embeddings")
-            t5 = load_t5().cuda()
-            compute_and_cache_text_embeds(t5, df["prompt"].tolist(), t5_shape, t5_embeds_path)
-            del t5
-        t5_embeds = np.memmap(t5_embeds_path, dtype=np.uint16, mode="r", shape=t5_shape)
-        self.t5_embeds = torch.from_numpy(t5_embeds).view(torch.bfloat16)
-
-        clip_embeds_path = f"{meta_path}.clip_embeds"
-        clip_shape = (len(df), 768)
-        if not Path(clip_embeds_path).exists():
-            logger.info("Precompute CLIP text embeddings")
-            clip = load_clip_text().cuda()
-            compute_and_cache_text_embeds(clip, df["prompt"].tolist(), clip_shape, clip_embeds_path)
-            del clip
-        clip_embeds = np.memmap(clip_embeds_path, dtype=np.uint16, mode="r", shape=clip_shape)
-        self.clip_embeds = torch.from_numpy(clip_embeds).view(torch.bfloat16)
+        self.t5_embeds = compute_and_cache_text_embeds("t5", prompts, f"{meta_path}.t5_embeds")
+        self.clip_embeds = compute_and_cache_text_embeds("clip", prompts, f"{meta_path}.clip_embeds")
 
     def __getitem__(self, idx: int):
         # resize while maintaining aspect ratio, then make a random crop spanning 1 dimension.
@@ -107,23 +101,19 @@ def save_images(
     img_size: tuple[int, int],
     batch_size: int = 4,
 ):
-    # NOTE: this has memory leak.
-    # TODO: pre-compute text embeddings like we did for training data.
-    gen = FluxGenerator(flux=flux, ae=ae, offload_t5=True)
-    # when tensor subclass + torch.compile() are used together, we can't do .cpu() or .cuda(), even if it doesn't
-    # change device. hence, manually move sub-models to CUDA
-    gen.clip.cuda()
-    gen.t5_offloader.cuda()
+    prompts = [line.rstrip() for line in open(prompt_path, encoding="utf-8")]
+    t5_embeds = compute_and_cache_text_embeds("t5", prompts, f"{prompt_path}.t5_embeds")
+    clip_embeds = compute_and_cache_text_embeds("clip", prompts, f"{prompt_path}.clip_embeds")
 
-    prompts = [line.rstrip() for line in open(prompt_path)]
     save_dir.mkdir(parents=True, exist_ok=True)
 
     for offset in tqdm(range(0, len(prompts), batch_size), "Generating images"):
-        batch = prompts[offset : min(offset + batch_size, len(prompts))]
-        imgs = gen.generate(batch, img_size=img_size, seed=2024, compile=True).cpu()
+        s = slice(offset, min(offset + batch_size, len(prompts)))
+        imgs = flux_generate(flux, ae, t5_embeds[s].cuda(), clip_embeds[s].cuda(), img_size, seed=2024, compile=True)
+        imgs = imgs.cpu()
 
         for img_idx in range(imgs.shape[0]):
-            # TODO: investigate saving with webp
+            # TODO: investigate saving with webp to save storage
             write_png(imgs[img_idx], save_dir / f"{offset + img_idx:04d}.png")
 
 
@@ -196,7 +186,7 @@ if __name__ == "__main__":
 
     wandb.init(project="Flux finetune", name=args.run_name, dir="/tmp")
 
-    ds = FluxDataset(args.meta_path, args.data_dir, args.img_size)
+    ds = FluxTrainDataset(args.meta_path, args.data_dir, args.img_size)
     dloader = DataLoader(
         ds,
         batch_size=args.batch_size,
@@ -208,11 +198,10 @@ if __name__ == "__main__":
 
     # QLoRA
     flux = load_flux().requires_grad_(False)
-    quantize_(flux, NF4Tensor, "cuda")
+    quantize_(flux, NF4Tensor, "cuda").cpu()
     LoRALinear.to_lora(flux.double_blocks, rank=args.lora)
     LoRALinear.to_lora(flux.single_blocks, rank=args.lora)
-    flux.cuda()
-    ae = load_flux_autoencoder().cuda()
+    ae = load_flux_autoencoder()
     optim = torch.optim.AdamW(flux.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True)
     logger.info(flux)
 
@@ -236,10 +225,20 @@ if __name__ == "__main__":
 
     # inference before any training
     step = 0
+
+    # due to torch.compile + tensor subclass bug, we can't move compiled FLUX to CPU.
+    # thus, manually compute test prompt embeddings and move FLUX to CUDA outside of save_images()
+    prompts = [line.rstrip() for line in open(args.test_prompt_path, encoding="utf-8")]
+    t5_embeds = compute_and_cache_text_embeds("t5", prompts, f"{args.test_prompt_path}.t5_embeds")
+    clip_embeds = compute_and_cache_text_embeds("clip", prompts, f"{args.test_prompt_path}.clip_embeds")
+
+    flux.cuda()
+    ae.cuda()
+    save_images(flux, ae, args.test_prompt_path, img_dir / f"step{step:06d}", args.img_size)
+
     pbar = tqdm(total=args.num_steps)
     torch.cuda.reset_peak_memory_stats()
     time0 = time.perf_counter()
-    # save_images(flux, ae, args.test_prompt_path, img_dir / f"step{step:06d}", args.img_size)
     while step < args.num_steps:
         images, t5_embeds, clip_embeds = next(dloader_iter)
         loss = torch.compile(compute_loss, disable=not args.compile)(
@@ -274,10 +273,10 @@ if __name__ == "__main__":
 
         if step % args.eval_interval == 0:
             # only save LoRA weights. Flux doesn't have buffers.
-            state_dict = {name: p.detach() for name, p in flux.named_parameters() if p.requires_grad}
+            state_dict = {name: p.detach().bfloat16() for name, p in flux.named_parameters() if p.requires_grad}
             torch.save(state_dict, ckpt_dir / f"step{step:06d}.pth")
 
             # infer with test prompts
-            # save_images(flux, ae, args.test_prompt_path, img_dir / f"step{step:06d}", args.img_size)
+            save_images(flux, ae, args.test_prompt_path, img_dir / f"step{step:06d}", args.img_size)
 
     wandb.finish()
