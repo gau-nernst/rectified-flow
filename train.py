@@ -156,6 +156,8 @@ def compute_loss(
     noise = torch.randn_like(latents)
     interpolate = latents.lerp(noise, t_vec.view(-1, 1, 1))
 
+    # NOTE: this is a guidance-distilled model. using guidance for finetuning might be "problematic".
+    # best is to fix the guidance for finetuning and later inference.
     v = flux(interpolate.bfloat16(), img_ids, t5_embeds, txt_ids, t_vec.bfloat16(), clip_embeds, guidance)
 
     # TODO: add loss weight based as t (effectively same as distribution transform)
@@ -222,7 +224,9 @@ if __name__ == "__main__":
     latent_w = args.img_size[1] // 16
     img_ids = flux_img_ids(args.batch_size, latent_h, latent_w).cuda()
     txt_ids = torch.zeros(args.batch_size, 512, 3, device="cuda")
-    guidance_vec = torch.full((args.batch_size,), 3.5, device="cuda", dtype=torch.bfloat16)  # sample guidance?
+
+    # default guidance=3.5 for FLUX dev
+    guidance_vec = torch.full((args.batch_size,), 3.5, device="cuda", dtype=torch.bfloat16)
 
     log_dir = args.log_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{args.run_name}"
     log_dir.mkdir(parents=True, exist_ok=True)

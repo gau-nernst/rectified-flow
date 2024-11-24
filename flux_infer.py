@@ -54,7 +54,7 @@ class FluxGenerator:
         t5_prompt: str | list[str],
         clip_prompt: str | list[str] | None = None,
         img_size: int | tuple[int, int] = 512,
-        guidance: float = 4.0,
+        guidance: float = 3.5,
         num_steps: int = 50,
         seed: int | None = None,
         pbar: bool = False,
