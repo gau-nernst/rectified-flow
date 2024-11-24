@@ -12,6 +12,7 @@ from .layers import DoubleStreamBlock, EmbedND, LastLayer, MLPEmbedder, SingleSt
 @dataclass
 class FluxConfig:
     in_channels: int = 64
+    out_channels: int = 64
     vec_in_dim: int = 768
     context_in_dim: int = 4096
     hidden_size: int = 3072
@@ -55,7 +56,7 @@ class Flux(nn.Module):
                 for _ in range(config.depth_single_blocks)
             ]
         )
-        self.final_layer = LastLayer(config.hidden_size, 1, config.in_channels)
+        self.final_layer = LastLayer(config.hidden_size, 1, config.out_channels)
 
     def forward(
         self,
