@@ -111,7 +111,7 @@ def flux_generate(
     timesteps = flux_time_shift(timesteps, latent_h, latent_w)
     guidance_vec = torch.full((bsize,), guidance, device=img.device, dtype=img.dtype)
 
-    for i in tqdm(range(num_steps), disable=not pbar):
+    for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
         # t_curr and t_prev must be Tensor (cpu is fine) to avoid recompilation
         t_curr = timesteps[i]
         t_prev = timesteps[i + 1]

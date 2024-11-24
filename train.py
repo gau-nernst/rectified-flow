@@ -1,4 +1,5 @@
 import argparse
+import dataclasses
 import json
 import logging
 import os
@@ -23,15 +24,7 @@ from torchvision.transforms import v2
 from tqdm import tqdm
 
 from flux_infer import flux_generate, flux_img_ids
-from modelling import (
-    AutoEncoder,
-    Flux,
-    LoRALinear,
-    load_clip_text,
-    load_flux,
-    load_flux_autoencoder,
-    load_t5,
-)
+from modelling import AutoEncoder, Flux, LoRALinear, load_clip_text, load_flux, load_flux_autoencoder, load_t5
 from subclass import NF4Tensor, quantize_
 
 logger = logging.getLogger()
@@ -54,7 +47,7 @@ def compute_and_cache_text_embeds(model_name: str, texts: list[str], save_path: 
 
         # numpy doesn't have BF16, so we use uint16 instead.
         embeds = np.memmap(save_path, dtype=np.uint16, mode="w+", shape=shape)
-        for i in tqdm(range(0, len(texts), batch_size)):
+        for i in tqdm(range(0, len(texts), batch_size), dynamic_ncols=True):
             s = slice(i, min(i + batch_size, len(texts)))
             embeds[s] = model(texts[s]).cpu().view(torch.uint16).numpy()
         embeds.flush()
@@ -81,8 +74,11 @@ class FluxTrainDataset(Dataset):
         # resize while maintaining aspect ratio, then make a random crop spanning 1 dimension.
         # all images should have similar aspect ratios.
         img = decode_image(self.data_dir / self.img_paths[idx], mode=ImageReadMode.RGB)
-        scale = max(self.img_size[0] / img.shape[1], self.img_size[1] / img.shape[2])
-        img = F.interpolate(img.unsqueeze(0), scale_factor=scale, mode="bicubic", antialias=True).squeeze(0)
+        h, w = img.shape[1:]
+        scale = max(self.img_size[0] / h, self.img_size[1] / w)
+        new_h = round(h * scale)
+        new_w = round(w * scale)
+        img = F.interpolate(img.unsqueeze(0), (new_h, new_w), mode="bicubic", antialias=True).squeeze(0)
         img = self.random_crop(img)
 
         t5_embed = self.t5_embeds[idx]
@@ -107,7 +103,7 @@ def save_images(
 
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    for offset in tqdm(range(0, len(prompts), batch_size), "Generating images"):
+    for offset in tqdm(range(0, len(prompts), batch_size), "Generating images", dynamic_ncols=True):
         s = slice(offset, min(offset + batch_size, len(prompts)))
         imgs = flux_generate(flux, ae, t5_embeds[s].cuda(), clip_embeds[s].cuda(), img_size, seed=2024, compile=True)
         imgs = imgs.cpu()
@@ -126,6 +122,23 @@ class InfiniteSampler(Sampler):
             yield from torch.randperm(self.size).tolist()
 
 
+@dataclasses.dataclass
+class uniform:
+    def __call__(self, n: int, device: torch.device):
+        return torch.rand(n, device=device)
+
+
+@dataclasses.dataclass
+class logit_normal:
+    """Section 3.1 in https://arxiv.org/abs/2403.03206"""
+
+    mean: float = 0.0
+    std: float = 1.0
+
+    def __call__(self, n: int, device: torch.device):
+        return torch.normal(self.mean, self.std, size=(n,), device=device).sigmoid()
+
+
 def compute_loss(
     flux: Flux,
     ae: AutoEncoder,
@@ -135,14 +148,14 @@ def compute_loss(
     img_ids: Tensor,
     txt_ids: Tensor,
     guidance: Tensor,
+    time_sampler: uniform | logit_normal,
 ) -> Tensor:
     imgs = imgs.float() / 127.5 - 1
     latents = ae.encode(imgs.bfloat16(), sample=True)
     latents = F.pixel_unshuffle(latents, 2).view(imgs.shape[0], 64, -1).transpose(1, 2)
     latents = latents.float()  # FP32
 
-    # uniform [0,1). TODO: change this
-    t_vec = torch.rand(imgs.shape[0], device=latents.device)
+    t_vec = time_sampler(imgs.shape[0], device=latents.device)
     noise = torch.randn_like(latents)
     interpolate = latents.lerp(noise, t_vec.view(-1, 1, 1))
 
@@ -150,8 +163,8 @@ def compute_loss(
     # best is to fix the guidance for finetuning and later inference.
     v = flux(interpolate.bfloat16(), img_ids, t5_embeds, txt_ids, t_vec.bfloat16(), clip_embeds, guidance)
 
-    # TODO: add loss weight based as t (effectively same as distribution transform)
     # rectified flow loss. predict velocity from latents (t=0) to noise (t=1).
+    # TODO: check if we use logit-normal sampling, whether we need to also apply loss weight
     return F.mse_loss(noise - latents, v.float())
 
 
@@ -166,6 +179,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--img_size", type=parse_img_size, default=(512, 512))
     parser.add_argument("--lora", type=int, default=8)
+    parser.add_argument("--time_sampler", default="uniform()")
     parser.add_argument("--compile", action="store_true")
 
     parser.add_argument("--num_workers", type=int, default=4)
@@ -198,9 +212,9 @@ if __name__ == "__main__":
 
     # QLoRA
     flux = load_flux().requires_grad_(False)
-    quantize_(flux, NF4Tensor, "cuda").cpu()
-    LoRALinear.to_lora(flux.double_blocks, rank=args.lora)
-    LoRALinear.to_lora(flux.single_blocks, rank=args.lora)
+    for module_list in [flux.double_blocks, flux.single_blocks]:
+        quantize_(module_list, NF4Tensor, "cuda").cpu()
+        LoRALinear.to_lora(module_list, rank=args.lora)
     ae = load_flux_autoencoder()
     optim = torch.optim.AdamW(flux.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True)
     logger.info(flux)
@@ -216,6 +230,7 @@ if __name__ == "__main__":
 
     # default guidance=3.5 for FLUX dev
     guidance_vec = torch.full((args.batch_size,), 3.5, device="cuda", dtype=torch.bfloat16)
+    time_sampler = eval(args.time_sampler, dict(uniform=uniform, logit_normal=logit_normal))
 
     log_dir = args.log_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{args.run_name}"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -236,7 +251,7 @@ if __name__ == "__main__":
     ae.cuda()
     save_images(flux, ae, args.test_prompt_path, img_dir / f"step{step:06d}", args.img_size)
 
-    pbar = tqdm(total=args.num_steps)
+    pbar = tqdm(total=args.num_steps, dynamic_ncols=True)
     torch.cuda.reset_peak_memory_stats()
     time0 = time.perf_counter()
     while step < args.num_steps:
@@ -250,6 +265,7 @@ if __name__ == "__main__":
             img_ids,
             txt_ids,
             guidance_vec,
+            time_sampler,
         )
         loss.backward()
         optim.step()
