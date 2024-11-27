@@ -54,6 +54,8 @@ class FluxGenerator:
         t5_prompt: str | list[str],
         clip_prompt: str | list[str] | None = None,
         img_size: int | tuple[int, int] = 512,
+        latents: Tensor | None = None,
+        denoise: float = 1.0,
         guidance: float = 3.5,
         num_steps: int = 50,
         seed: int | None = None,
@@ -70,22 +72,32 @@ class FluxGenerator:
             clip_prompt = [clip_prompt] * bsize
         assert len(clip_prompt) == bsize
 
-        txt = self.t5(t5_prompt).cuda()  # (B, 512, 4096)
-        vec = self.clip(t5_prompt).cuda()  # (B, 768)
-
-        if isinstance(img_size, int):
-            img_size = [img_size, img_size]
-        return flux_generate(self.flux, self.ae, txt, vec, img_size, guidance, num_steps, seed, pbar, compile)
+        return flux_generate(
+            self.flux,
+            self.ae,
+            self.t5(t5_prompt).cuda(),  # (B, 512, 4096)
+            self.clip(clip_prompt).cuda(),  # (B, 768)
+            (img_size, img_size) if isinstance(img_size, int) else img_size,
+            latents,
+            denoise,
+            guidance,
+            num_steps,
+            seed,
+            pbar,
+            compile,
+        )
 
 
 @torch.no_grad()
 def flux_generate(
     flux: Flux,
-    ae: AutoEncoder,
+    ae: AutoEncoder | None,
     txt: Tensor,
     vec: Tensor,
     img_size: tuple[int, int],
-    guidance: float = 3.5,
+    latents: Tensor | None = None,
+    denoise: float = 1.0,
+    guidance: Tensor | float = 3.5,
     num_steps: int = 50,
     seed: int | None = None,
     pbar: bool = False,
@@ -95,32 +107,42 @@ def flux_generate(
     bsize = txt.shape[0]
 
     # TODO: support for initial image
-    # NOTE: Flux uses pixel unshuffle on latent image before passing it to Flux model,
-    # and pixel shuffle on Flux outputs before passing it to AE's decoder.
-    # prepare inputs and text conditioning
+    # NOTE: Flux uses patchify and unpatchify on model's input and output.
+    # this is equivalent to pixel unshuffle and pixel shuffle respectively.
     latent_h = height // 16
     latent_w = width // 16
-    rng = torch.Generator("cuda")
-    rng.manual_seed(seed) if seed is not None else logger.info(f"Using seed={rng.seed()}")
-    img = torch.randn(bsize, latent_h * latent_w, 64, device="cuda", dtype=torch.bfloat16, generator=rng)
-    img_ids = flux_img_ids(bsize, latent_h, latent_w).cuda()
-    txt_ids = torch.zeros(bsize, txt.shape[1], 3, device=img.device)
+    img_ids = flux_img_ids(bsize, latent_h, latent_w).cuda()  # this inject size info
+    txt_ids = torch.zeros(bsize, txt.shape[1], 3, device="cuda")  # TODO: check this
 
     # only dev version has time shift
     timesteps = torch.linspace(1, 0, num_steps + 1)
     timesteps = flux_time_shift(timesteps, latent_h, latent_w)
-    guidance_vec = torch.full((bsize,), guidance, device=img.device, dtype=img.dtype)
+    if not isinstance(guidance, Tensor):
+        guidance = torch.full((bsize,), guidance, device="cuda", dtype=torch.bfloat16)
 
-    for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
+    rng = torch.Generator("cuda")
+    rng.manual_seed(seed) if seed is not None else logger.info(f"Using seed={rng.seed()}")
+    noise = torch.randn(bsize, latent_h * latent_w, 64, device="cuda", dtype=torch.bfloat16, generator=rng)
+
+    if latents is not None:
+        # timesteps is ordered from 1->0. thus, we need to use (1 - noise_strength)
+        timesteps = timesteps[int(num_steps * (1 - denoise)) :]
+        latents = latents.lerp(noise, timesteps[0].item())
+    else:
+        latents = noise
+
+    for i in tqdm(range(timesteps.shape[0] - 1), disable=not pbar, dynamic_ncols=True):
         # t_curr and t_prev must be Tensor (cpu is fine) to avoid recompilation
         t_curr = timesteps[i]
         t_prev = timesteps[i + 1]
-        torch.compile(flux_denoise_step, disable=not compile)(
-            flux, img, img_ids, txt, txt_ids, vec, t_curr, t_prev, guidance_vec
+        torch.compile(flux_denoise_euler_step, disable=not compile)(
+            flux, latents, img_ids, txt, txt_ids, vec, t_curr, t_prev, guidance
         )
 
-    img_u8 = torch.compile(flux_decode, disable=not compile)(ae, img, (latent_h, latent_w))
-    return img_u8
+    if ae is not None:
+        return torch.compile(flux_decode, disable=not compile)(ae, latents, (latent_h, latent_w))
+    else:
+        return latents
 
 
 def flux_img_ids(bsize: int, latent_h: int, latent_w: int):
@@ -140,7 +162,7 @@ def flux_time_shift(timesteps: Tensor, latent_h: int, latent_w: int, base_shift:
     return exp_mu / (exp_mu + timesteps.reciprocal() - 1)
 
 
-def flux_denoise_step(
+def flux_denoise_euler_step(
     flux: Flux,
     img: Tensor,
     img_ids: Tensor,
@@ -155,15 +177,28 @@ def flux_denoise_step(
     # NOTE: t_curr and t_prev are FP32
     t_vec = t_curr.to(img.dtype).view(1).cuda()
     v = flux(img, img_ids, txt, txt_ids, t_vec, vec, guidance)
-
-    # Euler's method. move to t=0 direction (latents)
-    img += (t_prev - t_curr) * v
+    img += (t_prev - t_curr) * v  # Euler's method. move to t=0 direction (latents)
 
 
-def flux_decode(ae: AutoEncoder, img: Tensor, latent_size: tuple[int, int]) -> Tensor:
+@torch.no_grad()
+def flux_encode(ae: AutoEncoder, imgs: Tensor, sample: bool) -> Tensor:
+    if imgs.dtype == torch.uint8:
+        imgs = imgs.float() / 127.5 - 1
+    latents = ae.encode(imgs.bfloat16(), sample=sample)
+    return F.pixel_unshuffle(latents, 2).view(imgs.shape[0], 64, -1).transpose(1, 2)
+
+
+@torch.no_grad()
+def flux_decode(ae: AutoEncoder, latents: Tensor, latent_size: tuple[int, int]) -> Tensor:
     # NOTE: original repo uses FP32 AE + cast latents to FP32 + BF16 autocast
-    img = img.transpose(1, 2).unflatten(-1, latent_size)
-    img = F.pixel_shuffle(img, 2)  # (B, 64, latent_h, latent_w) -> (B, 16, latent_h * 2, latent_w * 2)
-    img = ae.decode(img)
-    img_u8 = img.float().add(1).mul(127.5).clip(0, 255).to(torch.uint8)
-    return img_u8
+    # (B, 64, latent_h, latent_w) -> (B, 16, latent_h * 2, latent_w * 2)
+    latents = F.pixel_shuffle(latents.transpose(1, 2).unflatten(-1, latent_size), 2)
+    imgs = ae.decode(latents)
+    return imgs.float().add(1).mul(127.5).clip(0, 255).to(torch.uint8)
+
+
+def flux_resize_latents(latents: Tensor, latent_size: tuple[int, int], scale_factor: float, mode: str = "nearest"):
+    latents = F.pixel_shuffle(latents.transpose(1, 2).unflatten(-1, latent_size), 2)
+    latents = F.interpolate(latents, scale_factor=scale_factor, mode=mode)
+    latents = F.pixel_unshuffle(latents, 2).view(latents.shape[0], 64, -1).transpose(1, 2)
+    return latents

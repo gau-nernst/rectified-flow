@@ -6,16 +6,19 @@ Supported models:
 
 Supported features:
 
-- QLoRA fine-tuning
+- Training: QLoRA fine-tuning, logit-normal sampler
 
 TODO:
 - DreamBooth for subject-based fine-tuning (prior preservation loss).
-- Training: time schedule sampling, time-dependent loss weight.
 - INT8 inference and training.
-- (maybe) more samplers?
+- (maybe) more schedules?
 
 Resources:
 
 - Rectified-Flow paper: https://arxiv.org/abs/2209.03003
 - Stable Diffusion 3 paper: https://arxiv.org/abs/2403.03206
 - DreamBooth: https://arxiv.org/abs/2208.12242
+
+Notes:
+
+- Finetune with logit-normal sampler seems to be more stable than uniform sampler. The changes are less abrupt. Not necessarily mean the final result is better.
