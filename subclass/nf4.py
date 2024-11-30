@@ -123,24 +123,17 @@ class NF4Tensor(Tensor):
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs):
         if func in (aten.detach.default, aten.clone.default):
-            return cls(
-                func(args[0].codes, *args[1:], **kwargs),
-                func(args[0].scale, *args[1:], **kwargs),
-                func(args[0].qmap, *args[1:], **kwargs),
-                args[0].shape,
-                args[0].dtype,
-            )
+            data_names, attrs = args[0].__tensor_flatten__()
+            data = [func(getattr(args[0], name), *args[1:], **kwargs) for name in data_names]
+            return cls(*data, *attrs)
 
         elif func in (aten._to_copy.default,):
             device = kwargs.get("device", None)
-            dtype = kwargs.get("dtype", None)
-            return cls(
-                args[0].codes.to(device=device),
-                args[0].scale.to(device=device),
-                args[0].qmap.to(device=device),
-                args[0].shape,
-                dtype or args[0].dtype,  # only change appearance dtype
-            )
+            dtype = kwargs.get("dtype", args[0].dtype)
+
+            data_names, _ = args[0].__tensor_flatten__()
+            data = [getattr(args[0], name).to(device=device) for name in data_names]
+            return cls(*data, args[0].shape, dtype)  # only change appearance dtype
 
         elif func is aten.copy_.default:
             if isinstance(args[0], cls) and isinstance(args[1], cls):
