@@ -6,12 +6,14 @@ Supported models:
 
 Supported features:
 
-- Training: QLoRA fine-tuning, logit-normal sampler
+- Training: QLoRA fine-tuning (NF4), logit-normal sampler
+- [RF-inversion](https://arxiv.org/abs/2410.10792)
+- INT8 matmul
 
 TODO:
 - DreamBooth for subject-based fine-tuning (prior preservation loss).
-- INT8 inference and training.
 - (maybe) more schedules?
+- Investigate the impact of T5 embeddings. SD3 paper says it's more important for text rendering.
 
 Resources:
 
