@@ -23,7 +23,7 @@ from torchvision.io import ImageReadMode, decode_image, write_png
 from torchvision.transforms import v2
 from tqdm import tqdm
 
-from flux_infer import flux_encode, flux_generate, flux_img_ids, flux_decode
+from flux_infer import flux_decode, flux_encode, flux_generate, flux_img_ids
 from modelling import AutoEncoder, Flux, LoRALinear, load_clip_text, load_flux, load_flux_autoencoder, load_t5
 from subclass import NF4Tensor, quantize_
 
@@ -159,11 +159,16 @@ def compute_loss(
     latents: Tensor,
     t5_embeds: Tensor,
     clip_embeds: Tensor,
-    img_ids: Tensor,
-    txt_ids: Tensor,
-    guidance: Tensor,
+    img_size: tuple[int, int],
     time_sampler: uniform | logit_normal,
 ) -> Tensor:
+    bsize = latents.shape[0]
+    latent_h = img_size[0] // 16
+    latent_w = img_size[1] // 16
+    img_ids = flux_img_ids(bsize, latent_h, latent_w).cuda()
+    txt_ids = torch.zeros(bsize, 512, 3, device="cuda")
+    guidance = torch.full((bsize,), 3.5, device="cuda", dtype=torch.bfloat16)  # FLUX-dev default
+
     latents = latents.float()  # FP32
     t_vec = time_sampler(latents.shape[0], device=latents.device)
     noise = torch.randn_like(latents)
@@ -254,13 +259,6 @@ if __name__ == "__main__":
     for layer in list(flux.double_blocks) + list(flux.single_blocks):
         layer.forward = partial(checkpoint, layer.forward, use_reentrant=False)
 
-    latent_h = args.img_size[0] // 16
-    latent_w = args.img_size[1] // 16
-    img_ids = flux_img_ids(args.batch_size, latent_h, latent_w).cuda()
-    txt_ids = torch.zeros(args.batch_size, 512, 3, device="cuda")
-    # FLUX-dev default
-    guidance = torch.full((args.batch_size,), 3.5, device="cuda", dtype=torch.bfloat16)
-
     time_sampler = eval(args.time_sampler, dict(uniform=uniform, logit_normal=logit_normal))
 
     log_dir = args.log_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{args.run_name}"
@@ -283,6 +281,7 @@ if __name__ == "__main__":
     save_images(flux, ae, args.test_prompt_path, img_dir / f"step{step:06d}", args.img_size)
 
     pbar = tqdm(total=args.num_steps, dynamic_ncols=True)
+    loss_fn = torch.compile(compute_loss, disable=not args.compile)
     torch.cuda.reset_peak_memory_stats()
     time0 = time.perf_counter()
     while step < args.num_steps:
@@ -296,16 +295,7 @@ if __name__ == "__main__":
                 t5_embeds = torch.cat([t5_embeds.cuda(), t5_embeds2.cuda()])
                 clip_embeds = torch.cat([clip_embeds.cuda(), clip_embeds2.cuda()])
 
-            loss = torch.compile(compute_loss, disable=not args.compile)(
-                flux,
-                latents,
-                t5_embeds.cuda(),
-                clip_embeds.cuda(),
-                img_ids,
-                txt_ids,
-                guidance,
-                time_sampler,
-            )
+            loss = loss_fn(flux, latents, t5_embeds.cuda(), clip_embeds.cuda(), args.img_size, time_sampler)
             loss.backward()
 
         if step % args.log_interval == 0:

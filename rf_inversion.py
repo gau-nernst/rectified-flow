@@ -46,8 +46,8 @@ def rf_inversion_generate(
     txt: Tensor,
     vec: Tensor,
     img_size: tuple[int, int],
-    starting_time: float = 0.0,
-    stopping_time: float = 1.0,
+    start_t: float = 0.0,
+    end_t: float = 1.0,
     controller_guidance: float = 1.0,
     guidance: Tensor | float = 3.5,
     num_steps: int = 50,
@@ -67,11 +67,8 @@ def rf_inversion_generate(
     img_ids = flux_img_ids(bsize, latent_h, latent_w).cuda()
     txt_ids = torch.zeros(bsize, txt.shape[1], 3, device="cuda")
 
-    time_shift = FluxTimeShift()
-    starting_time = time_shift.inverse(starting_time, latent_h, latent_w)
-    stopping_time = time_shift.inverse(stopping_time, latent_h, latent_w)
-    timesteps = torch.linspace(1, 0, num_steps + 1)[int(starting_time * num_steps) :]
-    timesteps = time_shift(timesteps, latent_h, latent_w)
+    timesteps = torch.linspace(1, 0, num_steps + 1)[int(start_t * num_steps) :]
+    timesteps = FluxTimeShift()(timesteps, latent_h, latent_w)
     if not isinstance(guidance, Tensor):
         guidance = torch.full((bsize,), guidance, device="cuda", dtype=torch.bfloat16)
 
@@ -114,7 +111,7 @@ def rf_inversion_generate(
 
     # editting i.e. reverse ODE (the usual denoising)
     for i in tqdm(range(timesteps.shape[0] - 1), disable=not pbar, dynamic_ncols=True):
-        eta = controller_guidance if i < (stopping_time - starting_time) * num_steps else 0.0
+        eta = controller_guidance if i < (end_t - start_t) * num_steps else 0.0
         torch.compile(rf_inversion_step, disable=not compile)(
             flux,
             latents,

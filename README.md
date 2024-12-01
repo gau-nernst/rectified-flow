@@ -3,6 +3,7 @@
 Supported models:
 
 - [FLUX.1-dev](https://huggingface.co/black-forest-labs/FLUX.1-dev)
+- [FLUX.1-Redux-dev](https://huggingface.co/black-forest-labs/FLUX.1-Redux-dev)
 
 Supported features:
 

@@ -55,6 +55,7 @@ class FluxGenerator:
         clip_prompt: str | list[str] | None = None,
         img_size: int | tuple[int, int] = 512,
         latents: Tensor | None = None,
+        extra_txt_embeds: Tensor | None = None,
         denoise: float = 1.0,
         guidance: float = 3.5,
         num_steps: int = 50,
@@ -76,22 +77,36 @@ class FluxGenerator:
             height = width = img_size
         else:
             height, width = img_size
-
-        latents = flux_generate(
-            self.flux,
-            self.t5(t5_prompt).cuda(),  # (B, 512, 4096)
-            self.clip(clip_prompt).cuda(),  # (B, 768)
-            (height, width),
-            latents,
-            denoise,
-            guidance,
-            num_steps,
-            seed,
-            pbar,
-            compile,
-        )
         latent_h = height // 16
         latent_w = width // 16
+
+        t5_embeds = self.t5(t5_prompt).cuda()  # (B, 512, 4096)
+        clip_embeds = self.clip(clip_prompt).cuda()  # (B, 768)
+
+        if extra_txt_embeds is not None:  # e.g. Flux-Redux
+            t5_embeds = torch.cat([t5_embeds, extra_txt_embeds], dim=1)
+
+        rng = torch.Generator("cuda")
+        rng.manual_seed(seed) if seed is not None else logger.info(f"Using seed={rng.seed()}")
+        noise = torch.randn(bsize, latent_h * latent_w, 64, device="cuda", dtype=torch.bfloat16, generator=rng)
+        if latents is not None:
+            # this is basically SDEdit https://arxiv.org/abs/2108.01073
+            latents = latents.lerp(noise, denoise)
+        else:
+            latents = noise
+
+        latents = flux_generate(
+            flux=self.flux,
+            txt=t5_embeds,
+            vec=clip_embeds,
+            img_size=(height, width),
+            latents=latents,
+            start_t=denoise,
+            guidance=guidance,
+            num_steps=num_steps,
+            pbar=pbar,
+            compile=compile,
+        )
         return torch.compile(flux_decode, disable=not compile)(self.ae, latents, (latent_h, latent_w))
 
 
@@ -101,11 +116,11 @@ def flux_generate(
     txt: Tensor,
     vec: Tensor,
     img_size: tuple[int, int],
-    latents: Tensor | None = None,
-    denoise: float = 1.0,
+    latents: Tensor,
+    start_t: float = 1.0,
+    end_t: float = 0.0,
     guidance: Tensor | float = 3.5,
     num_steps: int = 50,
-    seed: int | None = None,
     pbar: bool = False,
     compile: bool = False,
 ):
@@ -121,26 +136,10 @@ def flux_generate(
 
     # denoise from t=1 (noise) to t=0 (latents)
     # only dev version has time shift
-    time_shift = FluxTimeShift()
-    timesteps = torch.linspace(1, 0, num_steps + 1)
-    timesteps = time_shift(timesteps, latent_h, latent_w)
+    timesteps = torch.linspace(start_t, end_t, num_steps + 1)
+    timesteps = FluxTimeShift()(timesteps, latent_h, latent_w)
     if not isinstance(guidance, Tensor):
         guidance = torch.full((bsize,), guidance, device="cuda", dtype=torch.bfloat16)
-
-    rng = torch.Generator("cuda")
-    rng.manual_seed(seed) if seed is not None else logger.info(f"Using seed={rng.seed()}")
-    noise = torch.randn(bsize, latent_h * latent_w, 64, device="cuda", dtype=torch.bfloat16, generator=rng)
-
-    if latents is not None:
-        # convert from time-scale to step-scale
-        denoise_ = time_shift.inverse(denoise, latent_h, latent_w)
-
-        # timesteps is ordered from 1->0. thus, we need to use (1 - denoise)
-        # this is basically SDEdit https://arxiv.org/abs/2108.01073
-        timesteps = timesteps[int(num_steps * (1 - denoise_)) :]
-        latents = latents.lerp(noise, timesteps[0].item())
-    else:
-        latents = noise
 
     for i in tqdm(range(timesteps.shape[0] - 1), disable=not pbar, dynamic_ncols=True):
         torch.compile(flux_step, disable=not compile)(
