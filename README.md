@@ -25,3 +25,5 @@ Resources:
 Notes:
 
 - Finetune with logit-normal sampler seems to be more stable than uniform sampler. The changes are less abrupt. Not necessarily mean the final result is better.
+- If you only have low-res images, you can train in low-res and FLUX can extrapolate to hi-res.
+- FLUX-Redux: to reduce influence of image guidance, we can just scale the embeddings down e.g. `* 0.2`. Similarly, to increase influence of text guidance, we can scale T5 embeddings up.

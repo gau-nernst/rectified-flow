@@ -96,10 +96,19 @@ class Flux(nn.Module):
         return img
 
 
-def load_flux(name: str = "dev", dtype: torch.dtype = torch.bfloat16):
-    assert name in ("dev", "schnell")
+def _load_flux(repo_id: str, filename: str, dtype: torch.dtype = torch.bfloat16):
     with torch.device("meta"):
         model = Flux()
-    state_dict = load_hf_state_dict(f"black-forest-labs/FLUX.1-{name}", f"flux1-{name}.safetensors")
+    state_dict = load_hf_state_dict(repo_id, filename)
     model.load_state_dict(state_dict, assign=True)
     return model.to(dtype=dtype)
+
+
+def load_flux(name: str = "dev", dtype: torch.dtype = torch.bfloat16):
+    assert name in ("dev", "schnell")
+    return _load_flux(f"black-forest-labs/FLUX.1-{name}", f"flux1-{name}.safetensors", dtype=dtype)
+
+
+def load_shuttle(name: str = "3.1-aesthetic", dtype: torch.dtype = torch.bfloat16):
+    assert name in ("3-diffusion", "3.1-aesthetic")
+    return _load_flux(f"shuttleai/shuttle-{name}", f"shuttle-{name}.safetensors", dtype=dtype)
