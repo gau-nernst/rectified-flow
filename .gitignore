@@ -1,1 +1,8 @@
 __pycache__/
+*.png
+*.jpg
+*.txt
+*.*_embeds
+*.csv
+*.pth
+*.onnx
