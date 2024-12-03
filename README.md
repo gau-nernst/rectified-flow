@@ -8,11 +8,11 @@ Supported models:
 Supported features:
 
 - Training: QLoRA fine-tuning (NF4), logit-normal sampler
-- [RF-inversion](https://arxiv.org/abs/2410.10792)
-- INT8 matmul
+- [RF-inversion](https://arxiv.org/abs/2410.10792) (FLUX-Redux is simpler and superior)
+- INT8 matmul (2x inference speedup for consumer cards)
+- Train on pre-computed latents
 
 TODO:
-- DreamBooth for subject-based fine-tuning (prior preservation loss).
 - (maybe) more schedules?
 - Investigate the impact of T5 embeddings. SD3 paper says it's more important for text rendering.
 
@@ -26,4 +26,6 @@ Notes:
 
 - Finetune with logit-normal sampler seems to be more stable than uniform sampler. The changes are less abrupt. Not necessarily mean the final result is better.
 - If you only have low-res images, you can train in low-res and FLUX can extrapolate to hi-res.
-- FLUX-Redux: to reduce influence of image guidance, we can just scale the embeddings down e.g. `* 0.2`. Similarly, to increase influence of text guidance, we can scale T5 embeddings up.
+- FLUX-Redux
+  - To reduce influence of image guidance, we can just scale the embeddings down e.g. `* 0.2`. Similarly, to increase influence of text guidance, we can scale T5 embeddings up.
+  - We can use multiple guidance images (>=2). Just concat the embeddings.

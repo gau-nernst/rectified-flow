@@ -4,6 +4,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from .int8_mm import scaled_int8_mm
+
 aten = torch.ops.aten
 
 
@@ -105,18 +107,14 @@ class ScaledInt8Tensor(Tensor):
         raise NotImplementedError(f"{cls.__name__} dispatch: attempting to run {func}, this is not supported")
 
 
-# TODO: replace this with custom triton kernel
-def scaled_int8_mm(A_i8: Tensor, A_scale: Tensor, B_i8: Tensor, B_scale: Tensor):
-    return A_scale * torch._int_mm(A_i8, B_i8) * B_scale
-
-
 class _Int8LinearFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input: Tensor, weight: ScaledInt8Tensor):
         ctx.save_for_backward(input, weight)
         if weight.config.int8_output:
-            input_i8, input_scale = rowwise_quantize(input)
-            return scaled_int8_mm(input_i8, input_scale, weight.i8_data.T, weight.scale.T)
+            input_i8, input_scale = rowwise_quantize(input.view(-1, weight.shape[1]))
+            out = scaled_int8_mm(input_i8, weight.i8_data.T, input_scale.view(-1), weight.scale.view(-1))
+            return out.view(*input.shape[:-1], weight.shape[0])
         else:
             # mixed matmul
             return (input @ weight.i8_data.to(input.dtype).T) * weight.scale.T
@@ -136,7 +134,9 @@ class _Int8LinearFunction(torch.autograd.Function):
             if weight.config.int8_grad_weight:
                 grad_output_i8_t, grad_output_scale_t = rowwise_quantize(grad_output.T)
                 input_i8_t, input_scale_t = rowwise_quantize(input.T)
-                grad_weight = scaled_int8_mm(grad_output_i8_t, grad_output_scale_t, input_i8_t.T, input_scale_t.T)
+                grad_weight = scaled_int8_mm(
+                    grad_output_i8_t, input_i8_t.T, grad_output_scale_t.view(-1), input_scale_t.view(-1)
+                )
             else:
                 grad_weight = grad_output.T @ input
 
