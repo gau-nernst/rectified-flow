@@ -15,7 +15,8 @@ class TextEmbedder(nn.Module):
         dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__()
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id, max_length=max_length)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+        self.max_length = max_length  # allow overrides
         self.model = model_class.from_pretrained(model_id, torch_dtype=dtype)
         self.model.eval().requires_grad_(False)
         self.output_key = output_key
@@ -25,6 +26,7 @@ class TextEmbedder(nn.Module):
         # following Flux, we will always pad or truncate to max_length
         tokens = self.tokenizer(
             texts,
+            max_length=self.max_length,
             truncation=True,
             padding="max_length",
             return_tensors="pt",
