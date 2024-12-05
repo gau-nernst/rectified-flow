@@ -12,7 +12,7 @@ class PerLayerOffload:
 
         # move model to pinned memory. keep a model copy in CPU pinned memory.
         # this can be quite slow if params currently reside in memory-mapped file.
-        for p in tqdm(list(model.parameters()), desc="Copying params to pinned memory"):
+        for p in tqdm(list(model.parameters()), desc="Copying params to pinned memory", dynamic_ncols=True):
             p.data = p.data.cpu().pin_memory()
         self.param_dict = {p: p.data for p in model.parameters()}
         self.manual_params = []
@@ -86,7 +86,7 @@ class PerLayerOffloadCUDAStream:
 
         # move model to pinned memory. keep a model copy in CPU pinned memory.
         # this can be quite slow if params currently reside in memory-mapped file.
-        for p in tqdm(list(model.parameters()), desc="Copying params to pinned memory"):
+        for p in tqdm(list(model.parameters()), desc="Copying params to pinned memory", dynamic_ncols=True):
             p.data = p.data.cpu().pin_memory()
         self.param_dict = {p: p.data for p in model.parameters()}
         self.manual_params = []
@@ -285,7 +285,7 @@ class PerLayerOffloadWithBackward:
 
             return pre_backward_hook
 
-        for i, curr_layer in enumerate(tqdm(module, desc=f"Copying params to pinned memory {key}")):
+        for i, curr_layer in enumerate(tqdm(module, desc=f"Copying params to pinned memory {key}", dynamic_ncols=True)):
             flat_param = self._get_flat_param(curr_layer).cpu().pin_memory()
             self.cpu_param_dict[key].append(flat_param)
             curr_layer.register_forward_pre_hook(create_pre_forward_hook(i))
