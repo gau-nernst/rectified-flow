@@ -249,13 +249,15 @@ class PerLayerOffloadWithBackward:
                 # set current layer to the compute buffer
                 compute_buffer, transfer_buffer = self.gpu_param_dict[key]
                 self._view_into_flat_param(module, compute_buffer)
+                current_stream = torch.cuda.current_stream()
 
-                # wait for H2D transfer for the current layer to complete
-                self.stream.synchronize()
+                # compute of current layer depends on H2D transfer of current layer
+                current_stream.wait_stream(self.stream)
 
-                # start H2D transfer for the next layer.
-                # need to wait until the previous layer finishes using it.
-                self.stream.wait_stream(torch.cuda.current_stream())
+                # H2D transfer of next layer depends on compute of previous layer
+                # since they share the same buffer
+                self.stream.wait_stream(current_stream)
+
                 with torch.cuda.stream(self.stream):
                     n = len(self.cpu_param_dict[key])
                     cpu_param = self.cpu_param_dict[key][(idx + 1) % n]
@@ -272,10 +274,12 @@ class PerLayerOffloadWithBackward:
                 # NOTE: the order of compute and transfer buffer is swapped in backward
                 transfer_buffer, compute_buffer = self.gpu_param_dict[key]
                 self._view_into_flat_param(module, compute_buffer)
+                current_stream = torch.cuda.current_stream()
 
-                self.stream.synchronize()
+                # synchronize, similar to forward pass
+                current_stream.wait_stream(self.stream)
+                self.stream.wait_stream(current_stream)
 
-                self.stream.wait_stream(torch.cuda.current_stream())
                 with torch.cuda.stream(self.stream):
                     n = len(self.cpu_param_dict[key])
                     cpu_param = self.cpu_param_dict[key][(idx - 1) % n]
@@ -378,12 +382,10 @@ class PerLayerOffloadWithBackwardGradient:
                 compute_buffer, transfer_buffer = self.gpu_param_dict[key]
                 self._view_into_flat_param(module, compute_buffer)
 
-                # wait for H2D transfer for the current layer to complete
-                self.stream.synchronize()
+                current_stream = torch.cuda.current_stream()
+                current_stream.wait_stream(self.stream)
+                self.stream.wait_stream(current_stream)
 
-                # start H2D transfer for the next layer.
-                # need to wait until the previous layer finishes using it.
-                self.stream.wait_stream(torch.cuda.current_stream())
                 with torch.cuda.stream(self.stream):
                     n = len(self.cpu_param_dict[key])
                     cpu_param = self.cpu_param_dict[key][(idx + 1) % n]
@@ -401,9 +403,26 @@ class PerLayerOffloadWithBackwardGradient:
                 transfer_buffer, compute_buffer = self.gpu_param_dict[key]
                 self._view_into_flat_param(module, compute_buffer)
 
-                # NOTE: we now synchronize in post_backward_hook
+                current_stream = torch.cuda.current_stream()
+                self.stream.wait_stream(current_stream)
+                current_stream.wait_stream(self.stream)
+
                 with torch.cuda.stream(self.stream):
                     n = len(module_list)
+
+                    # NOTE: not sure why this won't work in post-backward hook
+                    # NOTE: gradients of first layer (last in backward) won't be offloaded
+                    # we will perform optim step for first layer on GPU
+                    if idx < n - 1:
+                        for p in module_list[idx + 1].parameters():
+                            if p.grad is None:
+                                continue
+                            self.param2grad[p].copy_(p.grad, non_blocking=True)
+
+                            # it would be better if we can avoid Tensor.record_stream()
+                            p.grad.record_stream(self.stream)
+                            p.grad = None
+
                     cpu_param = self.cpu_param_dict[key][(idx - 1) % n]
                     transfer_buffer.copy_(cpu_param, non_blocking=True)
 
@@ -411,45 +430,57 @@ class PerLayerOffloadWithBackwardGradient:
 
             return pre_backward_hook
 
-        def create_post_backward_hook(idx: int):
-            @torch.compiler.disable()
-            def post_backward_hook(module, grad_input, grad_output):
-                # compute stream waits for next layer's param H2D transfer to complete
-                current_stream = torch.cuda.current_stream()
-                post_backward_evt = current_stream.record_event()
-                current_stream.wait_stream(self.stream)
-
-                # deallocate previous layer's gradients
-                # the previous line ensures that we will only deallocate when
-                # grad D2H transfer of the previous layer finishes.
-                n = len(module_list)
-                for p in module_list[(i + 1) % n].parameters():
-                    p.grad = None
-
-                # offload gradients to CPU
-                # need to sync compute stream -> ensure previous backward finishes
-                self.stream.wait_event(post_backward_evt)
-                with torch.cuda.stream(self.stream):
-                    for p in module.parameters():
-                        if p.grad is None:
-                            continue
-                        self.param2grad[p].copy_(p.grad, non_blocking=True)
-
-            return post_backward_hook
-
         desc = f"Copying params to pinned memory {key}"
         for i, curr_layer in enumerate(tqdm(module_list, desc=desc, dynamic_ncols=True)):
             flat_param = self._get_flat_param(curr_layer).cpu().pin_memory()
             self.cpu_param_dict[key].append(flat_param)
 
-            # pre-allocate pinned memory for gradients
-            for p in curr_layer.parameters():
-                if not p.requires_grad:
-                    continue
-                self.param2grad[p] = torch.empty_like(p, device="cpu", pin_memory=True, requires_grad=True)
+            # pre-allocate pinned memory for gradients, except first layer,
+            # because we won't offload gradients of first layer.
+            if i > 0:
+                for p in curr_layer.parameters():
+                    if not p.requires_grad:
+                        continue
+                    self.param2grad[p] = torch.empty_like(p, device="cpu", pin_memory=True, requires_grad=True)
 
             curr_layer.register_forward_pre_hook(create_pre_forward_hook(i))
             curr_layer.register_full_backward_pre_hook(create_pre_backward_hook(i))
-            curr_layer.register_full_backward_hook(create_post_backward_hook(i))
 
         # TODO: register hooks for optimizer to view CPU tensor
+
+
+if __name__ == "__main__":
+    from flux_infer import flux_img_ids
+    from modelling import Flux, FluxConfig
+
+    # also need to set CUBLAS_WORKSPACE_CONFIG=:4096:8
+    torch.use_deterministic_algorithms(True)
+
+    config = FluxConfig(depth=3, depth_single_blocks=6, hidden_size=2048, num_heads=16)
+    flux = Flux(config).bfloat16().cuda()
+
+    height = width = 1024
+    latents = torch.randn(1, height // 16 * width // 16, 64).bfloat16().cuda()
+    img_ids = flux_img_ids(1, height // 16, width // 16).bfloat16().cuda()
+    txt = torch.randn(1, 512, 4096).bfloat16().cuda()
+    txt_ids = torch.zeros(1, txt.shape[1], 3).bfloat16().cuda()
+    vec = torch.randn(1, 768).bfloat16().cuda()
+    t_vec = torch.rand(1).bfloat16().cuda()
+    guidance = (torch.ones(1) * 3.5).bfloat16().cuda()
+
+    out = flux(latents, img_ids, txt, txt_ids, t_vec, vec, guidance)
+    out.sum().backward()
+    grad = flux.img_in.weight.grad
+
+    for p in flux.parameters():
+        p.grad = None
+    flux.cpu()
+    # PerLayerOffloadWithBackward(flux).cuda()
+    PerLayerOffloadWithBackwardGradient(flux).cuda()
+
+    out2 = flux(latents, img_ids, txt, txt_ids, t_vec, vec, guidance)
+    out2.sum().backward()
+    grad2 = flux.img_in.weight.grad
+
+    torch.testing.assert_close(out, out2)
+    torch.testing.assert_close(grad, grad2)
