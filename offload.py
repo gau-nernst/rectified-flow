@@ -308,6 +308,7 @@ class PerLayerOffloadWithBackwardGradient:
         self.cpu_param_dict = dict()
         self.gpu_param_dict = dict()
         self.param2grad = dict()
+        self.events = dict()
 
         def traverse(module: nn.Module, key: tuple[str, ...] = ()):
             if (
@@ -374,6 +375,7 @@ class PerLayerOffloadWithBackwardGradient:
             self._get_flat_param(module_list[0]).cuda(),  # compute buffer
             self._get_flat_param(module_list[-1]).cuda(),  # transfer buffer
         ]
+        self.events[key] = torch.cuda.Event()  # marks the end of transferring the next layer
 
         def create_pre_forward_hook(idx: int):
             @torch.compiler.disable()
@@ -405,48 +407,62 @@ class PerLayerOffloadWithBackwardGradient:
 
                 current_stream = torch.cuda.current_stream()
                 self.stream.wait_stream(current_stream)
-                current_stream.wait_stream(self.stream)
+
+                # we replace .wait_stream() with .wait_event() here since our transfer stream is
+                # also offloading gradients, which the compute stream does not need to wait for.
+                current_stream.wait_event(self.events[key])
 
                 with torch.cuda.stream(self.stream):
                     n = len(module_list)
-
-                    # NOTE: not sure why this won't work in post-backward hook
-                    # NOTE: gradients of first layer (last in backward) won't be offloaded
-                    # we will perform optim step for first layer on GPU
-                    if idx < n - 1:
-                        for p in module_list[idx + 1].parameters():
-                            if p.grad is None:
-                                continue
-                            self.param2grad[p].copy_(p.grad, non_blocking=True)
-
-                            # it would be better if we can avoid Tensor.record_stream()
-                            p.grad.record_stream(self.stream)
-                            p.grad = None
-
                     cpu_param = self.cpu_param_dict[key][(idx - 1) % n]
                     transfer_buffer.copy_(cpu_param, non_blocking=True)
+                self.stream.record_event(self.events[key])
 
                 self.gpu_param_dict[key] = [compute_buffer, transfer_buffer]
 
             return pre_backward_hook
+
+        # NOTE: apparently when nn.Module.register_full_backward_hook() fires, param.grad
+        # is not guaranteed to be computed https://github.com/pytorch/pytorch/issues/86051
+        # hence, we have to use Tensor.register_post_accumulate_grad_hook() to offload grads.
+        def post_grad_hook(p: Tensor):
+            # make sure p.grad finished being computed
+            self.stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(self.stream):
+                self.param2grad[p].copy_(p.grad, non_blocking=True)
+            p.grad.record_stream(self.stream)
+            p.grad = None
 
         desc = f"Copying params to pinned memory {key}"
         for i, curr_layer in enumerate(tqdm(module_list, desc=desc, dynamic_ncols=True)):
             flat_param = self._get_flat_param(curr_layer).cpu().pin_memory()
             self.cpu_param_dict[key].append(flat_param)
 
-            # pre-allocate pinned memory for gradients, except first layer,
-            # because we won't offload gradients of first layer.
-            if i > 0:
-                for p in curr_layer.parameters():
-                    if not p.requires_grad:
-                        continue
-                    self.param2grad[p] = torch.empty_like(p, device="cpu", pin_memory=True, requires_grad=True)
+            # pre-allocate pinned memory for gradients, and install hooks to offload grads
+            for p in curr_layer.parameters():
+                if p.requires_grad:
+                    self.param2grad[p] = torch.zeros(p.shape, dtype=p.dtype, device="cpu", pin_memory=True)
+                    p.register_post_accumulate_grad_hook(post_grad_hook)
 
             curr_layer.register_forward_pre_hook(create_pre_forward_hook(i))
             curr_layer.register_full_backward_pre_hook(create_pre_backward_hook(i))
 
         # TODO: register hooks for optimizer to view CPU tensor
+
+    def register_optim_hook(self, optim: torch.optim.Optimizer):
+        def pre_optim_hook(optim, args, kwargs):
+            for key, flat_param_list in self.cpu_param_dict.items():
+                module_list = self.model
+                for part in key:
+                    module_list = getattr(module_list, part)
+
+                for layer, flat_param in zip(module_list, flat_param_list):
+                    self._view_into_flat_param(layer, flat_param)  # view into CPU buffer
+                    for p in layer.parameters():
+                        if p.requires_grad:
+                            p.grad = self.param2grad[p]  # assign CPU grad attribute
+
+        optim.register_step_pre_hook(pre_optim_hook)
 
 
 if __name__ == "__main__":
@@ -470,17 +486,22 @@ if __name__ == "__main__":
 
     out = flux(latents, img_ids, txt, txt_ids, t_vec, vec, guidance)
     out.sum().backward()
-    grad = flux.img_in.weight.grad
+    grads = {name: p.grad.cpu() for name, p in flux.named_parameters()}
 
     for p in flux.parameters():
         p.grad = None
     flux.cpu()
     # PerLayerOffloadWithBackward(flux).cuda()
-    PerLayerOffloadWithBackwardGradient(flux).cuda()
+    offloader = PerLayerOffloadWithBackwardGradient(flux).cuda()
 
-    out2 = flux(latents, img_ids, txt, txt_ids, t_vec, vec, guidance)
-    out2.sum().backward()
-    grad2 = flux.img_in.weight.grad
+    out_offload = flux(latents, img_ids, txt, txt_ids, t_vec, vec, guidance)
+    out_offload.sum().backward()
+    grads_offload = {name: offloader.param2grad.get(p, p.grad).cpu() for name, p in flux.named_parameters()}
 
-    torch.testing.assert_close(out, out2)
-    torch.testing.assert_close(grad, grad2)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, out_offload)
+    torch.testing.assert_close(grads, grads_offload)
+
+    optim = torch.optim.AdamW(flux.parameters(), fused=True)
+    offloader.register_optim_hook(optim)
+    optim.step()
