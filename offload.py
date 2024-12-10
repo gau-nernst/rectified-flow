@@ -15,7 +15,6 @@ class PerLayerOffload:
         for p in tqdm(list(model.parameters()), desc="Copying params to pinned memory", dynamic_ncols=True):
             p.data = p.data.cpu().pin_memory()
         self.param_dict = {p: p.data for p in model.parameters()}
-        self.manual_params = []
 
         @torch.compiler.disable()
         def pre_hook(module, args):
@@ -30,6 +29,8 @@ class PerLayerOffload:
             for p in module.parameters():
                 p.data = self.param_dict[p]
 
+        manual_params = set()  # we must use a set here in case of tied parameters
+
         def traverse(module: nn.Module):
             if (
                 isinstance(module, (nn.ModuleList, nn.Sequential))
@@ -42,11 +43,12 @@ class PerLayerOffload:
 
             else:
                 for p in module.parameters(recurse=False):
-                    self.manual_params.append(p)
+                    manual_params.add(p)
                 for child in module.children():
                     traverse(child)
 
         traverse(model)
+        self.manual_tensors = list(manual_params) + list(self.model.buffers())
 
     def cuda(self):
         if not self.enable:
@@ -54,7 +56,7 @@ class PerLayerOffload:
 
         else:
             # CPU pinned memory -> CUDA.
-            for p in self.manual_params:
+            for p in self.manual_tensors:
                 p.data = p.data.cuda(non_blocking=True)
 
         return self
@@ -66,7 +68,7 @@ class PerLayerOffload:
         else:
             # simply throw CUDA params away.
             # set pointer back to CPU pinned memory copy.
-            for p in self.manual_params:
+            for p in self.manual_tensors:
                 p.data = self.param_dict[p]
 
         return self
@@ -89,17 +91,16 @@ class PerLayerOffloadCUDAStream:
         for p in tqdm(list(model.parameters()), desc="Copying params to pinned memory", dynamic_ncols=True):
             p.data = p.data.cpu().pin_memory()
         self.param_dict = {p: p.data for p in model.parameters()}
-        self.manual_params = []
         self.stream = torch.cuda.Stream()
 
         def create_pre_hook(next_layer):
             @torch.compiler.disable()
             def pre_hook(module, args):
                 # wait for H2D transfer for the current layer to complete
-                self.stream.synchronize()
+                current_stream = torch.cuda.current_stream()
+                current_stream.wait_stream(self.stream)
 
                 # start H2D transfer for the next layer
-                current_stream = torch.cuda.current_stream()
                 with torch.cuda.stream(self.stream):
                     for p in next_layer.parameters():
                         p.data = p.data.cuda(non_blocking=True)
@@ -120,6 +121,8 @@ class PerLayerOffloadCUDAStream:
             for p in module.parameters():
                 p.data = self.param_dict[p]
 
+        manual_params = set()
+
         def traverse(module: nn.Module):
             if (
                 isinstance(module, (nn.ModuleList, nn.Sequential))
@@ -127,7 +130,7 @@ class PerLayerOffloadCUDAStream:
                 and all(type(layer) == type(module[0]) for layer in module)
             ):
                 # manually move 1st layer params
-                self.manual_params.extend(module[0].parameters())
+                manual_params.update(module[0].parameters())
 
                 for i, curr_layer in enumerate(module):
                     # last layer will prefetch 1st layer
@@ -138,18 +141,19 @@ class PerLayerOffloadCUDAStream:
 
             else:
                 for p in module.parameters(recurse=False):
-                    self.manual_params.append(p)
+                    manual_params.update(p)
                 for child in module.children():
                     traverse(child)
 
         traverse(model)
+        self.manual_tensors = list(manual_params) + list(self.model.buffers())
 
     def cuda(self):
         if not self.enable:
             self.model.cuda()
 
         else:
-            for p in self.manual_params:
+            for p in self.manual_tensors:
                 p.data = p.data.cuda(non_blocking=True)
 
         return self
@@ -159,7 +163,7 @@ class PerLayerOffloadCUDAStream:
             self.model.cpu()
 
         else:
-            for p in self.manual_params:
+            for p in self.manual_tensors:
                 p.data = self.param_dict[p]
 
         return self
@@ -175,9 +179,10 @@ class PerLayerOffloadWithBackward:
             return
 
         self.stream = torch.cuda.Stream()
-        self.manual_params = []
         self.cpu_param_dict = dict()
         self.gpu_param_dict = dict()
+
+        manual_params = set()
 
         def traverse(module: nn.Module, key: tuple[str, ...] = ()):
             if (
@@ -189,18 +194,19 @@ class PerLayerOffloadWithBackward:
 
             else:
                 for p in module.parameters(recurse=False):
-                    self.manual_params.append(p)
+                    manual_params.add(p)
                 for name, child in module.named_children():
                     traverse(child, key + (name,))
 
         traverse(model)
+        self.manual_tensors = list(manual_params) + list(self.model.buffers())
 
     def cuda(self):
         if not self.enable:
             self.model.cuda()
 
         else:
-            for p in self.manual_params:
+            for p in self.manual_tensors:
                 p.data = p.data.cuda(non_blocking=True)
 
             # reset initial state
@@ -215,7 +221,7 @@ class PerLayerOffloadWithBackward:
             self.model.cpu()
 
         else:
-            for p in self.manual_params:
+            for p in self.manual_tensors:
                 p.data = p.data.cpu()
 
             for key in self.gpu_param_dict.keys():
@@ -229,6 +235,7 @@ class PerLayerOffloadWithBackward:
         return torch.cat([x.detach().view(-1) for x in module.parameters()], dim=0)
 
     @staticmethod
+    @torch.compiler.disable()
     def _view_into_flat_param(module: nn.Module, flat_param: Tensor):
         offset = 0
         for p in module.parameters():
@@ -246,7 +253,6 @@ class PerLayerOffloadWithBackward:
         ]
 
         def create_pre_forward_hook(idx: int):
-            @torch.compiler.disable()
             def pre_forward_hook(module, args):
                 # set current layer to the compute buffer
                 compute_buffer, transfer_buffer = self.gpu_param_dict[key]
@@ -271,7 +277,6 @@ class PerLayerOffloadWithBackward:
             return pre_forward_hook
 
         def create_pre_backward_hook(idx: int):
-            @torch.compiler.disable()
             def pre_backward_hook(module, grad_output):
                 # NOTE: the order of compute and transfer buffer is swapped in backward
                 transfer_buffer, compute_buffer = self.gpu_param_dict[key]
@@ -316,17 +321,21 @@ class PerLayerOffloadWithBackwardGradient:
         self.optim_cls = optim_cls
         self.optim_kwargs = optim_kwargs
 
-        self.stream = torch.cuda.Stream()
-        self.manual_params = []
+        # use separate streams for param and grad offload
+        # in eager mode, using 1 stream is fine. but with torch.compile,
+        # kernel launch + hook order is a bit strange, leading to unnecessary waiting.
+        self.param_stream = torch.cuda.Stream()
+        self.grad_stream = torch.cuda.Stream()
 
         self.key2flat_params_cpu = dict()
         self.key2flat_params_gpu = dict()  # for each key, we only allocate 2 buffers
-        self.key2sync_event = dict()
 
         self.param2cpu_view = dict()
         self.param2cpu_grad = dict()
         self.param2optim = dict()
-        self.param_queue = []
+        self.param_queue = []  # we will run optimizer in this order
+
+        manual_params = set()
 
         def traverse(module: nn.Module, key: tuple[str, ...] = ()):
             if (
@@ -338,19 +347,20 @@ class PerLayerOffloadWithBackwardGradient:
 
             else:
                 for p in module.parameters(recurse=False):
-                    self.manual_params.append(p)
+                    manual_params.add(p)
                 for name, child in module.named_children():
                     traverse(child, key + (name,))
 
         traverse(model)
-        self.manual_optim = optim_cls(self.manual_params, **(optim_kwargs or dict()))
+        self.manual_tensors = list(manual_params) + list(self.model.buffers())
+        self.manual_optim = optim_cls(self.manual_tensors, **(optim_kwargs or dict()))
 
     def cuda(self):
         if not self.enable:
             self.model.cuda()
 
         else:
-            for p in self.manual_params + list(self.model.buffers()):
+            for p in self.manual_tensors:
                 p.data = p.data.cuda(non_blocking=True)
 
             # reset initial state
@@ -365,7 +375,7 @@ class PerLayerOffloadWithBackwardGradient:
             self.model.cpu()
 
         else:
-            for p in self.manual_params + list(self.model.buffers()):
+            for p in self.manual_tensors:
                 p.data = p.data.cpu()
 
             for key in self.key2flat_params_gpu.keys():
@@ -379,6 +389,7 @@ class PerLayerOffloadWithBackwardGradient:
         return torch.cat([x.detach().view(-1) for x in module.parameters()], dim=0)
 
     @staticmethod
+    @torch.compiler.disable()
     def _view_into_flat_param(module: nn.Module, flat_param: Tensor):
         offset = 0
         for p in module.parameters():
@@ -394,20 +405,18 @@ class PerLayerOffloadWithBackwardGradient:
             self._get_flat_param(module_list[0]).cuda(),  # compute buffer
             self._get_flat_param(module_list[-1]).cuda(),  # transfer buffer
         ]
-        self.key2sync_event[key] = torch.cuda.Event()  # marks the end of transferring the next layer
 
         def create_pre_forward_hook(idx: int):
-            @torch.compiler.disable()
             def pre_forward_hook(module, args):
                 # set current layer to the compute buffer
                 compute_buffer, transfer_buffer = self.key2flat_params_gpu[key]
                 self._view_into_flat_param(module, compute_buffer)
 
                 current_stream = torch.cuda.current_stream()
-                current_stream.wait_stream(self.stream)
-                self.stream.wait_stream(current_stream)
+                current_stream.wait_stream(self.param_stream)
+                self.param_stream.wait_stream(current_stream)
 
-                with torch.cuda.stream(self.stream):
+                with torch.cuda.stream(self.param_stream):
                     n = len(self.key2flat_params_cpu[key])
                     cpu_flat_buffer = self.key2flat_params_cpu[key][(idx + 1) % n]
                     transfer_buffer.copy_(cpu_flat_buffer, non_blocking=True)
@@ -418,24 +427,19 @@ class PerLayerOffloadWithBackwardGradient:
             return pre_forward_hook
 
         def create_pre_backward_hook(idx: int):
-            @torch.compiler.disable()
             def pre_backward_hook(module, grad_output):
                 # NOTE: the order of compute and transfer buffer is swapped in backward
                 transfer_buffer, compute_buffer = self.key2flat_params_gpu[key]
                 self._view_into_flat_param(module, compute_buffer)
 
                 current_stream = torch.cuda.current_stream()
-                self.stream.wait_stream(current_stream)
+                self.param_stream.wait_stream(current_stream)
+                current_stream.wait_stream(self.param_stream)
 
-                # we replace .wait_stream() with .wait_event() here since our transfer stream is
-                # also offloading gradients, which the compute stream does not need to wait for.
-                current_stream.wait_event(self.key2sync_event[key])
-
-                with torch.cuda.stream(self.stream):
+                with torch.cuda.stream(self.param_stream):
                     n = len(module_list)
                     cpu_flat_buffer = self.key2flat_params_cpu[key][(idx - 1) % n]
                     transfer_buffer.copy_(cpu_flat_buffer, non_blocking=True)
-                self.stream.record_event(self.key2sync_event[key])
 
                 self.key2flat_params_gpu[key] = [compute_buffer, transfer_buffer]
 
@@ -444,19 +448,18 @@ class PerLayerOffloadWithBackwardGradient:
         # NOTE: apparently when nn.Module.register_full_backward_hook() fires, param.grad
         # is not guaranteed to be computed https://github.com/pytorch/pytorch/issues/86051
         # hence, we have to use Tensor.register_post_accumulate_grad_hook() to offload grads.
-        @torch.compiler.disable()
         def post_grad_hook(p: Tensor):
             # make sure p.grad finished being computed
-            self.stream.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(self.stream):
+            self.grad_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(self.grad_stream):
                 self.param2cpu_grad[p].copy_(p.grad, non_blocking=True)
 
             # marks after grad offload finishes
-            self.stream.record_event(self.param2optim[p][1])
+            self.grad_stream.record_event(self.param2optim[p][1])
             self.param_queue.append(p)  # we will execute optim step in this order
 
             # free grad memory
-            p.grad.record_stream(self.stream)
+            p.grad.record_stream(self.grad_stream)
             p.grad = None
 
             # if we want to do optimizer step on GPU
@@ -476,31 +479,36 @@ class PerLayerOffloadWithBackwardGradient:
 
             offset = 0
             for p in curr_layer.parameters():
-                self.param2cpu_view[p] = flat_param[offset : offset + p.numel()]
+                cpu_param = flat_param[offset : offset + p.numel()].view(p.shape)
+                self.param2cpu_view[p] = cpu_param
                 offset += p.numel()
 
-            # pre-allocate pinned memory for gradients, and install hooks to offload grads
-            for p in curr_layer.parameters():
+                # pre-allocate pinned memory for gradients, and install hooks to offload grads
                 if p.requires_grad:
-                    self.param2cpu_grad[p] = torch.zeros(p.shape, dtype=p.dtype, device="cpu", pin_memory=True)
-                    self.param2optim[p] = (self.optim_cls([p], **(self.optim_kwargs or dict())), torch.cuda.Event())
+                    self.param2cpu_grad[p] = torch.empty(p.shape, dtype=p.dtype, device="cpu", pin_memory=True)
+                    self.param2optim[p] = (
+                        self.optim_cls([cpu_param], **(self.optim_kwargs or dict())),
+                        torch.cuda.Event(),
+                    )
                     p.register_post_accumulate_grad_hook(post_grad_hook)
 
             curr_layer.register_forward_pre_hook(create_pre_forward_hook(i))
             curr_layer.register_full_backward_pre_hook(create_pre_backward_hook(i))
 
+    @torch.no_grad()
     def optim_step(self):
         self.manual_optim.step()
 
         for p in self.param_queue:
             optim, sync_event = self.param2optim[p]
             sync_event.synchronize()  # wait for grad offload to finish
-            p.data = self.param2cpu_view[p].view(p.shape)
-            p.grad = self.param2cpu_grad[p]
+            self.param2cpu_view[p].grad = self.param2cpu_grad[p]
             optim.step()
 
         # manually prefetch 1st layer, since it won't be prefetched in pre-forward hook
-        with torch.cuda.stream(self.stream):
+        # make sure backward finishes
+        self.param_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(self.param_stream):
             for key in self.key2flat_params_cpu.keys():
                 self.key2flat_params_gpu[key][0].copy_(self.key2flat_params_cpu[key][0], non_blocking=True)
 
@@ -513,10 +521,12 @@ class PerLayerOffloadWithBackwardGradient:
 
 
 if __name__ == "__main__":
+    import os
+
     from flux_infer import flux_img_ids
     from modelling import Flux, FluxConfig
 
-    # also need to set CUBLAS_WORKSPACE_CONFIG=:4096:8
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     torch.use_deterministic_algorithms(True)
 
     config = FluxConfig(depth=3, depth_single_blocks=6, hidden_size=2048, num_heads=16)
