@@ -321,17 +321,13 @@ class PerLayerOffloadWithBackwardGradient:
         self.optim_cls = optim_cls
         self.optim_kwargs = optim_kwargs
 
-        # use separate streams for param and grad offload
-        # in eager mode, using 1 stream is fine. but with torch.compile,
-        # kernel launch + hook order is a bit strange, leading to unnecessary waiting.
-        self.param_stream = torch.cuda.Stream()
-        self.grad_stream = torch.cuda.Stream()
+        self.stream = torch.cuda.Stream()
+        self.disable_forward_hook = False
 
-        self.key2flat_params_cpu = dict()
-        self.key2flat_params_gpu = dict()  # for each key, we only allocate 2 buffers
+        self.key2flat_gpu_buffer = dict()
+        self.key2flat_cpu_params = dict()
 
         self.param2cpu_view = dict()
-        self.param2cpu_grad = dict()
         self.param2optim = dict()
         self.param_queue = []  # we will run optimizer in this order
 
@@ -353,7 +349,7 @@ class PerLayerOffloadWithBackwardGradient:
 
         traverse(model)
         self.manual_tensors = list(manual_params) + list(self.model.buffers())
-        self.manual_optim = optim_cls(self.manual_tensors, **(optim_kwargs or dict()))
+        self.manual_optim = optim_cls(manual_params, **(optim_kwargs or dict()))
 
     def cuda(self):
         if not self.enable:
@@ -363,11 +359,6 @@ class PerLayerOffloadWithBackwardGradient:
             for p in self.manual_tensors:
                 p.data = p.data.cuda(non_blocking=True)
 
-            # reset initial state
-            for key in self.key2flat_params_gpu.keys():
-                self.key2flat_params_gpu[key][0].data = self.key2flat_params_cpu[key][0].cuda(non_blocking=True)
-                self.key2flat_params_gpu[key][1].data = self.key2flat_params_cpu[key][-1].cuda(non_blocking=True)
-
         return self
 
     def cpu(self):
@@ -376,11 +367,7 @@ class PerLayerOffloadWithBackwardGradient:
 
         else:
             for p in self.manual_tensors:
-                p.data = p.data.cpu()
-
-            for key in self.key2flat_params_gpu.keys():
-                self.key2flat_params_gpu[key][0].data = self.key2flat_params_cpu[key][0]
-                self.key2flat_params_gpu[key][1].data = self.key2flat_params_cpu[key][-1]
+                p.data = self.param2cpu.get(p, p.data.cpu())
 
         return self
 
@@ -397,51 +384,49 @@ class PerLayerOffloadWithBackwardGradient:
             offset += p.numel()
 
     def _register_sequential(self, module_list: nn.Sequential | nn.ModuleList, key: tuple[str, ...]):
-        # double buffering: pre-allocate GPU memory for 2 layers
-        # we will alternate between the two: compute on 1st buffer,
-        # while transfering 2nd buffer from CPU, then swap.
-        self.key2flat_params_cpu[key] = []
-        self.key2flat_params_gpu[key] = [
-            self._get_flat_param(module_list[0]).cuda(),  # compute buffer
-            self._get_flat_param(module_list[-1]).cuda(),  # transfer buffer
+        self.key2flat_gpu_buffer[key] = [
+            self._get_flat_param(module_list[0]).cuda(),
+            self._get_flat_param(module_list[-1]).cuda(),
         ]
+        self.key2flat_cpu_params[key] = []
 
         def create_pre_forward_hook(idx: int):
-            def pre_forward_hook(module, args):
-                # set current layer to the compute buffer
-                compute_buffer, transfer_buffer = self.key2flat_params_gpu[key]
+            def pre_forward_hook(module: nn.Module, inputs: tuple):
+                # when there is activation checkpointing, .forward() is re-run in backward pass.
+                # we use this flag to disable forward hooks in this case. set it to True before
+                # calling loss.backward() and set it back to False after that.
+                if self.disable_forward_hook:
+                    return
+
+                compute_buffer, transfer_buffer = self.key2flat_gpu_buffer[key]
                 self._view_into_flat_param(module, compute_buffer)
 
                 current_stream = torch.cuda.current_stream()
-                current_stream.wait_stream(self.param_stream)
-                self.param_stream.wait_stream(current_stream)
+                current_stream.wait_stream(self.stream)
+                self.stream.wait_stream(current_stream)
 
-                with torch.cuda.stream(self.param_stream):
-                    n = len(self.key2flat_params_cpu[key])
-                    cpu_flat_buffer = self.key2flat_params_cpu[key][(idx + 1) % n]
-                    transfer_buffer.copy_(cpu_flat_buffer, non_blocking=True)
+                with torch.cuda.stream(self.stream):
+                    next_layer_cpu = self.key2flat_cpu_params[key][(idx + 1) % len(module_list)]
+                    transfer_buffer.copy_(next_layer_cpu, non_blocking=True)
 
-                # swap compute and transfer buffers
-                self.key2flat_params_gpu[key] = [transfer_buffer, compute_buffer]
+                self.key2flat_gpu_buffer[key] = [transfer_buffer, compute_buffer]
 
             return pre_forward_hook
 
         def create_pre_backward_hook(idx: int):
             def pre_backward_hook(module, grad_output):
-                # NOTE: the order of compute and transfer buffer is swapped in backward
-                transfer_buffer, compute_buffer = self.key2flat_params_gpu[key]
+                transfer_buffer, compute_buffer = self.key2flat_gpu_buffer[key]
                 self._view_into_flat_param(module, compute_buffer)
 
                 current_stream = torch.cuda.current_stream()
-                self.param_stream.wait_stream(current_stream)
-                current_stream.wait_stream(self.param_stream)
+                current_stream.wait_stream(self.stream)
+                self.stream.wait_stream(current_stream)
 
-                with torch.cuda.stream(self.param_stream):
-                    n = len(module_list)
-                    cpu_flat_buffer = self.key2flat_params_cpu[key][(idx - 1) % n]
-                    transfer_buffer.copy_(cpu_flat_buffer, non_blocking=True)
+                with torch.cuda.stream(self.stream):
+                    next_layer_cpu = self.key2flat_cpu_params[key][(idx - 1) % len(module_list)]
+                    transfer_buffer.copy_(next_layer_cpu, non_blocking=True)
 
-                self.key2flat_params_gpu[key] = [compute_buffer, transfer_buffer]
+                self.key2flat_gpu_buffer[key] = [compute_buffer, transfer_buffer]
 
             return pre_backward_hook
 
@@ -450,16 +435,15 @@ class PerLayerOffloadWithBackwardGradient:
         # hence, we have to use Tensor.register_post_accumulate_grad_hook() to offload grads.
         def post_grad_hook(p: Tensor):
             # make sure p.grad finished being computed
-            self.grad_stream.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(self.grad_stream):
-                self.param2cpu_grad[p].copy_(p.grad, non_blocking=True)
+            self.stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(self.stream):
+                self.param2cpu_view[p].grad.copy_(p.grad, non_blocking=True)
 
-            # marks after grad offload finishes
-            self.grad_stream.record_event(self.param2optim[p][1])
-            self.param_queue.append(p)  # we will execute optim step in this order
+            # we will execute optim step in this order
+            self.param_queue.append((p, self.stream.record_event()))
 
             # free grad memory
-            p.grad.record_stream(self.grad_stream)
+            p.grad.record_stream(self.stream)
             p.grad = None
 
             # if we want to do optimizer step on GPU
@@ -475,21 +459,18 @@ class PerLayerOffloadWithBackwardGradient:
         desc = f"Copying params to pinned memory {key}"
         for i, curr_layer in enumerate(tqdm(module_list, desc=desc, dynamic_ncols=True)):
             flat_param = self._get_flat_param(curr_layer).cpu().pin_memory()
-            self.key2flat_params_cpu[key].append(flat_param)
+            self.key2flat_cpu_params[key].append(flat_param)
 
             offset = 0
             for p in curr_layer.parameters():
                 cpu_param = flat_param[offset : offset + p.numel()].view(p.shape)
-                self.param2cpu_view[p] = cpu_param
                 offset += p.numel()
+                self.param2cpu_view[p] = cpu_param
 
                 # pre-allocate pinned memory for gradients, and install hooks to offload grads
                 if p.requires_grad:
-                    self.param2cpu_grad[p] = torch.empty(p.shape, dtype=p.dtype, device="cpu", pin_memory=True)
-                    self.param2optim[p] = (
-                        self.optim_cls([cpu_param], **(self.optim_kwargs or dict())),
-                        torch.cuda.Event(),
-                    )
+                    cpu_param.grad = torch.empty(p.shape, dtype=p.dtype, device="cpu", pin_memory=True)
+                    self.param2optim[p] = self.optim_cls([cpu_param], **(self.optim_kwargs or dict()))
                     p.register_post_accumulate_grad_hook(post_grad_hook)
 
             curr_layer.register_forward_pre_hook(create_pre_forward_hook(i))
@@ -497,67 +478,20 @@ class PerLayerOffloadWithBackwardGradient:
 
     @torch.no_grad()
     def optim_step(self):
+        after_bwd_event = torch.cuda.current_stream().record_event()
         self.manual_optim.step()
 
-        for p in self.param_queue:
-            optim, sync_event = self.param2optim[p]
+        for p, sync_event in self.param_queue:
             sync_event.synchronize()  # wait for grad offload to finish
-            self.param2cpu_view[p].grad = self.param2cpu_grad[p]
-            optim.step()
+            self.param2optim[p].step()
 
         # manually prefetch 1st layer, since it won't be prefetched in pre-forward hook
         # make sure backward finishes
-        self.param_stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(self.param_stream):
-            for key in self.key2flat_params_cpu.keys():
-                self.key2flat_params_gpu[key][0].copy_(self.key2flat_params_cpu[key][0], non_blocking=True)
+        self.stream.wait_event(after_bwd_event)
+        with torch.cuda.stream(self.stream):
+            for key in self.key2flat_cpu_params.keys():
+                self.key2flat_gpu_buffer[key][0].copy_(self.key2flat_cpu_params[key][0], non_blocking=True)
 
     def optim_zero_grad(self):
         self.manual_optim.zero_grad()
-        for p in self.param_queue:
-            optim, _ = self.param2optim[p]
-            optim.zero_grad()
         self.param_queue = []
-
-
-if __name__ == "__main__":
-    import os
-
-    from flux_infer import flux_img_ids
-    from modelling import Flux, FluxConfig
-
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-    torch.use_deterministic_algorithms(True)
-
-    config = FluxConfig(depth=3, depth_single_blocks=6, hidden_size=2048, num_heads=16)
-    flux = Flux(config).bfloat16().cuda()
-
-    height = width = 1024
-    latents = torch.randn(1, height // 16 * width // 16, 64).bfloat16().cuda()
-    img_ids = flux_img_ids(1, height // 16, width // 16).bfloat16().cuda()
-    txt = torch.randn(1, 512, 4096).bfloat16().cuda()
-    txt_ids = torch.zeros(1, txt.shape[1], 3).bfloat16().cuda()
-    vec = torch.randn(1, 768).bfloat16().cuda()
-    t_vec = torch.rand(1).bfloat16().cuda()
-    guidance = (torch.ones(1) * 3.5).bfloat16().cuda()
-
-    out = flux(latents, img_ids, txt, txt_ids, t_vec, vec, guidance)
-    out.sum().backward()
-    grads = {name: p.grad.cpu() for name, p in flux.named_parameters()}
-
-    for p in flux.parameters():
-        p.grad = None
-    flux.cpu()
-    # PerLayerOffloadWithBackward(flux).cuda()
-    offloader = PerLayerOffloadWithBackwardGradient(flux, torch.optim.AdamW, dict(fused=True)).cuda()
-
-    out_offload = flux(latents, img_ids, txt, txt_ids, t_vec, vec, guidance)
-    out_offload.sum().backward()
-    grads_offload = {name: offloader.param2cpu_grad.get(p, p.grad).cpu() for name, p in flux.named_parameters()}
-
-    torch.cuda.synchronize()
-    torch.testing.assert_close(out, out_offload)
-    torch.testing.assert_close(grads, grads_offload)
-
-    offloader.optim_step()
-    offloader.optim_zero_grad()
