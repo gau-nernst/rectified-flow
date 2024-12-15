@@ -141,7 +141,7 @@ class PerLayerOffloadCUDAStream:
 
             else:
                 for p in module.parameters(recurse=False):
-                    manual_params.update(p)
+                    manual_params.add(p)
                 for child in module.children():
                     traverse(child)
 
