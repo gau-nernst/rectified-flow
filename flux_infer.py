@@ -107,7 +107,7 @@ class FluxGenerator:
             pbar=pbar,
             compile=compile,
         )
-        return torch.compile(flux_decode, disable=not compile)(self.ae, latents, (latent_h, latent_w))
+        return flux_decode(self.ae, latents, (latent_h, latent_w))
 
 
 @torch.no_grad()

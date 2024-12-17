@@ -107,7 +107,8 @@ def arcface_crop(img: np.ndarray, keypoints: np.ndarray) -> np.ndarray:
     # where s is scale
     #       theta is rotation
     #       tx, ty is translation
-    M, _ = cv2.estimateAffinePartial2D(keypoints, ARCFACE_KEYPOINTS)
+    # default RANSAC method is worse on some cases
+    M, _ = cv2.estimateAffinePartial2D(keypoints, ARCFACE_KEYPOINTS, method=cv2.LMEDS)
     scale = (M[0, 0] ** 2 + M[0, 1] ** 2) ** 0.5
     M /= scale  # remove scale
 
