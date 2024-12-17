@@ -29,8 +29,6 @@ class YOLOv8Face:
         self.sess = onnxruntime.InferenceSession(local_path)
         self.output_names = [x.name for x in self.sess.get_outputs()]
         self.anchors = dict()
-        self.score_th = 0.6
-        self.nms_th = 0.5
 
         for stride in (8, 16, 32):
             x = torch.arange(self.input_size // stride)
@@ -43,11 +41,14 @@ class YOLOv8Face:
         h = round(img.height * scale)
         w = round(img.width * scale)
 
+        if img.mode != "RGB":
+            img = img.convert("RGB")
         img_np = np.zeros((self.input_size, self.input_size, 3), dtype=np.uint8)
         img_np[:h, :w] = img.resize((w, h), Image.Resampling.BILINEAR)
         return img_np, 1 / scale
 
-    def __call__(self, img: Image.Image):
+    def __call__(self, img: Image.Image, score_th: float = 0.6, nms_th: float = 0.8):
+        """Returns bboxes (xyxy), scores, keypoints"""
         img_np, scale = self._resize_img(img)
         img_np = img_np.astype(np.float32) / 255.0
         img_np = img_np.transpose(2, 0, 1)  # HWC -> CHW
@@ -78,7 +79,7 @@ class YOLOv8Face:
             kpts_y = kpts[..., 1::3] * 2.0 + points[..., 1:]
             kpts = torch.stack([kpts_x, kpts_y], dim=-1).view(-1, 5, 2) * (stride * scale)
 
-            mask = scores >= self.score_th
+            mask = scores >= score_th
             all_bboxes.append(bboxes[mask])
             all_scores.append(scores[mask])
             all_kpts.append(kpts[mask])
@@ -87,7 +88,7 @@ class YOLOv8Face:
         all_scores = torch.cat(all_scores, dim=0)
         all_kpts = torch.cat(all_kpts, dim=0)
 
-        indices = torchvision.ops.nms(all_bboxes, all_scores, 0.8)
+        indices = torchvision.ops.nms(all_bboxes, all_scores, nms_th)
         return all_bboxes[indices], all_scores[indices], all_kpts[indices]
 
 
