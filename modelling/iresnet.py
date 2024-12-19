@@ -54,8 +54,6 @@ class IResNet(nn.Module):
         output_dim: int = 512,
     ) -> None:
         super().__init__()
-        output_channel = 512
-
         total_stride = int(2 ** len(blocks))
         feat_h = input_size[0] // total_stride
         feat_w = input_size[1] // total_stride
@@ -71,11 +69,12 @@ class IResNet(nn.Module):
             for bottleneck in block:
                 self.body.append(BasicBlockIR(bottleneck.in_channel, bottleneck.depth, bottleneck.stride))
 
+        channel = blocks[-1][-1].depth
         self.output_layer = nn.Sequential(
-            nn.BatchNorm2d(output_channel),
+            nn.BatchNorm2d(channel),
             nn.Dropout(0.4),
             Flatten(),
-            nn.Linear(output_channel * feat_h * feat_w, output_dim),
+            nn.Linear(channel * feat_h * feat_w, output_dim),
             nn.BatchNorm1d(output_dim, affine=False),
         )
 
@@ -89,6 +88,7 @@ class IResNet(nn.Module):
                     nn.init.zeros_(m.bias)
 
     def forward_features(self, x: Tensor):
+        x = x.to(self.input_layer[0].weight.dtype)
         x = self.input_layer(x)
         x = self.body(x)
         return x
@@ -99,7 +99,7 @@ class IResNet(nn.Module):
         return x
 
 
-def load_adaface_ir101(dtype: torch.dtype = torch.float32):
+def load_adaface_ir101(dtype: torch.dtype = torch.float16):
     blocks = [
         get_block(in_channel=64, depth=64, num_units=3),
         get_block(in_channel=64, depth=128, num_units=13),
@@ -109,6 +109,8 @@ def load_adaface_ir101(dtype: torch.dtype = torch.float32):
     with torch.device("meta"):
         model = IResNet(blocks)
 
+    # NOTE: the model was trained with DDP + mixed-precision FP16.
+    # eval results show that mixed-precision FP16 and full FP16 have the same metrics.
     state_dict = load_hf_state_dict("minchul/cvlface_adaface_ir101_webface12m", "model.safetensors")
     state_dict = {k.removeprefix("model.net."): v for k, v in state_dict.items()}
     model.load_state_dict(state_dict, assign=True)

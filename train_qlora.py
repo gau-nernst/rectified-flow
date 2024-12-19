@@ -80,6 +80,7 @@ class FluxLatentDataset(Dataset):
         return self.data["latents"].shape[0]
 
 
+@torch.no_grad()
 def save_images(
     flux: Flux,
     ae: AutoEncoder,
@@ -150,7 +151,7 @@ def compute_loss(
     latent_h = img_size[0] // 16
     latent_w = img_size[1] // 16
     img_ids = flux_img_ids(bsize, latent_h, latent_w).cuda()
-    txt_ids = torch.zeros(bsize, 512, 3, device="cuda")
+    txt_ids = torch.zeros(bsize, t5_embeds.shape[1], 3, device="cuda")
     guidance = torch.full((bsize,), 3.5, device="cuda", dtype=torch.bfloat16)  # FLUX-dev default
 
     latents = latents.float()  # FP32
@@ -268,7 +269,7 @@ if __name__ == "__main__":
     while step < args.num_steps:
         for _ in range(args.gradient_accumulation):
             imgs, prompts = next(dloader_img_iter)
-            latents = torch.compile(flux_encode, disable=not args.compile)(ae, imgs.cuda(), sample=True)
+            latents = flux_encode(ae, imgs.cuda(), sample=True)
 
             if dloader_latent_iter is not None:
                 latents2, prompts2 = next(dloader_latent_iter)
@@ -277,7 +278,7 @@ if __name__ == "__main__":
 
             t5_embeds = t5(prompts)
             clip_embeds = clip(prompts)
-            loss = loss_fn(flux, latents, t5_embeds, clip_embeds, args.img_size, time_sampler)
+            loss = loss_fn(flux, latents, t5_embeds, clip_embeds, imgs.shape[2:], time_sampler)
             loss.backward()
 
         if step % args.log_interval == 0:

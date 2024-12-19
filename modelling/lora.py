@@ -4,7 +4,7 @@ from torch import Tensor, nn
 
 
 class LoRALinear(nn.Linear):
-    def init_lora(self, rank: int = 8, scale: float = 1.0, dtype: torch.dtype = torch.float32) -> None:
+    def init_lora(self, rank: int = 8, scale: float = 1.0, dtype: torch.dtype | None = torch.float32) -> None:
         """By default, use FP32 for LoRA weights."""
         assert rank > 0
         self.rank = rank

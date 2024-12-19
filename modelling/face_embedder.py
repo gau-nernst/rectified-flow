@@ -92,6 +92,25 @@ class YOLOv8Face:
         return all_bboxes[indices], all_scores[indices], all_kpts[indices]
 
 
+_int3 = tuple[int, int, int]
+
+
+def draw_faces(
+    img: np.ndarray,
+    bboxes: np.ndarray,
+    kpts: np.ndarray,
+    box_color: _int3 = (255, 0, 0),
+    kpt_color: _int3 = (0, 255, 0),
+):
+    """bboxes in xyxy format"""
+    img = img.copy()
+    for (x1, y1, x2, y2), kpt in zip(bboxes, kpts):
+        cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), box_color)
+        for x, y in kpt:
+            cv2.circle(img, (int(x), int(y)), 5, kpt_color, -1)
+    return img
+
+
 # https://github.com/deepinsight/insightface/blob/2e29b41a226d5344aab36d3a470a55a33bd50af0/recognition/arcface_mxnet/common/face_align.py
 ARCFACE_IMG_SIZE = 112
 ARCFACE_KEYPOINTS = np.array(
