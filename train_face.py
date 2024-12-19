@@ -22,7 +22,7 @@ import wandb
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader, Dataset, IterableDataset, default_collate, get_worker_info
-from torchvision.io import decode_image
+from torchvision.io import ImageReadMode, decode_image
 from torchvision.transforms import v2
 from tqdm import tqdm
 
@@ -81,11 +81,12 @@ class FaceTrainDataset(IterableDataset):
                 if counter != worker_id:
                     continue
 
-                img = decode_image(self.img_dir / self.filenames[idx])
+                img_path = self.img_dir / self.filenames[idx]
+                img = decode_image(img_path, mode=ImageReadMode.RGB, apply_exif_orientation=True)
                 log_ratio = math.log(img.shape[2] / img.shape[1])
                 _, bucket_idx = min((abs(log_ratio - x), _i) for _i, x in enumerate(self.log_ratios))
 
-                kpt = self.kpts[idx]
+                kpt = self.kpts[idx].copy()
                 kpt[..., 0] *= img.shape[2]
                 kpt[..., 1] *= img.shape[1]
                 img_np = img.permute(1, 2, 0).contiguous().numpy()
@@ -127,9 +128,10 @@ class FaceTestDataset(Dataset):
         self.prompts = meta["prompt"].tolist()
 
     def __getitem__(self, idx: int):
-        img = decode_image(self.img_dir / self.filenames[idx])
+        img_path = self.img_dir / self.filenames[idx]
+        img = decode_image(img_path, mode=ImageReadMode.RGB, apply_exif_orientation=True)
 
-        kpt = self.kpts[idx]
+        kpt = self.kpts[idx].copy()
         kpt[..., 0] *= img.shape[2]
         kpt[..., 1] *= img.shape[1]
         img_np = img.permute(1, 2, 0).contiguous().numpy()
