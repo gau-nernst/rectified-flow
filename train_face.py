@@ -260,8 +260,8 @@ if __name__ == "__main__":
         nn.SiLU(),
         nn.Linear(4096 * 3, 4096),
     ).cuda()
-    nn.init.zeros_(face_redux[-1].weight)
-    nn.init.zeros_(face_redux[-1].bias)
+    # nn.init.zeros_(face_redux[-1].weight)
+    # nn.init.zeros_(face_redux[-1].bias)
 
     optim = torch.optim.AdamW(face_redux.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True)
 

@@ -1,4 +1,4 @@
-from .autoencoder import AutoEncoder, AutoEncoderConfig, load_autoencoder, load_flux_autoencoder
+from .autoencoder import AutoEncoder, AutoEncoderConfig, load_autoencoder, load_flux_autoencoder, load_sd3_autoencoder
 from .face_embedder import FaceEmbedder, YOLOv8Face
 from .flux import Flux, FluxConfig, load_flux, load_flux_redux, load_shuttle
 from .iresnet import IResNet, load_adaface_ir101

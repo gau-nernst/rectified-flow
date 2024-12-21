@@ -236,7 +236,7 @@ if __name__ == "__main__":
     for module_list in [flux.double_blocks, flux.single_blocks]:
         quantize_(module_list, NF4Tensor, "cuda").cpu()
         LoRALinear.to_lora(module_list, rank=args.lora)
-    ae = load_flux_autoencoder()
+    ae = load_flux_autoencoder().cuda()
     optim = torch.optim.AdamW(flux.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True)
     logger.info(flux)
 
@@ -259,7 +259,6 @@ if __name__ == "__main__":
     # inference before any training
     step = 0
     flux.cuda()
-    ae.cuda()
     save_images(flux, ae, t5, clip, args.test_prompt_path, img_dir / f"step{step:06d}", args.img_size)
 
     pbar = tqdm(total=args.num_steps, dynamic_ncols=True)
