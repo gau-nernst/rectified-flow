@@ -3,5 +3,5 @@ from .face_embedder import FaceEmbedder, YOLOv8Face
 from .flux import Flux, FluxConfig, load_flux, load_flux_redux, load_shuttle
 from .iresnet import IResNet, load_adaface_ir101
 from .lora import LoRALinear
-from .text_embedder import TextEmbedder, load_clip_text, load_t5
+from .text_embedder import TextEmbedder, load_clip_l, load_openclip_bigg, load_t5
 from .utils import load_hf_state_dict

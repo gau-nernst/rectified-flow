@@ -33,7 +33,7 @@ from modelling import (
     IResNet,
     TextEmbedder,
     load_adaface_ir101,
-    load_clip_text,
+    load_clip_l,
     load_flux,
     load_flux_autoencoder,
     load_t5,
@@ -251,7 +251,7 @@ if __name__ == "__main__":
 
     t5 = load_t5().eval()
     PerLayerOffloadCUDAStream(t5).cuda()
-    clip = load_clip_text().eval().cuda()
+    clip = load_clip_l().bfloat16().eval().cuda()
 
     # same MLP as redux
     adaface = load_adaface_ir101().cuda().eval()

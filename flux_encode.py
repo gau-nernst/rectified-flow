@@ -5,7 +5,7 @@ import torch
 from tqdm import tqdm
 
 from flux_infer import flux_generate
-from modelling import load_clip_text, load_flux, load_t5
+from modelling import load_clip_l, load_flux, load_t5
 from offload import PerLayerOffloadCUDAStream
 
 if __name__ == "__main__":
@@ -33,7 +33,7 @@ if __name__ == "__main__":
 
     flux = load_flux()
     t5 = load_t5()
-    clip = load_clip_text().cuda()
+    clip = load_clip_l().bfloat16().cuda()
 
     PerLayerOffloadCUDAStream(flux).cuda()
     PerLayerOffloadCUDAStream(t5).cuda()

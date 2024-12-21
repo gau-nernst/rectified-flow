@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from tqdm import tqdm
 
-from modelling import AutoEncoder, Flux, TextEmbedder, load_clip_text, load_flux, load_flux_autoencoder, load_t5
+from modelling import AutoEncoder, Flux, TextEmbedder, load_clip_l, load_flux, load_flux_autoencoder, load_t5
 from offload import PerLayerOffloadCUDAStream
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ class FluxGenerator:
         # TODO: investigate max_length. currently T5 and CLIP have different max_length
         # -> CLIP will truncate long prompts.
         self.t5 = t5 or load_t5()  #  9.5 GB in BF16
-        self.clip = clip or load_clip_text()  #  246 MB in BF16
+        self.clip = clip or load_clip_l().bfloat16()  #  246 MB in BF16
 
         # autoencoder and clip are small, don't need to offload
         self.t5_offloader = PerLayerOffloadCUDAStream(self.t5, enable=offload_t5)

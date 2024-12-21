@@ -28,7 +28,7 @@ from modelling import (
     Flux,
     LoRALinear,
     TextEmbedder,
-    load_clip_text,
+    load_clip_l,
     load_flux,
     load_flux_autoencoder,
     load_t5,
@@ -246,7 +246,7 @@ if __name__ == "__main__":
 
     t5 = load_t5()
     PerLayerOffloadCUDAStream(t5).cuda()
-    clip = load_clip_text().cuda()
+    clip = load_clip_l().bfloat16().cuda()
 
     time_sampler = eval(args.time_sampler, dict(uniform=uniform, logit_normal=logit_normal))
 
