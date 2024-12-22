@@ -4,6 +4,7 @@ Supported models:
 
 - [FLUX.1-dev](https://huggingface.co/black-forest-labs/FLUX.1-dev)
 - [FLUX.1-Redux-dev](https://huggingface.co/black-forest-labs/FLUX.1-Redux-dev)
+- SD3.5 [medium](https://huggingface.co/stabilityai/stable-diffusion-3.5-medium) and [large](https://huggingface.co/stabilityai/stable-diffusion-3.5-large)
 
 Supported features:
 
@@ -13,7 +14,7 @@ Supported features:
 - Train on pre-computed latents
 
 TODO:
-- (maybe) more schedules?
+- (maybe) more solvers?
 - Investigate the impact of T5 embeddings. SD3 paper says it's more important for text rendering.
 
 Resources:
