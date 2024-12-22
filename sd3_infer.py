@@ -52,10 +52,10 @@ class SD3Generator:
             m.cuda()
         return self
 
-    def embed_prompt(self, t5_prompt: list[str], clip_prompt: list[str]):
-        t5_embeds = self.t5(t5_prompt).cuda()  # (B, 256, 4096)
-        clip_l_vecs, clip_l_embeds = self.clip_l(clip_prompt)  # (B, 768) and (B, 77, 768)
-        clip_g_vecs, clip_g_embeds = self.clip_g(clip_prompt)  # (B, 1280) and (B, 77, 1280)
+    def embed_prompt(self, prompt: list[str]):
+        t5_embeds = self.t5(prompt).cuda()  # (B, 256, 4096)
+        clip_l_vecs, clip_l_embeds = self.clip_l(prompt)  # (B, 768) and (B, 77, 768)
+        clip_g_vecs, clip_g_embeds = self.clip_g(prompt)  # (B, 1280) and (B, 77, 1280)
 
         clip_vecs = torch.cat([clip_l_vecs.cuda(), clip_g_vecs.cuda()], dim=-1)  # (B, 2048)
         clip_embeds = torch.cat([clip_l_embeds.cuda(), clip_g_embeds.cuda()], dim=-1)  # (B, 77, 2048)
@@ -66,8 +66,7 @@ class SD3Generator:
     @torch.no_grad()
     def generate(
         self,
-        t5_prompt: str | list[str],
-        clip_prompt: str | list[str] | None = None,
+        prompt: str | list[str],
         negative_prompt: str | list[str] = "",
         img_size: int | tuple[int, int] = 512,
         latents: Tensor | None = None,
@@ -78,15 +77,9 @@ class SD3Generator:
         pbar: bool = False,
         compile: bool = False,
     ):
-        if isinstance(t5_prompt, str):
-            t5_prompt = [t5_prompt]
-        bsize = len(t5_prompt)
-
-        if clip_prompt is None:
-            clip_prompt = t5_prompt
-        elif isinstance(clip_prompt, str):
-            clip_prompt = [clip_prompt] * bsize
-        assert len(clip_prompt) == bsize
+        if isinstance(prompt, str):
+            prompt = [prompt]
+        bsize = len(prompt)
 
         if isinstance(negative_prompt, str):
             negative_prompt = [negative_prompt] * bsize
@@ -98,19 +91,16 @@ class SD3Generator:
         latent_h = height // 8
         latent_w = width // 8
 
-        embeds, clip_vecs = self.embed_prompt(t5_prompt, clip_prompt)
+        embeds, clip_vecs = self.embed_prompt(prompt)
         if guidance != 1.0:
-            neg_embeds, neg_clip_vecs = self.embed_prompt(negative_prompt, negative_prompt)
+            neg_embeds, neg_clip_vecs = self.embed_prompt(negative_prompt)
 
         rng = torch.Generator("cuda")
         rng.manual_seed(seed) if seed is not None else logger.info(f"Using seed={rng.seed()}")
         dtype = self.sd3.context_embedder.weight.dtype
         noise = torch.randn(bsize, 16, latent_h, latent_w, device="cuda", dtype=dtype, generator=rng)
-        if latents is not None:
-            # this is basically SDEdit https://arxiv.org/abs/2108.01073
-            latents = latents.lerp(noise, denoise)
-        else:
-            latents = noise
+        # this is basically SDEdit https://arxiv.org/abs/2108.01073
+        latents = latents.lerp(noise, denoise) if latents is not None else noise
 
         latents = sd3_generate(
             sd3=self.sd3,
@@ -173,13 +163,13 @@ def sd3_step(
     if neg_context is not None and neg_vec is not None and guidance != 1.0:
         v, neg_v = sd3(
             latents.repeat(2, 1, 1, 1),
+            torch.cat([context, neg_context], dim=0),
             t_vec,
             torch.cat([vec, neg_vec], dim=0),
-            torch.cat([context, neg_context], dim=0),
         ).chunk(2, dim=0)
         v = neg_v.lerp(v, guidance)
 
     else:
-        v = sd3(latents, t_vec, vec, context)
+        v = sd3(latents, context, t_vec, vec)
 
     latents.add_(v, alpha=t_next - t_curr)  # Euler's method. move from t_curr to t_next

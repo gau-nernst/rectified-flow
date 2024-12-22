@@ -233,7 +233,7 @@ class SD3(nn.Module):
         pos_embed = pos_embed.flatten(1, 2)
         return pos_embed
 
-    def forward(self, x: Tensor, t: Tensor, y: Tensor, context: Tensor, skip_layers: list = []) -> Tensor:
+    def forward(self, x: Tensor, context: Tensor, t: Tensor, y: Tensor, skip_layers: list = []) -> Tensor:
         # NOTE: t should be [0,1] i.e. w/o x1000 scaling
         N, _, H, W = x.shape
         x = self.x_embedder(x) + self.crop_pos_embed(H, W)

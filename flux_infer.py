@@ -43,8 +43,7 @@ class FluxGenerator:
     @torch.no_grad()
     def generate(
         self,
-        t5_prompt: str | list[str],
-        clip_prompt: str | list[str] | None = None,
+        prompt: str | list[str],
         img_size: int | tuple[int, int] = 512,
         latents: Tensor | None = None,
         extra_txt_embeds: Tensor | None = None,
@@ -55,23 +54,17 @@ class FluxGenerator:
         pbar: bool = False,
         compile: bool = False,
     ):
-        if isinstance(t5_prompt, str):
-            t5_prompt = [t5_prompt]
-        bsize = len(t5_prompt)
-
-        if clip_prompt is None:
-            clip_prompt = t5_prompt
-        elif isinstance(clip_prompt, str):
-            clip_prompt = [clip_prompt] * bsize
-        assert len(clip_prompt) == bsize
+        if isinstance(prompt, str):
+            prompt = [prompt]
+        bsize = len(prompt)
 
         if isinstance(img_size, int):
             height = width = img_size
         else:
             height, width = img_size
 
-        t5_embeds = self.t5(t5_prompt).cuda()  # (B, 512, 4096)
-        clip_vecs = self.clip(clip_prompt).cuda()  # (B, 768)
+        t5_embeds = self.t5(prompt).cuda()  # (B, 512, 4096)
+        clip_vecs = self.clip(prompt).cuda()  # (B, 768)
 
         if extra_txt_embeds is not None:  # e.g. Flux-Redux
             t5_embeds = torch.cat([t5_embeds, extra_txt_embeds], dim=1)
@@ -79,11 +72,8 @@ class FluxGenerator:
         rng = torch.Generator("cuda")
         rng.manual_seed(seed) if seed is not None else logger.info(f"Using seed={rng.seed()}")
         noise = torch.randn(bsize, 16, height // 8, width // 8, device="cuda", dtype=torch.bfloat16, generator=rng)
-        if latents is not None:
-            # this is basically SDEdit https://arxiv.org/abs/2108.01073
-            latents = latents.lerp(noise, denoise)
-        else:
-            latents = noise
+        # this is basically SDEdit https://arxiv.org/abs/2108.01073
+        latents = latents.lerp(noise, denoise) if latents is not None else noise
 
         latents = flux_generate(
             flux=self.flux,

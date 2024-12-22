@@ -220,22 +220,17 @@ class SingleStreamBlock(nn.Module):
     https://arxiv.org/abs/2302.05442 and adapted modulation interface.
     """
 
-    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float = 4.0, qk_scale: float | None = None) -> None:
+    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float = 4.0) -> None:
         super().__init__()
-        self.hidden_dim = hidden_size
+        self.hidden_size = hidden_size
         self.num_heads = num_heads
         head_dim = hidden_size // num_heads
-        self.scale = qk_scale or head_dim**-0.5
 
         self.mlp_hidden_dim = int(hidden_size * mlp_ratio)
-        # qkv and mlp_in
-        self.linear1 = nn.Linear(hidden_size, hidden_size * 3 + self.mlp_hidden_dim)
-        # proj and mlp_out
-        self.linear2 = nn.Linear(hidden_size + self.mlp_hidden_dim, hidden_size)
+        self.linear1 = nn.Linear(hidden_size, hidden_size * 3 + self.mlp_hidden_dim)  # qkv and mlp_in
+        self.linear2 = nn.Linear(hidden_size + self.mlp_hidden_dim, hidden_size)  # proj and mlp_out
 
         self.norm = QKNorm(head_dim)
-
-        self.hidden_size = hidden_size
         self.pre_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
 
         self.mlp_act = nn.GELU(approximate="tanh")
@@ -248,9 +243,8 @@ class SingleStreamBlock(nn.Module):
 
         q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
         q, k = self.norm(q, k, v)
-
-        # compute attention
         attn = attention(q, k, v, pe=pe)
+
         # compute activation in mlp stream, cat again and run second linear layer
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
         return x + mod.gate * output
@@ -331,15 +325,13 @@ class Flux(nn.Module):
         B, _, H, W = img.shape
         img = img.view(B, -1, H // 2, 2, W // 2, 2).permute(0, 2, 4, 1, 3, 5).reshape(B, H * W // 4, -1)
 
-        # running on sequences img
         img = self.img_in(img)
-        vec = self.time_in(timestep_embedding(timesteps, 256))
+        txt = self.txt_in(txt)
+        vec = self.time_in(timestep_embedding(timesteps, 256)) + self.vector_in(y)
         if self.config.guidance_embed:
             if guidance is None:
                 raise ValueError("Didn't get guidance strength for guidance distilled model.")
             vec = vec + self.guidance_in(timestep_embedding(guidance, 256))
-        vec = vec + self.vector_in(y)
-        txt = self.txt_in(txt)
 
         img_ids = self.create_img_ids(B, H // 2, W // 2).cuda()
         txt_ids = torch.zeros(*txt.shape[:2], 3, device=txt.device)
@@ -347,11 +339,11 @@ class Flux(nn.Module):
         pe = self.pe_embedder(ids)
 
         for block in self.double_blocks:
-            img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+            img, txt = block(img, txt, vec, pe)
 
         img = torch.cat((txt, img), 1)
         for block in self.single_blocks:
-            img = block(img, vec=vec, pe=pe)
+            img = block(img, vec, pe)
         img = img[:, txt.shape[1] :, ...]
 
         img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
