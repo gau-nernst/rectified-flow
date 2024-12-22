@@ -1,13 +1,41 @@
+# https://github.com/black-forest-labs/flux/blob/7e14a05ed7280f7a34ece612f7324fcc2ec9efbb/src/flux/math.py
 # https://github.com/black-forest-labs/flux/blob/7e14a05ed7280f7a34ece612f7324fcc2ec9efbb/src/flux/modules/layers.py
+# https://github.com/black-forest-labs/flux/blob/7e14a05ed7280f7a34ece612f7324fcc2ec9efbb/src/flux/model.py
 
 import math
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor, nn
 
-from .math import attention, rope
+from .utils import load_hf_state_dict
+
+
+def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor) -> Tensor:
+    q, k = apply_rope(q, k, pe)
+    x = F.scaled_dot_product_attention(q, k, v)
+    x = x.transpose(-2, -3).flatten(-2)  # (B, num_head, L, head_dim) -> (B, L, num_head * head_dim)
+    return x
+
+
+def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
+    assert dim % 2 == 0
+    scale = torch.arange(0, dim, 2, dtype=torch.float64, device=pos.device) / dim
+    omega = 1.0 / (theta**scale)
+    out = torch.einsum("...n,d->...nd", pos, omega)
+    out = torch.stack([out.cos(), -out.sin(), out.sin(), out.cos()], dim=-1)
+    out = rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2)
+    return out.float()
+
+
+def apply_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Tensor, Tensor]:
+    xq_ = xq.float().reshape(*xq.shape[:-1], -1, 1, 2)
+    xk_ = xk.float().reshape(*xk.shape[:-1], -1, 1, 2)
+    xq_out = freqs_cis[..., 0] * xq_[..., 0] + freqs_cis[..., 1] * xq_[..., 1]
+    xk_out = freqs_cis[..., 0] * xk_[..., 0] + freqs_cis[..., 1] * xk_[..., 1]
+    return xq_out.reshape(*xq.shape).type_as(xq), xk_out.reshape(*xk.shape).type_as(xk)
 
 
 class EmbedND(nn.Module):
@@ -37,10 +65,10 @@ def timestep_embedding(t: Tensor, dim: int, max_period: float = 10000.0, time_fa
     """
     t = time_factor * t
     half = dim // 2
-    freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(t.device)
+    freqs = torch.exp(-torch.arange(0, half, dtype=torch.float32, device=t.device) / half * math.log(max_period))
 
     args = t[:, None].float() * freqs[None]
-    embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+    embedding = torch.cat([args.cos(), args.sin()], dim=-1)
     if dim % 2:
         embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
     if torch.is_floating_point(t):
@@ -116,7 +144,6 @@ class Modulation(nn.Module):
 
     def forward(self, vec: Tensor) -> tuple[ModulationOut, ModulationOut | None]:
         out = self.lin(self.silu(vec))[:, None, :].chunk(self.multiplier, dim=-1)
-
         return (
             ModulationOut(*out[:3]),
             ModulationOut(*out[3:]) if self.is_double else None,
@@ -241,3 +268,136 @@ class LastLayer(nn.Module):
         x = (1 + scale[:, None, :]) * self.norm_final(x) + shift[:, None, :]
         x = self.linear(x)
         return x
+
+
+@dataclass
+class FluxConfig:
+    in_channels: int = 64
+    out_channels: int = 64
+    vec_in_dim: int = 768
+    context_in_dim: int = 4096
+    hidden_size: int = 3072
+    mlp_ratio: float = 4.0
+    num_heads: int = 24
+    depth: int = 19
+    depth_single_blocks: int = 38
+    axes_dim: tuple[int] = (16, 56, 56)
+    theta: int = 10_000
+    qkv_bias: bool = True
+    guidance_embed: bool = True  # False for schnell
+
+
+class Flux(nn.Module):
+    def __init__(self, config: FluxConfig | None = None) -> None:
+        super().__init__()
+        config = config or FluxConfig()
+        self.config = config
+        if config.hidden_size % config.num_heads != 0:
+            raise ValueError(f"Hidden size {config.hidden_size} must be divisible by num_heads {config.num_heads}")
+        pe_dim = config.hidden_size // config.num_heads
+        if sum(config.axes_dim) != pe_dim:
+            raise ValueError(f"Got {config.axes_dim} but expected positional dim {pe_dim}")
+
+        self.pe_embedder = EmbedND(pe_dim, config.theta, config.axes_dim)
+        self.img_in = nn.Linear(config.in_channels, config.hidden_size)
+        self.time_in = MLPEmbedder(256, config.hidden_size)
+        self.vector_in = MLPEmbedder(config.vec_in_dim, config.hidden_size)
+        self.guidance_in = MLPEmbedder(256, config.hidden_size) if config.guidance_embed else nn.Identity()
+        self.txt_in = nn.Linear(config.context_in_dim, config.hidden_size)
+
+        self.double_blocks = nn.ModuleList(
+            [
+                DoubleStreamBlock(config.hidden_size, config.num_heads, config.mlp_ratio, config.qkv_bias)
+                for _ in range(config.depth)
+            ]
+        )
+        self.single_blocks = nn.ModuleList(
+            [
+                SingleStreamBlock(config.hidden_size, config.num_heads, config.mlp_ratio)
+                for _ in range(config.depth_single_blocks)
+            ]
+        )
+        self.final_layer = LastLayer(config.hidden_size, 1, config.out_channels)
+
+    @staticmethod
+    def create_img_ids(bsize: int, height: int, width: int):
+        img_ids = torch.zeros(height, width, 3)
+        img_ids[..., 1] = torch.arange(height)[:, None]
+        img_ids[..., 2] = torch.arange(width)[None, :]
+        return img_ids.view(1, height * width, 3).expand(bsize, -1, -1)
+
+    def forward(self, img: Tensor, txt: Tensor, timesteps: Tensor, y: Tensor, guidance: Tensor | None = None) -> Tensor:
+        # we integrate patchify and unpatchify into model's forward pass
+        B, _, H, W = img.shape
+        img = img.view(B, -1, H // 2, 2, W // 2, 2).permute(0, 2, 4, 1, 3, 5).reshape(B, H * W // 4, -1)
+
+        # running on sequences img
+        img = self.img_in(img)
+        vec = self.time_in(timestep_embedding(timesteps, 256))
+        if self.config.guidance_embed:
+            if guidance is None:
+                raise ValueError("Didn't get guidance strength for guidance distilled model.")
+            vec = vec + self.guidance_in(timestep_embedding(guidance, 256))
+        vec = vec + self.vector_in(y)
+        txt = self.txt_in(txt)
+
+        img_ids = self.create_img_ids(B, H // 2, W // 2).cuda()
+        txt_ids = torch.zeros(*txt.shape[:2], 3, device=txt.device)
+        ids = torch.cat((txt_ids, img_ids), dim=1)
+        pe = self.pe_embedder(ids)
+
+        for block in self.double_blocks:
+            img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+
+        img = torch.cat((txt, img), 1)
+        for block in self.single_blocks:
+            img = block(img, vec=vec, pe=pe)
+        img = img[:, txt.shape[1] :, ...]
+
+        img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
+        img = img.view(B, H // 2, W // 2, -1, 2, 2).permute(0, 3, 1, 4, 2, 5).reshape(B, -1, H, W)
+        return img
+
+
+def _load_flux(repo_id: str, filename: str):
+    with torch.device("meta"):
+        model = Flux()
+    state_dict = load_hf_state_dict(repo_id, filename)
+    model.load_state_dict(state_dict, assign=True)
+    return model
+
+
+def load_flux(name: str = "dev"):
+    # BF16
+    assert name in ("dev", "schnell")
+    return _load_flux(f"black-forest-labs/FLUX.1-{name}", f"flux1-{name}.safetensors")
+
+
+def load_shuttle(name: str = "3.1-aesthetic"):
+    # BF16
+    assert name in ("3-diffusion", "3.1-aesthetic")
+    return _load_flux(f"shuttleai/shuttle-{name}", f"shuttle-{name}.safetensors")
+
+
+# https://github.com/black-forest-labs/flux/blob/805da8571a0b49b6d4043950bd266a65328c243b/src/flux/modules/image_embedders.py#L66
+def load_flux_redux(dtype: torch.dtype = torch.bfloat16):
+    import timm
+
+    siglip = timm.create_model(
+        "vit_so400m_patch14_siglip_378.webli",
+        pretrained=True,
+        dynamic_img_size=True,
+    )  # 428M params
+    siglip.forward = siglip.forward_features  # with 378x378 input, output is (B, 729, 1152)
+
+    in_dim = 1152  # siglip
+    out_dim = 4096  # t5
+    with torch.device("meta"):
+        redux = nn.Sequential()  # 64.5M params
+        redux.redux_up = nn.Linear(in_dim, out_dim * 3)
+        redux.silu = nn.SiLU()
+        redux.redux_down = nn.Linear(out_dim * 3, out_dim)
+
+    state_dict = load_hf_state_dict("black-forest-labs/FLUX.1-Redux-dev", "flux1-redux-dev.safetensors")
+    redux.load_state_dict(state_dict, assign=True)
+    return nn.Sequential(siglip, redux).to(dtype=dtype)

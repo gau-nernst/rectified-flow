@@ -26,7 +26,7 @@ from torchvision.io import ImageReadMode, decode_image
 from torchvision.transforms import v2
 from tqdm import tqdm
 
-from flux_infer import flux_decode, flux_encode, flux_generate
+from flux_infer import flux_generate
 from modelling import (
     AutoEncoder,
     Flux,
@@ -40,7 +40,8 @@ from modelling import (
 )
 from modelling.face_embedder import arcface_crop
 from offload import PerLayerOffloadCUDAStream, PerLayerOffloadWithBackward
-from train_qlora import compute_loss, logit_normal, uniform
+from time_sampler import LogitNormal, Uniform
+from train_qlora import compute_loss
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -179,8 +180,7 @@ def save_images(
 
         noise = torch.randn(crops.shape[0], latent_h * latent_w, 64, device="cuda", dtype=torch.bfloat16, generator=rng)
         latents = flux_generate(flux, embeds, clip_embeds, img_size, noise)
-        imgs = flux_decode(ae, latents, (latent_h, latent_w))
-        imgs = imgs.cpu().permute(0, 2, 3, 1).contiguous().numpy()
+        imgs = ae.decode(latents, uint8=True).cpu().permute(0, 2, 3, 1).contiguous().numpy()
 
         for img in imgs:
             Image.fromarray(img).save(save_dir / f"{img_idx:04d}.webp", lossless=True)
@@ -198,7 +198,7 @@ if __name__ == "__main__":
         return tuple(out)
 
     parser.add_argument("--img_sizes", type=parse_img_size, nargs="+", default=(512, 512))
-    parser.add_argument("--time_sampler", default="uniform()")
+    parser.add_argument("--time_sampler", default="Uniform()")
     parser.add_argument("--compile", action="store_true")
 
     parser.add_argument("--num_workers", type=int, default=4)
@@ -265,7 +265,7 @@ if __name__ == "__main__":
 
     optim = torch.optim.AdamW(face_redux.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True)
 
-    time_sampler = eval(args.time_sampler, dict(uniform=uniform, logit_normal=logit_normal))
+    time_sampler = eval(args.time_sampler, dict(Uniform=Uniform, logit_normal=LogitNormal))
 
     log_dir = args.log_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{args.run_name}"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -294,19 +294,17 @@ if __name__ == "__main__":
     while step < args.num_steps:
         for _ in range(args.gradient_accumulation):
             imgs, crops, prompts = next(dloader_iter)
-            latents = flux_encode(ae, imgs.cuda(), sample=True)
 
-            try:
+            with torch.no_grad():
+                latents = ae.encode(imgs.cuda(), sample=True)
                 t5_embeds = t5(prompts)
                 clip_embeds = clip(prompts)
-            except:
-                print(prompts)
-                raise
-            # TODO: drop t5_embeds, similar to CFG training
-            with torch.no_grad():
                 face_embeds = adaface.forward_features(crops.cuda()).flatten(-2).transpose(1, 2)
+
             with torch.autocast("cuda", torch.bfloat16):
                 face_embeds = face_redux(face_embeds.bfloat16())
+
+            # TODO: drop t5_embeds, similar to CFG training
             embeds = torch.cat([t5_embeds, face_embeds], dim=1)
 
             loss = compute_loss(flux, latents, embeds, clip_embeds, imgs.shape[2:], time_sampler)

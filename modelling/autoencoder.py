@@ -247,21 +247,28 @@ class AutoEncoder(nn.Module):
             config.num_res_blocks,
             config.z_channels,
         )
-
         self.scale_factor = config.scale_factor
         self.shift_factor = config.shift_factor
 
     def encode(self, x: Tensor, sample: bool = False) -> Tensor:
+        if x.dtype == torch.uint8:
+            x = x.float() / 127.5 - 1
+        x = x.to(self.encoder.conv_in.weight.dtype)
+
         z = diagonal_gaussian(self.encoder(x), sample)
         z = self.scale_factor * (z - self.shift_factor)
         return z
 
-    def decode(self, z: Tensor) -> Tensor:
+    def decode(self, z: Tensor, uint8: bool = False) -> Tensor:
         z = z / self.scale_factor + self.shift_factor
-        return self.decoder(z)
+        x = self.decoder(z)
+
+        if uint8:
+            x = x.float().add(1).mul(127.5).clip(0, 255).to(torch.uint8)
+        return x
 
     def forward(self, x: Tensor, sample: bool = False) -> Tensor:
-        return self.decode(self.encode(x, sample))
+        return self.decode(self.encode(x, sample), x.dtype == torch.uint8)
 
 
 def load_autoencoder(

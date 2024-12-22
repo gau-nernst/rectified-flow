@@ -1,4 +1,5 @@
 # https://arxiv.org/abs/2410.10792
+
 import logging
 from typing import Literal
 
@@ -6,7 +7,7 @@ import torch
 from torch import Tensor
 from tqdm import tqdm
 
-from flux_infer import FluxTimeShift, flux_img_ids
+from flux_infer import FluxTimeShift
 from modelling import Flux
 
 logger = logging.getLogger(__name__)
@@ -19,9 +20,7 @@ def rf_inversion_step(
     reference: Tensor,
     direction: Literal["forward", "reverse"],
     controller_guidance: float,
-    img_ids: Tensor,
     txt: Tensor,
-    txt_ids: Tensor,
     vec: Tensor,
     t_curr: Tensor,
     t_next: Tensor,
@@ -34,7 +33,7 @@ def rf_inversion_step(
 
     # when controller_guidance=0, this is equivalent to flux_step
     t_vec = t_curr.to(latents.dtype).view(1).cuda()
-    unconditional_v = flux(latents, img_ids, txt, txt_ids, t_vec, vec, guidance)
+    unconditional_v = flux(latents, txt, t_vec, vec, guidance)
     controlled_v = unconditional_v.lerp(conditional_v, controller_guidance)
     latents += (t_next - t_curr) * controlled_v  # the usual Euler's method
 
@@ -62,20 +61,18 @@ def rf_inversion_generate(
     height, width = img_size
     bsize = txt.shape[0]
 
-    latent_h = height // 16
-    latent_w = width // 16
-    img_ids = flux_img_ids(bsize, latent_h, latent_w).cuda()
-    txt_ids = torch.zeros(bsize, txt.shape[1], 3, device="cuda")
+    latent_h = height // 8
+    latent_w = width // 8
 
     timesteps = torch.linspace(1, 0, num_steps + 1)[int(start_t * num_steps) :]
-    timesteps = FluxTimeShift()(timesteps, latent_h, latent_w)
+    timesteps = FluxTimeShift()(timesteps, latent_h // 2, latent_w // 2)
     if not isinstance(guidance, Tensor):
         guidance = torch.full((bsize,), guidance, device="cuda", dtype=torch.bfloat16)
 
     rng = torch.Generator("cuda")
     rng.manual_seed(seed) if seed is not None else logger.info(f"Using seed={rng.seed()}")
     reference = latents  # we won't modify reference in-place, so it's safe
-    noise = torch.randn(bsize, latent_h * latent_w, 64, device="cuda", dtype=torch.bfloat16, generator=rng)
+    noise = torch.randn(bsize, 16, latent_h, latent_w, device="cuda", dtype=torch.bfloat16, generator=rng)
 
     # inversion
     if fast:
@@ -99,9 +96,7 @@ def rf_inversion_generate(
                 noise,
                 "forward",
                 0.5,
-                img_ids,
                 null_txt,
-                txt_ids,
                 null_vec,
                 timesteps[i],
                 timesteps[i + 1],
@@ -118,9 +113,7 @@ def rf_inversion_generate(
             reference,
             "reverse",
             eta,
-            img_ids,
             txt,
-            txt_ids,
             vec,
             timesteps[i],
             timesteps[i + 1],
