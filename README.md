@@ -12,6 +12,8 @@ Supported features:
 - [RF-inversion](https://arxiv.org/abs/2410.10792) (FLUX-Redux is simpler and superior)
 - INT8 matmul (2x inference speedup for consumer cards)
 - Train on pre-computed latents
+- Aspect ratio bucketing for training with multiple aspect ratios.
+- Single-GPU model offloading for inference and training.
 
 TODO:
 - (maybe) more solvers?
