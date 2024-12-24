@@ -188,7 +188,9 @@ def sd3_dpmpp2m_generate(
     compile: bool = False,
 ):
     # DPM-Solver++(2M) https://arxiv.org/abs/2211.01095
-    # follow k-diffusion implementation, which sets alpha_t = 1.0 for all t
+    # the implementation below has been simplified for flow matching / rectified flow
+    # with sigma(t) = t and alpha(t) = 1-t
+    # coincidentally (or not?), this results in identical calculations as k-diffusion implementation
     # https://github.com/crowsonkb/k-diffusion/blob/21d12c91ad4550e8fcf3308ff9fe7116b3f19a08/k_diffusion/sampling.py#L585-L607
 
     forward = torch.compile(sd3_forward, disable=not compile)
