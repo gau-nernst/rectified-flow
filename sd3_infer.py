@@ -5,63 +5,66 @@ import torch.nn.functional as F
 from torch import Tensor
 from tqdm import tqdm
 
-from modelling import (
-    SD3,
-    AutoEncoder,
-    TextEmbedder,
-    load_clip_l,
-    load_openclip_bigg,
-    load_sd3_5,
-    load_sd3_autoencoder,
-    load_t5,
-)
+from modelling import SD3, load_clip_l, load_openclip_bigg, load_sd3_5, load_sd3_autoencoder, load_t5
 from offload import PerLayerOffloadCUDAStream
 
 logger = logging.getLogger(__name__)
 
 
-class SD3Generator:
-    def __init__(
-        self,
-        ae: AutoEncoder | None = None,
-        sd3: SD3 | None = None,
-        t5: TextEmbedder | None = None,
-        clip_l: TextEmbedder | None = None,
-        clip_g: TextEmbedder | None = None,
-        offload_sd3: bool = False,
-        offload_t5: bool = False,
-        dtype: torch.dtype = torch.bfloat16,
-    ) -> None:
-        self.ae = (ae or load_sd3_autoencoder()).to(dtype)  # 168 MB in BF16
-        self.sd3 = (sd3 or load_sd3_5()).to(dtype)  # 4.5 GB for medium in BF16
-        self.t5 = (t5 or load_t5(max_length=256)).to(dtype)  # 9.5 GB in BF16
-        self.clip_l = (clip_l or load_clip_l(output_key=["pooler_output", -2])).to(dtype)  # 246 MB in BF16
-        self.clip_g = (clip_g or load_openclip_bigg()).to(dtype)  # 1.4 GB in BF16
-
-        # autoencoder and clip are small, don't need to offload
-        self.sd3_offloader = PerLayerOffloadCUDAStream(self.sd3, enable=offload_sd3)
+class SD3TextEmbedder:
+    def __init__(self, offload_t5: bool = False, offload_clip_g: bool = False, dtype: torch.dtype = torch.bfloat16):
+        self.t5 = load_t5(max_length=256).to(dtype)  # 9.5 GB in BF16
+        self.clip_l = load_clip_l(output_key=["pooler_output", -2]).to(dtype)  # 246 MB in BF16
+        self.clip_g = load_openclip_bigg().to(dtype)  # 1.4 GB in BF16
         self.t5_offloader = PerLayerOffloadCUDAStream(self.t5, enable=offload_t5)
+        self.clip_g_offloader = PerLayerOffloadCUDAStream(self.clip_g, enable=offload_clip_g)
 
     def cpu(self):
-        for m in (self.ae, self.clip_l, self.clip_g, self.sd3_offloader, self.t5_offloader):
+        for m in (self.clip_l, self.t5_offloader, self.clip_g_offloader):
             m.cpu()
         return self
 
     def cuda(self):
-        for m in (self.ae, self.clip_l, self.clip_g, self.sd3_offloader, self.t5_offloader):
+        for m in (self.clip_l, self.t5_offloader, self.clip_g_offloader):
             m.cuda()
         return self
 
-    def embed_prompt(self, prompt: list[str]):
-        t5_embeds = self.t5(prompt).cuda()  # (B, 256, 4096)
+    def __call__(self, prompt: list[str]):
+        t5_embeds = self.t5(prompt)  # (B, 256, 4096)
         clip_l_vecs, clip_l_embeds = self.clip_l(prompt)  # (B, 768) and (B, 77, 768)
         clip_g_vecs, clip_g_embeds = self.clip_g(prompt)  # (B, 1280) and (B, 77, 1280)
 
-        clip_vecs = torch.cat([clip_l_vecs.cuda(), clip_g_vecs.cuda()], dim=-1)  # (B, 2048)
-        clip_embeds = torch.cat([clip_l_embeds.cuda(), clip_g_embeds.cuda()], dim=-1)  # (B, 77, 2048)
+        clip_vecs = torch.cat([clip_l_vecs, clip_g_vecs], dim=-1)  # (B, 2048)
+        clip_embeds = torch.cat([clip_l_embeds, clip_g_embeds], dim=-1)  # (B, 77, 2048)
         clip_embeds = F.pad(clip_embeds, (0, t5_embeds.shape[-1] - clip_embeds.shape[-1]))  # (B, 77, 4096)
         embeds = torch.cat([clip_embeds, t5_embeds], dim=1)  # (B, 77+256, 4096)
         return embeds, clip_vecs
+
+
+class SD3Generator:
+    def __init__(
+        self,
+        sd3: SD3 | None = None,
+        offload_sd3: bool = False,
+        offload_t5: bool = False,
+        dtype: torch.dtype = torch.bfloat16,
+    ) -> None:
+        self.sd3 = (sd3 or load_sd3_5()).to(dtype)  # 4.5 GB for medium in BF16
+        self.ae = load_sd3_autoencoder().to(dtype)  # 168 MB in BF16
+        self.text_embedder = SD3TextEmbedder(offload_t5, dtype)
+
+        # autoencoder and clip are small, don't need to offload
+        self.sd3_offloader = PerLayerOffloadCUDAStream(self.sd3, enable=offload_sd3)
+
+    def cpu(self):
+        for m in (self.ae, self.text_embedder, self.sd3_offloader):
+            m.cpu()
+        return self
+
+    def cuda(self):
+        for m in (self.ae, self.text_embedder, self.sd3_offloader):
+            m.cuda()
+        return self
 
     @torch.no_grad()
     def generate(
@@ -88,17 +91,15 @@ class SD3Generator:
             height = width = img_size
         else:
             height, width = img_size
-        latent_h = height // 8
-        latent_w = width // 8
 
-        embeds, clip_vecs = self.embed_prompt(prompt)
+        embeds, clip_vecs = self.text_embedder(prompt)
         if guidance != 1.0:
-            neg_embeds, neg_clip_vecs = self.embed_prompt(negative_prompt)
+            neg_embeds, neg_clip_vecs = self.text_embedder(negative_prompt)
 
         rng = torch.Generator("cuda")
         rng.manual_seed(seed) if seed is not None else logger.info(f"Using seed={rng.seed()}")
         dtype = self.sd3.context_embedder.weight.dtype
-        noise = torch.randn(bsize, 16, latent_h, latent_w, device="cuda", dtype=dtype, generator=rng)
+        noise = torch.randn(bsize, 16, height // 8, width // 8, device="cuda", dtype=dtype, generator=rng)
         # this is basically SDEdit https://arxiv.org/abs/2108.01073
         latents = latents.lerp(noise, denoise) if latents is not None else noise
 

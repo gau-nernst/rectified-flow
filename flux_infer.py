@@ -5,38 +5,48 @@ import torch
 from torch import Tensor
 from tqdm import tqdm
 
-from modelling import AutoEncoder, Flux, TextEmbedder, load_clip_l, load_flux, load_flux_autoencoder, load_t5
+from modelling import Flux, load_clip_l, load_flux, load_flux_autoencoder, load_t5
 from offload import PerLayerOffloadCUDAStream
 
 logger = logging.getLogger(__name__)
 
 
-class FluxGenerator:
-    def __init__(
-        self,
-        ae: AutoEncoder | None = None,
-        flux: Flux | None = None,
-        t5: TextEmbedder | None = None,
-        clip: TextEmbedder | None = None,
-        offload_flux: bool = False,
-        offload_t5: bool = False,
-    ) -> None:
-        self.ae = ae or load_flux_autoencoder()  # 168 MB in BF16
-        self.flux = flux or load_flux()  # 23.8 GB in BF16
-        self.t5 = t5 or load_t5()  #  9.5 GB in BF16
-        self.clip = clip or load_clip_l().bfloat16()  # 246 MB in BF16
-
-        # autoencoder and clip are small, don't need to offload
-        self.flux_offloader = PerLayerOffloadCUDAStream(self.flux, enable=offload_flux)
+class FluxTextEmbedder:
+    def __init__(self, offload_t5: bool = False):
+        self.t5 = load_t5()  #  9.5 GB in BF16
+        self.clip = load_clip_l().bfloat16()  # 246 MB in BF16
         self.t5_offloader = PerLayerOffloadCUDAStream(self.t5, enable=offload_t5)
 
     def cpu(self):
-        for m in (self.ae, self.clip, self.flux_offloader, self.t5_offloader):
+        for m in (self.clip, self.t5_offloader):
             m.cpu()
         return self
 
     def cuda(self):
-        for m in (self.ae, self.clip, self.flux_offloader, self.t5_offloader):
+        for m in (self.clip, self.t5_offloader):
+            m.cuda()
+        return self
+
+    def __call__(self, prompt: list[str]):
+        return self.t5(prompt), self.clip(prompt)
+
+
+class FluxGenerator:
+    def __init__(self, flux: Flux | None = None, offload_flux: bool = False, offload_t5: bool = False) -> None:
+        self.flux = flux or load_flux()  # 23.8 GB in BF16
+        self.ae = load_flux_autoencoder()  # 168 MB in BF16
+        self.text_embedder = FluxTextEmbedder(offload_t5)
+
+        # autoencoder and clip are small, don't need to offload
+        self.flux_offloader = PerLayerOffloadCUDAStream(self.flux, enable=offload_flux)
+
+    def cpu(self):
+        for m in (self.ae, self.text_embedder, self.flux_offloader):
+            m.cpu()
+        return self
+
+    def cuda(self):
+        for m in (self.ae, self.text_embedder, self.flux_offloader):
             m.cuda()
         return self
 
@@ -63,9 +73,7 @@ class FluxGenerator:
         else:
             height, width = img_size
 
-        t5_embeds = self.t5(prompt).cuda()  # (B, 512, 4096)
-        clip_vecs = self.clip(prompt).cuda()  # (B, 768)
-
+        t5_embeds, clip_vecs = self.text_embedder(prompt)  # (B, 512, 4096) and (B, 768)
         if extra_txt_embeds is not None:  # e.g. Flux-Redux
             t5_embeds = torch.cat([t5_embeds, extra_txt_embeds], dim=1)
 
@@ -95,6 +103,8 @@ def flux_generate(
     txt: Tensor,
     vec: Tensor,
     latents: Tensor,
+    neg_txt: Tensor | None = None,
+    neg_vec: Tensor | None = None,
     start_t: float = 1.0,
     end_t: float = 0.0,
     guidance: Tensor | float = 3.5,
@@ -113,7 +123,9 @@ def flux_generate(
         guidance = torch.full((bsize,), guidance, device="cuda", dtype=torch.bfloat16)
 
     for i in tqdm(range(timesteps.shape[0] - 1), disable=not pbar, dynamic_ncols=True):
-        torch.compile(flux_step, disable=not compile)(flux, latents, txt, vec, timesteps[i], timesteps[i + 1], guidance)
+        torch.compile(flux_step, disable=not compile)(
+            flux, latents, txt, vec, neg_txt, neg_vec, timesteps[i], timesteps[i + 1], guidance
+        )
 
     return latents
 
@@ -135,11 +147,24 @@ def flux_step(
     latents: Tensor,
     txt: Tensor,
     vec: Tensor,
+    neg_txt: Tensor | None,
+    neg_vec: Tensor | None,
     t_curr: Tensor,
     t_next: Tensor,
     guidance: Tensor,
 ) -> None:
     # t_curr and t_next must be Tensor (cpu is fine) to avoid recompilation
     t_vec = t_curr.to(latents.dtype).view(1).cuda()
-    v = flux(latents, txt, t_vec, vec, guidance)
+
+    if neg_txt is not None and neg_vec is not None:
+        # classifier-free guidance
+        _g = latents.new_ones(1)
+        v = flux(latents, txt, t_vec, vec, _g)
+        neg_v = flux(latents, neg_txt, t_vec, neg_vec, _g)
+        v = neg_v.lerp(v, guidance)
+
+    else:
+        # built-in distilled guidance
+        v = flux(latents, txt, t_vec, vec, guidance)
+
     latents.add_(v, alpha=t_next - t_curr)  # Euler's method. move from t_curr to t_next
