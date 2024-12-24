@@ -1,5 +1,6 @@
 import logging
 import math
+from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -42,6 +43,14 @@ class SD3TextEmbedder:
         return embeds, clip_vecs
 
 
+# https://github.com/Stability-AI/sd3.5/blob/fbf8f483f992d8d6ad4eaaeb23b1dc5f523c3b3a/sd3_infer.py#L509-L520
+class SkipLayerConfig(NamedTuple):
+    scale: float = 0.0
+    start: float = 0.01
+    end: float = 0.20
+    layers: tuple[int, ...] = (7, 8, 9)
+
+
 class SD3Generator:
     def __init__(
         self,
@@ -76,7 +85,8 @@ class SD3Generator:
         latents: Tensor | None = None,
         denoise: float = 1.0,
         num_steps: int = 50,
-        guidance: int = 5.0,
+        cfg_scale: int = 5.0,
+        slg_config: SkipLayerConfig = SkipLayerConfig(),
         seed: int | None = None,
         pbar: bool = False,
         compile: bool = False,
@@ -95,7 +105,7 @@ class SD3Generator:
             height, width = img_size
 
         embeds, clip_vecs = self.text_embedder(prompt)
-        if guidance != 1.0:
+        if cfg_scale != 1.0:
             neg_embeds, neg_clip_vecs = self.text_embedder(negative_prompt)
 
         rng = torch.Generator("cuda")
@@ -122,7 +132,8 @@ class SD3Generator:
             vec=clip_vecs,
             neg_context=neg_embeds,
             neg_vec=neg_clip_vecs,
-            guidance=guidance,
+            cfg_scale=cfg_scale,
+            slg_config=slg_config,
             pbar=pbar,
             compile=compile,
         )
@@ -137,20 +148,30 @@ def sd3_forward(
     vec: Tensor,
     neg_context: Tensor | None,
     neg_vec: Tensor | None,
-    guidance: float,
+    cfg_scale: float,
+    slg_scale: float = 0.0,
+    skip_layers: tuple[int, ...] = (),
 ):
     # t must be Tensor (cpu is fine) to avoid recompilation
     t_vec = t.to(latents.dtype).view(1).cuda()
-    if neg_context is not None and neg_vec is not None and guidance != 1.0:
-        v, neg_v = sd3(
+    if cfg_scale != 1.0 and neg_context is not None and neg_vec is not None:
+        pos_v, neg_v = sd3(
             latents.repeat(2, 1, 1, 1),
             t_vec,
             torch.cat([context, neg_context], dim=0),
             torch.cat([vec, neg_vec], dim=0),
         ).chunk(2, dim=0)
-        v = neg_v.lerp(v, guidance)  # classifier-free guidance
+        v = neg_v.lerp(pos_v, cfg_scale)  # classifier-free guidance
+
     else:
-        v = sd3(latents, t_vec, context, vec)
+        pos_v = sd3(latents, t_vec, context, vec)
+        v = pos_v
+
+    # https://github.com/Stability-AI/sd3.5/blob/fbf8f483f992d8d6ad4eaaeb23b1dc5f523c3b3a/sd3_impls.py#L219
+    if slg_scale > 0.0:
+        skip_layer_v = sd3(latents, t_vec, context, vec, skip_layers)
+        v.add_(pos_v.float() - skip_layer_v.float(), alpha=slg_scale)
+
     return v
 
 
@@ -163,13 +184,17 @@ def sd3_euler_generate(
     vec: Tensor,
     neg_context: Tensor | None = None,
     neg_vec: Tensor | None = None,
-    guidance: float = 4.5,
+    cfg_scale: float = 5.0,
+    slg_config: SkipLayerConfig = SkipLayerConfig(),
     pbar: bool = False,
     compile: bool = False,
 ):
+    num_steps = len(timesteps) - 1
     forward = torch.compile(sd3_forward, disable=not compile)
-    for i in tqdm(range(len(timesteps) - 1), disable=not pbar, dynamic_ncols=True):
-        v = forward(sd3, latents, torch.tensor(timesteps[i]), context, vec, neg_context, neg_vec, guidance)
+    for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
+        t = torch.tensor(timesteps[i])
+        slg_scale = slg_config.scale if slg_config.start < i / num_steps < slg_config.end else 0.0
+        v = forward(sd3, latents, t, context, vec, neg_context, neg_vec, cfg_scale, slg_scale, slg_config.layers)
         latents.add_(v, alpha=timesteps[i + 1] - timesteps[i])  # Euler's method. move from t_curr to t_next
     return latents
 
@@ -183,7 +208,8 @@ def sd3_dpmpp2m_generate(
     vec: Tensor,
     neg_context: Tensor | None = None,
     neg_vec: Tensor | None = None,
-    guidance: float = 4.5,
+    cfg_scale: float = 5.0,
+    slg_config: SkipLayerConfig = SkipLayerConfig(),
     pbar: bool = False,
     compile: bool = False,
 ):
@@ -193,9 +219,12 @@ def sd3_dpmpp2m_generate(
     # coincidentally (or not?), this results in identical calculations as k-diffusion implementation
     # https://github.com/crowsonkb/k-diffusion/blob/21d12c91ad4550e8fcf3308ff9fe7116b3f19a08/k_diffusion/sampling.py#L585-L607
 
+    num_steps = len(timesteps) - 1
     forward = torch.compile(sd3_forward, disable=not compile)
-    for i in tqdm(range(len(timesteps) - 1), disable=not pbar, dynamic_ncols=True):
-        v = forward(sd3, latents, torch.tensor(timesteps[i]), context, vec, neg_context, neg_vec, guidance)
+    for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
+        t = torch.tensor(timesteps[i])
+        slg_scale = slg_config.scale if slg_config.start < i / num_steps < slg_config.end else 0.0
+        v = forward(sd3, latents, t, context, vec, neg_context, neg_vec, cfg_scale, slg_scale, slg_config.layers)
         data_pred = latents.add(v, alpha=-timesteps[i])  # data prediction model
 
         if i == 0:

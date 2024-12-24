@@ -15,6 +15,7 @@ Supported features:
 - Aspect ratio bucketing for training with multiple aspect ratios.
 - Single-GPU model offloading for inference and training.
 - [DPM-Solver++(2M)](https://arxiv.org/abs/2211.01095) for SD3.5 (TODO: support FLUX?)
+- Skip-layer guidance for SD3.5
 
 TODO:
 - Investigate the impact of T5 embeddings. SD3 paper says it's more important for text rendering.
