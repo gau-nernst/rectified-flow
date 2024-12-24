@@ -159,12 +159,12 @@ def flux_step(
     if neg_txt is not None and neg_vec is not None:
         # classifier-free guidance
         _g = latents.new_ones(1)
-        v = flux(latents, txt, t_vec, vec, _g)
-        neg_v = flux(latents, neg_txt, t_vec, neg_vec, _g)
+        v = flux(latents, t_vec, txt, vec, _g)
+        neg_v = flux(latents, t_vec, neg_txt, neg_vec, _g)
         v = neg_v.lerp(v, guidance)
 
     else:
         # built-in distilled guidance
-        v = flux(latents, txt, t_vec, vec, guidance)
+        v = flux(latents, t_vec, txt, vec, guidance)
 
     latents.add_(v, alpha=t_next - t_curr)  # Euler's method. move from t_curr to t_next

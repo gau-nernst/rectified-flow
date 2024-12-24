@@ -1,4 +1,5 @@
 import logging
+import math
 
 import torch
 import torch.nn.functional as F
@@ -51,7 +52,7 @@ class SD3Generator:
     ) -> None:
         self.sd3 = (sd3 or load_sd3_5()).to(dtype)  # 4.5 GB for medium in BF16
         self.ae = load_sd3_autoencoder().to(dtype)  # 168 MB in BF16
-        self.text_embedder = SD3TextEmbedder(offload_t5, dtype)
+        self.text_embedder = SD3TextEmbedder(offload_t5, dtype=dtype)
 
         # autoencoder and clip are small, don't need to offload
         self.sd3_offloader = PerLayerOffloadCUDAStream(self.sd3, enable=offload_sd3)
@@ -79,6 +80,7 @@ class SD3Generator:
         seed: int | None = None,
         pbar: bool = False,
         compile: bool = False,
+        solver: str = "dpm++2m",
     ):
         if isinstance(prompt, str):
             prompt = [prompt]
@@ -103,15 +105,23 @@ class SD3Generator:
         # this is basically SDEdit https://arxiv.org/abs/2108.01073
         latents = latents.lerp(noise, denoise) if latents is not None else noise
 
-        latents = sd3_generate(
-            sd3=self.sd3,
+        # denoise from t=1 (noise) to t=0 (latents)
+        timesteps = torch.linspace(1.0, 0.0, num_steps + 1)
+        timesteps = 3.0 / (3.0 + 1 / timesteps - 1)  # static shift
+        timesteps = timesteps.tolist()
+
+        solver_fn = {
+            "euler": sd3_euler_generate,
+            "dpm++2m": sd3_dpmpp2m_generate,
+        }[solver]
+        latents = solver_fn(
+            self.sd3,
+            latents,
+            timesteps,
             context=embeds,
             vec=clip_vecs,
             neg_context=neg_embeds,
             neg_vec=neg_clip_vecs,
-            latents=latents,
-            start_t=denoise,
-            num_steps=num_steps,
             guidance=guidance,
             pbar=pbar,
             compile=compile,
@@ -119,58 +129,85 @@ class SD3Generator:
         return self.ae.decode(latents, uint8=True)
 
 
-@torch.no_grad()
-def sd3_generate(
-    sd3: SD3,
-    context: Tensor,
-    vec: Tensor,
-    latents: Tensor,
-    neg_context: Tensor | None = None,
-    neg_vec: Tensor | None = None,
-    start_t: float = 1.0,
-    end_t: float = 0.0,
-    num_steps: int = 50,
-    guidance: float = 4.5,
-    pbar: bool = False,
-    compile: bool = False,
-):
-    # denoise from t=1 (noise) to t=0 (latents)
-    # NOTE: SD3 uses discrete timesteps (1000), but we use continuous timesteps.
-    timesteps = torch.linspace(start_t, end_t, num_steps + 1)
-    timesteps = 3.0 / (3.0 + 1 / timesteps - 1)  # static shift
-
-    for i in tqdm(range(timesteps.shape[0] - 1), disable=not pbar, dynamic_ncols=True):
-        torch.compile(sd3_step, disable=not compile)(
-            sd3, latents, context, vec, neg_context, neg_vec, guidance, timesteps[i], timesteps[i + 1]
-        )
-
-    return latents
-
-
-def sd3_step(
+def sd3_forward(
     sd3: SD3,
     latents: Tensor,
+    t: Tensor,
     context: Tensor,
     vec: Tensor,
     neg_context: Tensor | None,
     neg_vec: Tensor | None,
     guidance: float,
-    t_curr: Tensor,
-    t_next: Tensor,
-) -> None:
-    # t_curr and t_next must be Tensor (cpu is fine) to avoid recompilation
-    t_vec = t_curr.to(latents.dtype).view(1).cuda()
-
+):
+    # t must be Tensor (cpu is fine) to avoid recompilation
+    t_vec = t.to(latents.dtype).view(1).cuda()
     if neg_context is not None and neg_vec is not None and guidance != 1.0:
         v, neg_v = sd3(
             latents.repeat(2, 1, 1, 1),
-            torch.cat([context, neg_context], dim=0),
             t_vec,
+            torch.cat([context, neg_context], dim=0),
             torch.cat([vec, neg_vec], dim=0),
         ).chunk(2, dim=0)
-        v = neg_v.lerp(v, guidance)
-
+        v = neg_v.lerp(v, guidance)  # classifier-free guidance
     else:
-        v = sd3(latents, context, t_vec, vec)
+        v = sd3(latents, t_vec, context, vec)
+    return v
 
-    latents.add_(v, alpha=t_next - t_curr)  # Euler's method. move from t_curr to t_next
+
+@torch.no_grad()
+def sd3_euler_generate(
+    sd3: SD3,
+    latents: Tensor,
+    timesteps: list[float],
+    context: Tensor,
+    vec: Tensor,
+    neg_context: Tensor | None = None,
+    neg_vec: Tensor | None = None,
+    guidance: float = 4.5,
+    pbar: bool = False,
+    compile: bool = False,
+):
+    forward = torch.compile(sd3_forward, disable=not compile)
+    for i in tqdm(range(len(timesteps) - 1), disable=not pbar, dynamic_ncols=True):
+        v = forward(sd3, latents, torch.tensor(timesteps[i]), context, vec, neg_context, neg_vec, guidance)
+        latents.add_(v, alpha=timesteps[i + 1] - timesteps[i])  # Euler's method. move from t_curr to t_next
+    return latents
+
+
+@torch.no_grad()
+def sd3_dpmpp2m_generate(
+    sd3: SD3,
+    latents: Tensor,
+    timesteps: list[float],
+    context: Tensor,
+    vec: Tensor,
+    neg_context: Tensor | None = None,
+    neg_vec: Tensor | None = None,
+    guidance: float = 4.5,
+    pbar: bool = False,
+    compile: bool = False,
+):
+    # DPM-Solver++(2M) https://arxiv.org/abs/2211.01095
+    # follow k-diffusion implementation, which sets alpha_t = 1.0 for all t
+    # https://github.com/crowsonkb/k-diffusion/blob/21d12c91ad4550e8fcf3308ff9fe7116b3f19a08/k_diffusion/sampling.py#L585-L607
+
+    forward = torch.compile(sd3_forward, disable=not compile)
+    for i in tqdm(range(len(timesteps) - 1), disable=not pbar, dynamic_ncols=True):
+        v = forward(sd3, latents, torch.tensor(timesteps[i]), context, vec, neg_context, neg_vec, guidance)
+        data_pred = latents.add(v, alpha=-timesteps[i])  # data prediction model
+
+        if i == 0:
+            latents = data_pred.lerp(latents, timesteps[i + 1] / timesteps[i])
+        elif timesteps[i + 1] == 0.0:  # avoid log(0). note that lim x.log(x) when x->0 is 0.
+            latents = data_pred
+        else:
+            lambda_prev = -math.log(timesteps[i - 1])
+            lambda_curr = -math.log(timesteps[i])
+            lambda_next = -math.log(timesteps[i + 1])
+            r = (lambda_curr - lambda_prev) / (lambda_next - lambda_curr)
+            D = data_pred.lerp(prev_data_pred, -1 / (2 * r))
+            latents = D.lerp(latents, timesteps[i + 1] / timesteps[i])
+
+        prev_data_pred = data_pred
+
+    return latents
