@@ -4,6 +4,7 @@
 
 import math
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -125,8 +126,7 @@ class SelfAttention(nn.Module):
         return x
 
 
-@dataclass
-class ModulationOut:
+class ModulationOut(NamedTuple):
     shift: Tensor
     scale: Tensor
     gate: Tensor
@@ -282,7 +282,6 @@ class Flux(nn.Module):
     def __init__(self, config: FluxConfig | None = None) -> None:
         super().__init__()
         config = config or FluxConfig()
-        self.config = config
         if config.hidden_size % config.num_heads != 0:
             raise ValueError(f"Hidden size {config.hidden_size} must be divisible by num_heads {config.num_heads}")
         pe_dim = config.hidden_size // config.num_heads
@@ -325,10 +324,8 @@ class Flux(nn.Module):
         img = self.img_in(img)
         txt = self.txt_in(txt)
         vec = self.time_in(timestep_embedding(timesteps, 256)) + self.vector_in(y)
-        if self.config.guidance_embed:
-            if guidance is None:
-                guidance = img.new_ones(1)  # guidance=1 is equivalent to no guidance
-                # raise ValueError("Didn't get guidance strength for guidance distilled model.")
+
+        if guidance is not None:  # allow no guidance_embed
             vec = vec + self.guidance_in(timestep_embedding(guidance, 256))
 
         img_ids = self.create_img_ids(B, H // 2, W // 2).cuda()

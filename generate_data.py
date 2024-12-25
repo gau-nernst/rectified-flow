@@ -8,7 +8,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from flux_infer import FluxGenerator
-from sd3_infer import SD3Generator
+from sd3_infer import SD3Generator, SkipLayerConfig
 
 if __name__ == "__main__":
 
@@ -31,15 +31,17 @@ if __name__ == "__main__":
 
     if args.model == "flux-dev":
         gen = FluxGenerator(offload_flux=True, offload_t5=True)
+        extra_kwargs = dict()
     elif args.model == "sd3.5-medium":
-        gen = SD3Generator(offload_sd3=True, offload_t5=True)
+        gen = SD3Generator(offload_t5=True)
+        extra_kwargs = dict(slg_config=SkipLayerConfig(scale=0.2))  # default for sd3.5-medium
     else:
         raise ValueError(f"{args.model=}")
     gen.cuda()
 
     for offset in tqdm(range(0, N, args.batch_size), "Generate", dynamic_ncols=True):
         prompts = all_prompts[offset : offset + args.batch_size]
-        imgs = gen.generate(prompts, img_size=args.img_size, compile=True)
+        imgs = gen.generate(prompts, img_size=args.img_size, compile=True, **extra_kwargs)
 
         imgs = imgs.permute(0, 2, 3, 1).cpu().contiguous()
         for sub_idx in range(imgs.shape[0]):

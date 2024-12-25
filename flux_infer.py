@@ -54,12 +54,13 @@ class FluxGenerator:
     def generate(
         self,
         prompt: str | list[str],
-        negative_prompt: str | list[str] | None = None,
+        negative_prompt: str | list[str] = "",
         img_size: int | tuple[int, int] = 512,
         latents: Tensor | None = None,
         extra_txt_embeds: Tensor | None = None,
         denoise: float = 1.0,
-        guidance: float = 3.5,
+        guidance: Tensor | float | None = 3.5,
+        cfg_scale: float = 1.0,
         num_steps: int = 50,
         seed: int | None = None,
         pbar: bool = False,
@@ -78,7 +79,7 @@ class FluxGenerator:
         if extra_txt_embeds is not None:  # e.g. Flux-Redux
             t5_embeds = torch.cat([t5_embeds, extra_txt_embeds], dim=1)
 
-        if negative_prompt is not None:
+        if cfg_scale != 1.0:
             neg_t5_embeds, neg_clip_vecs = self.text_embedder(negative_prompt)
         else:
             neg_t5_embeds = neg_clip_vecs = None
@@ -98,6 +99,7 @@ class FluxGenerator:
             neg_vec=neg_clip_vecs,
             start_t=denoise,
             guidance=guidance,
+            cfg_scale=cfg_scale,
             num_steps=num_steps,
             pbar=pbar,
             compile=compile,
@@ -115,7 +117,8 @@ def flux_generate(
     neg_vec: Tensor | None = None,
     start_t: float = 1.0,
     end_t: float = 0.0,
-    guidance: Tensor | float = 3.5,
+    guidance: Tensor | float | None = 3.5,
+    cfg_scale: float = 1.0,
     num_steps: int = 50,
     pbar: bool = False,
     compile: bool = False,
@@ -127,12 +130,12 @@ def flux_generate(
     # divide by 4 since FLUX patchifies input
     timesteps = torch.linspace(start_t, end_t, num_steps + 1)
     timesteps = time_shift(timesteps, latent_h * latent_w // 4)
-    if not isinstance(guidance, Tensor):
+    if isinstance(guidance, (int, float)):
         guidance = torch.full((bsize,), guidance, device="cuda", dtype=torch.bfloat16)
 
     for i in tqdm(range(timesteps.shape[0] - 1), disable=not pbar, dynamic_ncols=True):
         torch.compile(flux_step, disable=not compile)(
-            flux, latents, txt, vec, neg_txt, neg_vec, timesteps[i], timesteps[i + 1], guidance
+            flux, latents, txt, vec, neg_txt, neg_vec, timesteps[i], timesteps[i + 1], guidance, cfg_scale
         )
 
     return latents
@@ -160,15 +163,21 @@ def flux_step(
     t_curr: Tensor,
     t_next: Tensor,
     guidance: Tensor,
+    cfg_scale: float,
 ) -> None:
     # t_curr and t_next must be Tensor (cpu is fine) to avoid recompilation
     t_vec = t_curr.to(latents.dtype).view(1).cuda()
 
-    if neg_txt is not None and neg_vec is not None:
+    if cfg_scale != 1.0 and neg_txt is not None and neg_vec is not None:
         # classifier-free guidance
-        v = flux(latents, t_vec, txt, vec)
-        neg_v = flux(latents, t_vec, neg_txt, neg_vec)
-        v = neg_v.lerp(v, guidance)
+        v, neg_v = flux(
+            latents.repeat(2, 1, 1, 1),
+            t_vec,
+            torch.cat([txt, neg_txt], dim=0),
+            torch.cat([vec, neg_vec], dim=0),
+            guidance,
+        ).chunk(2, dim=0)
+        v = neg_v.lerp(v, cfg_scale)
 
     else:
         # built-in distilled guidance

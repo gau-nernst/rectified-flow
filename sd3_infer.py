@@ -107,6 +107,8 @@ class SD3Generator:
         embeds, clip_vecs = self.text_embedder(prompt)
         if cfg_scale != 1.0:
             neg_embeds, neg_clip_vecs = self.text_embedder(negative_prompt)
+        else:
+            neg_embeds = neg_clip_vecs = None
 
         rng = torch.Generator("cuda")
         rng.manual_seed(seed) if seed is not None else logger.info(f"Using seed={rng.seed()}")
