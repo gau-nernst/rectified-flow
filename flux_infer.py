@@ -54,6 +54,7 @@ class FluxGenerator:
     def generate(
         self,
         prompt: str | list[str],
+        negative_prompt: str | list[str] | None = None,
         img_size: int | tuple[int, int] = 512,
         latents: Tensor | None = None,
         extra_txt_embeds: Tensor | None = None,
@@ -77,6 +78,11 @@ class FluxGenerator:
         if extra_txt_embeds is not None:  # e.g. Flux-Redux
             t5_embeds = torch.cat([t5_embeds, extra_txt_embeds], dim=1)
 
+        if negative_prompt is not None:
+            neg_t5_embeds, neg_clip_vecs = self.text_embedder(negative_prompt)
+        else:
+            neg_t5_embeds = neg_clip_vecs = None
+
         rng = torch.Generator("cuda")
         rng.manual_seed(seed) if seed is not None else logger.info(f"Using seed={rng.seed()}")
         noise = torch.randn(bsize, 16, height // 8, width // 8, device="cuda", dtype=torch.bfloat16, generator=rng)
@@ -85,9 +91,11 @@ class FluxGenerator:
 
         latents = flux_generate(
             flux=self.flux,
+            latents=latents,
             txt=t5_embeds,
             vec=clip_vecs,
-            latents=latents,
+            neg_txt=neg_t5_embeds,
+            neg_vec=neg_clip_vecs,
             start_t=denoise,
             guidance=guidance,
             num_steps=num_steps,
@@ -100,9 +108,9 @@ class FluxGenerator:
 @torch.no_grad()
 def flux_generate(
     flux: Flux,
+    latents: Tensor,
     txt: Tensor,
     vec: Tensor,
-    latents: Tensor,
     neg_txt: Tensor | None = None,
     neg_vec: Tensor | None = None,
     start_t: float = 1.0,
@@ -158,9 +166,8 @@ def flux_step(
 
     if neg_txt is not None and neg_vec is not None:
         # classifier-free guidance
-        _g = latents.new_ones(1)
-        v = flux(latents, t_vec, txt, vec, _g)
-        neg_v = flux(latents, t_vec, neg_txt, neg_vec, _g)
+        v = flux(latents, t_vec, txt, vec)
+        neg_v = flux(latents, t_vec, neg_txt, neg_vec)
         v = neg_v.lerp(v, guidance)
 
     else:

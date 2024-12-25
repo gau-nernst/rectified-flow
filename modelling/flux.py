@@ -7,7 +7,6 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from einops import rearrange
 from torch import Tensor, nn
 
 from .utils import load_hf_state_dict
@@ -24,9 +23,9 @@ def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
     assert dim % 2 == 0
     scale = torch.arange(0, dim, 2, dtype=torch.float64, device=pos.device) / dim
     omega = 1.0 / (theta**scale)
-    out = torch.einsum("...n,d->...nd", pos, omega)
+    out = pos.unsqueeze(-1) * omega
     out = torch.stack([out.cos(), -out.sin(), out.sin(), out.cos()], dim=-1)
-    out = rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2)
+    out = out.unflatten(-1, (2, 2))
     return out.float()
 
 
@@ -84,7 +83,6 @@ class MLPEmbedder(nn.Sequential):
         self.out_layer = nn.Linear(hidden_dim, hidden_dim)
 
 
-# TODO: compare this with nn.RMSNorm
 class RMSNorm(nn.Module):
     def __init__(self, dim: int) -> None:
         super().__init__()
@@ -120,7 +118,7 @@ class SelfAttention(nn.Module):
 
     def forward(self, x: Tensor, pe: Tensor) -> Tensor:
         qkv = self.qkv(x)
-        q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+        q, k, v = qkv.unflatten(2, (3 * self.num_heads, -1)).permute(0, 2, 1, 3).chunk(3, dim=1)
         q, k = self.norm(q, k, v)
         x = attention(q, k, v, pe=pe)
         x = self.proj(x)
@@ -155,7 +153,6 @@ class DoubleStreamBlock(nn.Module):
         super().__init__()
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.num_heads = num_heads
-        self.hidden_size = hidden_size
         self.img_mod = Modulation(hidden_size, double=True)
         self.img_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.img_attn = SelfAttention(dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias)
@@ -186,14 +183,14 @@ class DoubleStreamBlock(nn.Module):
         img_modulated = self.img_norm1(img)
         img_modulated = (1 + img_mod1.scale) * img_modulated + img_mod1.shift
         img_qkv = self.img_attn.qkv(img_modulated)
-        img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+        img_q, img_k, img_v = img_qkv.unflatten(2, (3 * self.num_heads, -1)).permute(0, 2, 1, 3).chunk(3, dim=1)
         img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
 
         # prepare txt for attention
         txt_modulated = self.txt_norm1(txt)
         txt_modulated = (1 + txt_mod1.scale) * txt_modulated + txt_mod1.shift
         txt_qkv = self.txt_attn.qkv(txt_modulated)
-        txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+        txt_q, txt_k, txt_v = txt_qkv.unflatten(2, (3 * self.num_heads, -1)).permute(0, 2, 1, 3).chunk(3, dim=1)
         txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
 
         # run actual attention
@@ -241,7 +238,7 @@ class SingleStreamBlock(nn.Module):
         x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
         qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1)
 
-        q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+        q, k, v = qkv.unflatten(2, (3 * self.num_heads, -1)).permute(0, 2, 1, 3).chunk(3, dim=1)
         q, k = self.norm(q, k, v)
         attn = attention(q, k, v, pe=pe)
 
@@ -330,7 +327,8 @@ class Flux(nn.Module):
         vec = self.time_in(timestep_embedding(timesteps, 256)) + self.vector_in(y)
         if self.config.guidance_embed:
             if guidance is None:
-                raise ValueError("Didn't get guidance strength for guidance distilled model.")
+                guidance = img.new_ones(1)  # guidance=1 is equivalent to no guidance
+                # raise ValueError("Didn't get guidance strength for guidance distilled model.")
             vec = vec + self.guidance_in(timestep_embedding(guidance, 256))
 
         img_ids = self.create_img_ids(B, H // 2, W // 2).cuda()
