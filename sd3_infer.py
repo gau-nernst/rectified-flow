@@ -64,6 +64,7 @@ class SD3Generator:
         self.text_embedder = SD3TextEmbedder(offload_t5, dtype=dtype)
 
         # autoencoder and clip are small, don't need to offload
+        # NOTE: offload SD3 is not compatible with skip layer
         self.sd3_offloader = PerLayerOffloadCUDAStream(self.sd3, enable=offload_sd3)
 
     def cpu(self):
@@ -122,6 +123,8 @@ class SD3Generator:
         timesteps = 3.0 / (3.0 + 1 / timesteps - 1)  # static shift
         timesteps = timesteps.tolist()
 
+        if not self.sd3_offloader.enable:
+            self.sd3.cuda()  # model offload
         solver_fn = {
             "euler": sd3_euler_generate,
             "dpm++2m": sd3_dpmpp2m_generate,
@@ -139,6 +142,8 @@ class SD3Generator:
             pbar=pbar,
             compile=compile,
         )
+        if not self.sd3_offloader.enable:
+            self.sd3.cpu()
         return self.ae.decode(latents, uint8=True)
 
 
