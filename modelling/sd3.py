@@ -38,8 +38,8 @@ class TimestepEmbedder(nn.Module):
         )
         self.in_dim = in_dim
 
-    def forward(self, t: Tensor, dtype: torch.dtype) -> Tensor:
-        t_freq = timestep_embedding(t, self.in_dim).to(dtype)
+    def forward(self, t: Tensor) -> Tensor:
+        t_freq = timestep_embedding(t, self.in_dim)
         return self.mlp(t_freq)
 
 
@@ -237,7 +237,7 @@ class SD3(nn.Module):
         # NOTE: t should be [0,1] i.e. w/o x1000 scaling
         N, _, H, W = x.shape
         x = self.x_embedder(x) + self.crop_pos_embed(H, W)
-        c = self.t_embedder(t, dtype=x.dtype) + self.y_embedder(y)  # (N, D)
+        c = self.t_embedder(t) + self.y_embedder(y)  # (N, D)
         context = self.context_embedder(context)
 
         for i, block in enumerate(self.joint_blocks):

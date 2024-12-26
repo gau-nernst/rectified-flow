@@ -65,7 +65,7 @@ def timestep_embedding(t: Tensor, dim: int, max_period: float = 10000.0, time_fa
     """
     t = time_factor * t
     half = dim // 2
-    freqs = torch.exp(-torch.arange(0, half, dtype=torch.float32, device=t.device) / half * math.log(max_period))
+    freqs = torch.exp(-(math.log(max_period) / half) * torch.arange(0, half, dtype=torch.float32, device=t.device))
 
     args = t[:, None].float() * freqs[None]
     embedding = torch.cat([args.cos(), args.sin()], dim=-1)

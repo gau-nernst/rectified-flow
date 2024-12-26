@@ -2,7 +2,7 @@
 
 import torch
 from torch import Tensor, nn
-from transformers import AutoTokenizer, CLIPTextModel, PreTrainedModel, T5EncoderModel
+from transformers import AutoTokenizer, CLIPTextModel, CLIPTextModelWithProjection, PreTrainedModel, T5EncoderModel
 
 
 class TextEmbedder(nn.Module):
@@ -70,11 +70,12 @@ def load_clip_l(output_key: str | int | list[str | int] = "pooler_output"):
 def load_openclip_bigg():
     # not sure which dtype was used for training
     # NOTE: use weights from Stability AI to reduce download time, since it is FP16 and doesn't include ViT's weights.
+    # NOTE: SD3 uses this model with the projection layer
     return TextEmbedder(
         "stabilityai/stable-diffusion-3.5-large",
         max_length=77,
-        model_class=CLIPTextModel,
-        output_key=["pooler_output", -2],
+        model_class=CLIPTextModelWithProjection,
+        output_key=["text_embeds", -2],
         tokenizer_id="laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
         subfolder="text_encoder_2",
         dtype=torch.float16,
