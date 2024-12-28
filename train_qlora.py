@@ -21,8 +21,9 @@ from torchvision.io import ImageReadMode, decode_image, write_png
 from torchvision.transforms import v2
 from tqdm import tqdm
 
-from flux_infer import flux_generate
+from flux_infer import flux_euler_generate
 from modelling import (
+    SD3,
     AutoEncoder,
     Flux,
     LoRALinear,
@@ -102,7 +103,7 @@ def save_images(
         shape = (t5_embeds.shape[0], 16, img_size[0] // 8, img_size[1] // 8)
         noise = torch.randn(shape, device="cuda", dtype=torch.bfloat16, generator=rng)
 
-        latents = flux_generate(flux, t5_embeds, clip_embeds, img_size, noise, compile=True)
+        latents = flux_euler_generate(flux, t5_embeds, clip_embeds, img_size, noise, compile=True)
         imgs = ae.decode(latents, uint8=True).cpu()
 
         for img_idx in range(imgs.shape[0]):
@@ -120,23 +121,33 @@ class InfiniteSampler(Sampler):
 
 
 def compute_loss(
-    flux: Flux, latents: Tensor, t5_embeds: Tensor, clip_embeds: Tensor, time_sampler: TimeSampler
+    model: Flux | SD3,
+    latents: Tensor,
+    t5_embeds: Tensor,
+    clip_embeds: Tensor,
+    time_sampler: TimeSampler,
 ) -> Tensor:
     bsize = latents.shape[0]
-    guidance = torch.full((bsize,), 3.5, device="cuda", dtype=torch.bfloat16)  # FLUX-dev default
-
-    latents = latents.float()  # FP32
-    t_vec = time_sampler(bsize, device=latents.device)
+    t_vec = time_sampler(bsize, device=latents.device).bfloat16()
     noise = torch.randn_like(latents)
     interpolate = latents.lerp(noise, t_vec.view(-1, 1, 1, 1))
 
-    # NOTE: this is a guidance-distilled model. using guidance for finetuning might be "problematic".
-    # best is to fix the guidance for finetuning and later inference.
-    v = flux(interpolate.bfloat16(), t5_embeds, t_vec.bfloat16(), clip_embeds, guidance)
+    if isinstance(model, Flux):
+        # NOTE: this is a guidance-distilled model. using guidance for finetuning might be "problematic".
+        # best is to fix the guidance for finetuning and later inference.
+        # TODO: investigate train with guidance=1.0 and infer with guidance=3.5
+        guidance = torch.full((bsize,), 3.5, device="cuda", dtype=torch.bfloat16)  # FLUX-dev default
+        v = model(interpolate, t_vec, t5_embeds, clip_embeds, guidance)
+
+    elif isinstance(model, SD3):
+        v = model(interpolate, t_vec, t5_embeds, clip_embeds)
+
+    else:
+        raise RuntimeError
 
     # rectified flow loss. predict velocity from latents (t=0) to noise (t=1).
     # TODO: check if we use logit-normal sampling, whether we need to also apply loss weight
-    return F.mse_loss(noise - latents, v.float())
+    return F.mse_loss(noise.float() - latents.float(), v.float())
 
 
 if __name__ == "__main__":

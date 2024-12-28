@@ -45,5 +45,5 @@ if __name__ == "__main__":
 
         imgs = imgs.permute(0, 2, 3, 1).cpu().contiguous()
         for sub_idx in range(imgs.shape[0]):
-            save_path = args.save_dir / f"{offset + sub_idx : 06d}.webp"
+            save_path = args.save_dir / f"{offset + sub_idx:06d}.webp"
             Image.fromarray(imgs[sub_idx].numpy()).save(save_path, lossless=True)

@@ -119,9 +119,7 @@ class SD3Generator:
         latents = latents.lerp(noise, denoise) if latents is not None else noise
 
         # denoise from t=1 (noise) to t=0 (latents)
-        timesteps = torch.linspace(1.0, 0.0, num_steps + 1)
-        timesteps = 3.0 / (3.0 + 1 / timesteps - 1)  # static shift
-        timesteps = timesteps.tolist()
+        timesteps = sd3_timesteps(denoise, 0.0, num_steps)
 
         if not self.sd3_offloader.enable:
             self.sd3.cuda()  # model offload
@@ -147,6 +145,12 @@ class SD3Generator:
         return self.ae.decode(latents, uint8=True)
 
 
+def sd3_timesteps(start: float = 1.0, end: float = 0.0, num_steps: int = 50):
+    timesteps = torch.linspace(start, end, num_steps + 1)
+    timesteps = 3.0 / (3.0 + 1 / timesteps - 1)  # static shift
+    return timesteps.tolist()
+
+
 def sd3_forward(
     sd3: SD3,
     latents: Tensor,
@@ -160,7 +164,7 @@ def sd3_forward(
     skip_layers: tuple[int, ...] = (),
 ):
     # t must be Tensor (cpu is fine) to avoid recompilation
-    t_vec = t.to(latents.dtype).view(1).cuda()
+    t_vec = t.view(1).cuda()
     if cfg_scale != 1.0 and neg_context is not None and neg_vec is not None:
         pos_v, neg_v = sd3(
             latents.repeat(2, 1, 1, 1),

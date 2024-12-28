@@ -63,7 +63,7 @@ def timestep_embedding(t: Tensor, dim: int, max_period: float = 10000.0, time_fa
     :param max_period: controls the minimum frequency of the embeddings.
     :return: an (N, D) Tensor of positional embeddings.
     """
-    t = time_factor * t
+    t = time_factor * t.float()
     half = dim // 2
     freqs = torch.exp(-(math.log(max_period) / half) * torch.arange(0, half, dtype=torch.float32, device=t.device))
 
@@ -71,8 +71,6 @@ def timestep_embedding(t: Tensor, dim: int, max_period: float = 10000.0, time_fa
     embedding = torch.cat([args.cos(), args.sin()], dim=-1)
     if dim % 2:
         embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
-    if torch.is_floating_point(t):
-        embedding = embedding.to(t)
     return embedding
 
 
@@ -323,10 +321,10 @@ class Flux(nn.Module):
 
         img = self.img_in(img)
         txt = self.txt_in(txt)
-        vec = self.time_in(timestep_embedding(timesteps, 256)) + self.vector_in(y)
+        vec = self.time_in(timestep_embedding(timesteps, 256).to(img.dtype)) + self.vector_in(y)
 
         if guidance is not None:  # allow no guidance_embed
-            vec = vec + self.guidance_in(timestep_embedding(guidance, 256))
+            vec = vec + self.guidance_in(timestep_embedding(guidance, 256).to(img.dtype))
 
         img_ids = self.create_img_ids(B, H // 2, W // 2).cuda()
         txt_ids = torch.zeros(*txt.shape[:2], 3, device=txt.device)

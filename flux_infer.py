@@ -90,9 +90,14 @@ class FluxGenerator:
         # this is basically SDEdit https://arxiv.org/abs/2108.01073
         latents = latents.lerp(noise, denoise) if latents is not None else noise
 
-        latents = flux_generate(
+        # denoise from t=1 (noise) to t=0 (latents)
+        # 256 = 64 (from VAE) * 4 (from FLUX's input patchification)
+        timesteps = flux_timesteps(denoise, 0.0, num_steps, width * height // 256)
+
+        latents = flux_euler_generate(
             flux=self.flux,
             latents=latents,
+            timesteps=timesteps,
             txt=t5_embeds,
             vec=clip_vecs,
             neg_txt=neg_t5_embeds,
@@ -108,32 +113,24 @@ class FluxGenerator:
 
 
 @torch.no_grad()
-def flux_generate(
+def flux_euler_generate(
     flux: Flux,
     latents: Tensor,
+    timesteps: list[float],
     txt: Tensor,
     vec: Tensor,
     neg_txt: Tensor | None = None,
     neg_vec: Tensor | None = None,
-    start_t: float = 1.0,
-    end_t: float = 0.0,
     guidance: Tensor | float | None = 3.5,
     cfg_scale: float = 1.0,
-    num_steps: int = 50,
     pbar: bool = False,
     compile: bool = False,
 ):
-    bsize, _, latent_h, latent_w = latents.shape
-
-    # denoise from t=1 (noise) to t=0 (latents)
-    # only dev version has time shift
-    # divide by 4 since FLUX patchifies input
-    timesteps = torch.linspace(start_t, end_t, num_steps + 1)
-    timesteps = time_shift(timesteps, latent_h * latent_w // 4)
     if isinstance(guidance, (int, float)):
-        guidance = torch.full((bsize,), guidance, device="cuda", dtype=torch.bfloat16)
+        guidance = torch.full(latents.shape[:1], guidance, device="cuda", dtype=torch.bfloat16)
 
-    for i in tqdm(range(timesteps.shape[0] - 1), disable=not pbar, dynamic_ncols=True):
+    num_steps = len(timesteps) - 1
+    for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
         torch.compile(flux_step, disable=not compile)(
             flux, latents, txt, vec, neg_txt, neg_vec, timesteps[i], timesteps[i + 1], guidance, cfg_scale
         )
@@ -141,10 +138,17 @@ def flux_generate(
     return latents
 
 
+def flux_timesteps(start: float = 1.0, end: float = 0.0, num_steps: int = 50, img_seq_len: int = 0):
+    # only dev version has time shift
+    timesteps = torch.linspace(start, end, num_steps + 1)
+    timesteps = flux_time_shift(timesteps, img_seq_len)
+    return timesteps.tolist()
+
+
 # https://arxiv.org/abs/2403.03206
 # Section 5.3.2 - Resolution-dependent shifting of timesteps schedules
 # https://github.com/black-forest-labs/flux/blob/805da8571a0b49b6d4043950bd266a65328c243b/src/flux/sampling.py#L222-L238
-def time_shift(timesteps: Tensor | float, img_seq_len: int, base_shift: float = 0.5, max_shift: float = 1.15):
+def flux_time_shift(timesteps: Tensor | float, img_seq_len: int, base_shift: float = 0.5, max_shift: float = 1.15):
     m = (max_shift - base_shift) / (4096 - 256)
     b = base_shift - m * 256
 
@@ -166,7 +170,7 @@ def flux_step(
     cfg_scale: float,
 ) -> None:
     # t_curr and t_next must be Tensor (cpu is fine) to avoid recompilation
-    t_vec = t_curr.to(latents.dtype).view(1).cuda()
+    t_vec = t_curr.view(1).cuda()
 
     if cfg_scale != 1.0 and neg_txt is not None and neg_vec is not None:
         # classifier-free guidance

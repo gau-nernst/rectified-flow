@@ -26,20 +26,21 @@ from torchvision.io import ImageReadMode, decode_image
 from torchvision.transforms import v2
 from tqdm import tqdm
 
-from flux_infer import flux_generate
+from flux_infer import FluxTextEmbedder, flux_euler_generate, flux_timesteps
 from modelling import (
+    SD3,
     AutoEncoder,
     Flux,
     IResNet,
-    TextEmbedder,
     load_adaface_ir101,
-    load_clip_l,
     load_flux,
     load_flux_autoencoder,
-    load_t5,
+    load_sd3_5,
+    load_sd3_autoencoder,
 )
 from modelling.face_embedder import arcface_crop
-from offload import PerLayerOffloadCUDAStream, PerLayerOffloadWithBackward
+from offload import PerLayerOffloadWithBackward
+from sd3_infer import SD3TextEmbedder, sd3_euler_generate, sd3_timesteps
 from time_sampler import LogitNormal, Uniform
 from train_qlora import compute_loss
 
@@ -108,17 +109,6 @@ class FaceTrainDataset(IterableDataset):
                     buckets[bucket_idx] = []
 
 
-class AlternateDataset(IterableDataset):
-    def __init__(self, ds_list: list[IterableDataset]):
-        self.ds_list = ds_list
-
-    def __iter__(self):
-        ds_iter_list = [iter(ds) for ds in self.ds_list]
-        while True:
-            for ds_iter in ds_iter_list:
-                yield next(ds_iter)
-
-
 class FaceTestDataset(Dataset):
     def __init__(self, meta_path: str, img_dir: str) -> None:
         self.img_dir = Path(img_dir)
@@ -149,10 +139,9 @@ class FaceTestDataset(Dataset):
 
 @torch.no_grad()
 def save_images(
-    flux: Flux,
+    model: Flux | SD3,
     ae: AutoEncoder,
-    t5: TextEmbedder,
-    clip: TextEmbedder,
+    text_embedder: FluxTextEmbedder | SD3TextEmbedder,
     adaface: IResNet,
     face_redux: nn.Module,
     meta_path: str,
@@ -165,23 +154,31 @@ def save_images(
     dloader = DataLoader(ds, batch_size=batch_size)
 
     save_dir.mkdir(parents=True, exist_ok=True)
-    latent_h = img_size[0] // 16
-    latent_w = img_size[1] // 16
     rng = torch.Generator("cuda").manual_seed(2024)
 
     img_idx = 0
     for crops, prompts in tqdm(dloader, "Generating images", dynamic_ncols=True):
-        t5_embeds = t5(prompts)
-        clip_embeds = clip(prompts)
+        embeds, vecs = text_embedder(prompts)
         face_embeds = adaface.forward_features(crops.cuda()).flatten(-2).transpose(1, 2)
         with torch.autocast("cuda", torch.bfloat16):
             face_embeds = face_redux(face_embeds.bfloat16())
-        embeds = torch.cat([t5_embeds, face_embeds], dim=1)
+        embeds = torch.cat([embeds, face_embeds], dim=1)
 
-        noise = torch.randn(crops.shape[0], latent_h * latent_w, 64, device="cuda", dtype=torch.bfloat16, generator=rng)
-        latents = flux_generate(flux, embeds, clip_embeds, img_size, noise)
+        shape = crops.shape[0], 16, img_size[0] // 8, img_size[1] // 8
+        noise = torch.randn(shape, device="cuda", dtype=torch.bfloat16, generator=rng)
+
+        if isinstance(model, Flux):
+            timesteps = flux_timesteps(img_seq_len=shape[2] * shape[3] // 4)
+            latents = flux_euler_generate(model, noise, timesteps, embeds, vecs)
+        elif isinstance(model, SD3):
+            neg_embeds, neg_vecs = text_embedder([""] * shape[0])
+            neg_embeds = torch.cat([neg_embeds, torch.zeros_like(face_embeds)], dim=1)
+            timesteps = sd3_timesteps()
+            latents = sd3_euler_generate(model, noise, timesteps, embeds, vecs, neg_embeds, neg_vecs)
+        else:
+            raise RuntimeError
+
         imgs = ae.decode(latents, uint8=True).cpu().permute(0, 2, 3, 1).contiguous().numpy()
-
         for img in imgs:
             Image.fromarray(img).save(save_dir / f"{img_idx:04d}.webp", lossless=True)
             img_idx += 1
@@ -197,12 +194,15 @@ if __name__ == "__main__":
         assert len(out) == 2
         return tuple(out)
 
+    parser.add_argument("--model", choices=["flux-dev", "sd3.5-medium"], default="flux-dev")
+    parser.add_argument("--offload", action="store_true")
     parser.add_argument("--img_sizes", type=parse_img_size, nargs="+", default=(512, 512))
     parser.add_argument("--time_sampler", default="Uniform()")
     parser.add_argument("--compile", action="store_true")
 
     parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--datasets", nargs="+", type=json.loads, required=True)
+    parser.add_argument("--train_ds", type=json.loads, required=True)
+    parser.add_argument("--distill_ds", type=json.loads, required=True)
 
     parser.add_argument("--num_steps", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=1)
@@ -220,38 +220,45 @@ if __name__ == "__main__":
     parser.add_argument("--run_name", default="Debug")
     args = parser.parse_args()
 
-    assert args.batch_size % args.gradient_accumulation == 0
+    assert args.batch_size % (args.gradient_accumulation * 2) == 0
     batch_size = args.batch_size // args.gradient_accumulation
     torch._dynamo.config.cache_size_limit = 10_000
 
-    wandb.init(project="Flux face", name=args.run_name, dir="/tmp")
+    wandb.init(project="Flux face", config=vars(args), name=args.run_name, dir="/tmp")
 
-    ds_list = []
-    for ds_config in args.datasets:
-        ds_list.append(FaceTrainDataset(ds_config["meta_path"], ds_config["img_dir"], args.img_sizes, args.batch_size))
-    ds = AlternateDataset(ds_list)
+    def create_dloader(ds_config: dict):
+        ds = FaceTrainDataset(ds_config["meta_path"], ds_config["img_dir"], args.img_sizes, batch_size // 2)
+        dloader = DataLoader(ds, batch_size=None, num_workers=4, pin_memory=True)
+        return iter(dloader)
 
-    dloader = DataLoader(
-        ds,
-        batch_size=None,
-        num_workers=4,
-        pin_memory=True,
-    )
-    dloader_iter = iter(dloader)
+    train_dloader = create_dloader(args.train_ds)
+    distill_dloader = create_dloader(args.distill_ds)
 
-    flux = load_flux().eval().requires_grad_(False)
-    flux_offloader = PerLayerOffloadWithBackward(flux).cuda()
-    ae = load_flux_autoencoder().eval().cuda()
+    if args.model == "flux-dev":
+        model = load_flux()
+        layers = list(model.double_blocks) + list(model.single_blocks)
+
+        ae = load_flux_autoencoder().eval().cuda()
+        text_embedder = FluxTextEmbedder(offload_t5=True).cuda()
+
+    elif args.model == "sd3.5-medium":
+        model = load_sd3_5()
+        layers = list(model.joint_blocks)
+
+        ae = load_sd3_autoencoder().eval().cuda()
+        text_embedder = SD3TextEmbedder(offload_t5=True, offload_clip_g=True).cuda()
+
+    else:
+        raise ValueError(f"Unsupported {args.model=}")
+
+    model.bfloat16().eval().requires_grad_(False)
+    offloader = PerLayerOffloadWithBackward(model, enable=args.offload).cuda()
 
     # activation checkpointing
-    for layer in list(flux.double_blocks) + list(flux.single_blocks):
+    for layer in layers:
         layer.forward = partial(checkpoint, layer.forward, use_reentrant=False)
-        if args.compile:
+        if args.compile:  # might not be optimal to compile this way, but required for offloading
             layer.forward = torch.compile(layer.forward)
-
-    t5 = load_t5().eval()
-    PerLayerOffloadCUDAStream(t5).cuda()
-    clip = load_clip_l().bfloat16().eval().cuda()
 
     # same MLP as redux
     adaface = load_adaface_ir101().cuda().eval()
@@ -263,9 +270,10 @@ if __name__ == "__main__":
     # nn.init.zeros_(face_redux[-1].weight)
     # nn.init.zeros_(face_redux[-1].bias)
 
+    # TODO: try other optims e.g. muon
     optim = torch.optim.AdamW(face_redux.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True)
 
-    time_sampler = eval(args.time_sampler, dict(Uniform=Uniform, logit_normal=LogitNormal))
+    time_sampler = eval(args.time_sampler, dict(Uniform=Uniform, LogitNormal=LogitNormal))
 
     log_dir = args.log_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{args.run_name}"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -276,10 +284,9 @@ if __name__ == "__main__":
     # inference before any training
     step = 0
     save_images(
-        flux,
+        model,
         ae,
-        t5,
-        clip,
+        text_embedder,
         adaface,
         face_redux,
         args.test_meta_path,
@@ -293,28 +300,47 @@ if __name__ == "__main__":
     time0 = time.perf_counter()
     while step < args.num_steps:
         for _ in range(args.gradient_accumulation):
-            imgs, crops, prompts = next(dloader_iter)
-
+            imgs, crops, prompts = next(train_dloader)
             with torch.no_grad():
                 latents = ae.encode(imgs.cuda(), sample=True)
-                t5_embeds = t5(prompts)
-                clip_embeds = clip(prompts)
+                embeds, vecs = text_embedder(prompts)
                 face_embeds = adaface.forward_features(crops.cuda()).flatten(-2).transpose(1, 2)
-
             with torch.autocast("cuda", torch.bfloat16):
                 face_embeds = face_redux(face_embeds.bfloat16())
 
             # TODO: drop t5_embeds, similar to CFG training
-            embeds = torch.cat([t5_embeds, face_embeds], dim=1)
+            embeds = torch.cat([embeds, face_embeds], dim=1)
+            train_loss = compute_loss(model, latents, embeds, vecs, time_sampler)
 
-            loss = compute_loss(flux, latents, embeds, clip_embeds, imgs.shape[2:], time_sampler)
-            with flux_offloader.disable_forward_hook():
+            # distill loss. student
+            imgs, crops, prompts = next(distill_dloader)
+            with torch.no_grad():
+                latents = ae.encode(imgs.cuda(), sample=True)
+                embeds, vecs = text_embedder(prompts)
+                face_embeds = adaface.forward_features(crops.cuda()).flatten(-2).transpose(1, 2)
+            with torch.autocast("cuda", torch.bfloat16):
+                face_embeds = face_redux(face_embeds.bfloat16())
+
+            bsize = latents.shape[0]
+            t_vec = time_sampler(bsize, device=latents.device).bfloat16()
+            noise = torch.randn_like(latents)
+            interpolate = latents.lerp(noise, t_vec.view(-1, 1, 1, 1))
+
+            # TODO: add guidance
+            teacher_outputs = model(interpolate, t_vec, embeds, vecs)
+            student_outputs = model(interpolate, t_vec, torch.cat([embeds, face_embeds], dim=1), vecs)
+            distill_loss = F.mse_loss(student_outputs.float(), teacher_outputs.float())
+
+            loss = (train_loss + distill_loss) * 0.5
+            with offloader.disable_forward_hook():
                 loss.backward()
 
         if step % args.log_interval == 0:
             grad_norm = sum(p.grad.square().sum() for p in face_redux.parameters()) ** 0.5
             log_dict = dict(
                 loss=loss.item(),
+                train_loss=train_loss.item(),
+                distill_loss=distill_loss.item(),
                 grad_norm=grad_norm,
             )
             wandb.log(log_dict, step)
@@ -338,10 +364,9 @@ if __name__ == "__main__":
 
             # infer with test prompts
             save_images(
-                flux,
+                model,
                 ae,
-                t5,
-                clip,
+                text_embedder,
                 adaface,
                 face_redux,
                 args.test_meta_path,

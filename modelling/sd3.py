@@ -40,7 +40,7 @@ class TimestepEmbedder(nn.Module):
 
     def forward(self, t: Tensor) -> Tensor:
         t_freq = timestep_embedding(t, self.in_dim)
-        return self.mlp(t_freq)
+        return self.mlp(t_freq.to(self.mlp[0].weight.dtype))
 
 
 class VectorEmbedder(nn.Sequential):

@@ -7,7 +7,7 @@ import torch
 from torch import Tensor
 from tqdm import tqdm
 
-from flux_infer import time_shift
+from flux_infer import flux_time_shift
 from modelling import Flux
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,7 @@ def rf_inversion_generate(
     latent_w = width // 8
 
     timesteps = torch.linspace(1, 0, num_steps + 1)[int(start_t * num_steps) :]
-    timesteps = time_shift(timesteps, latent_h * latent_w // 4)
+    timesteps = flux_time_shift(timesteps, latent_h * latent_w // 4)
     if not isinstance(guidance, Tensor):
         guidance = torch.full((bsize,), guidance, device="cuda", dtype=torch.bfloat16)
 
