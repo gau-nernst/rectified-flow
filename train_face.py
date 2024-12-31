@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # improve memory usage
 
@@ -16,13 +16,13 @@ import json
 from functools import partial
 
 import pandas as pd
+import psutil
 import torch
 import torch.nn.functional as F
 import wandb
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader, Dataset, IterableDataset, default_collate, get_worker_info
-from torchvision.io import ImageReadMode, decode_image
 from torchvision.transforms import v2
 from tqdm import tqdm
 
@@ -83,27 +83,29 @@ class FaceTrainDataset(IterableDataset):
                 if counter != worker_id:
                     continue
 
+                # torchvision 0.20 has memory leak when decoding webp. use PIL for robustness
                 img_path = self.img_dir / self.filenames[idx]
-                img = decode_image(img_path, mode=ImageReadMode.RGB, apply_exif_orientation=True)
-                log_ratio = math.log(img.shape[2] / img.shape[1])
+                img_pil = ImageOps.exif_transpose(Image.open(img_path)).convert("RGB")
+                log_ratio = math.log(img_pil.width / img_pil.height)
                 _, bucket_idx = min((abs(log_ratio - x), _i) for _i, x in enumerate(self.log_ratios))
 
                 kpt = self.kpts[idx].copy()
-                kpt[..., 0] *= img.shape[2]
-                kpt[..., 1] *= img.shape[1]
-                img_np = img.permute(1, 2, 0).contiguous().numpy()
+                kpt[..., 0] *= img_pil.width
+                kpt[..., 1] *= img_pil.height
+                img_np = np.array(img_pil)
                 crop = arcface_crop(img_np, kpt)
                 crop = torch.from_numpy(crop).permute(2, 0, 1)
                 crop = F.interpolate(crop.unsqueeze(0), 112, mode="bicubic", antialias=True).squeeze(0)
                 crop = crop.float() / 127.5 - 1
 
                 height, width = self.img_sizes[bucket_idx]
-                scale = max(height / img.shape[1], width / img.shape[2])
-                target_size = (round(img.shape[1] * scale), round(img.shape[2] * scale))
-                img = F.interpolate(img.unsqueeze(0), target_size, mode="bicubic", antialias=True).squeeze(0)
-                img = v2.RandomCrop((height, width))(img)
+                img_pt = torch.from_numpy(img_np).permute(2, 0, 1)
+                scale = max(height / img_pt.shape[1], width / img_pt.shape[2])
+                target_size = (round(img_pt.shape[1] * scale), round(img_pt.shape[2] * scale))
+                img_pt = F.interpolate(img_pt.unsqueeze(0), target_size, mode="bicubic", antialias=True).squeeze(0)
+                img_pt = v2.RandomCrop((height, width))(img_pt)
 
-                buckets[bucket_idx].append((img, crop, self.prompts[idx]))
+                buckets[bucket_idx].append((img_pt, crop, self.prompts[idx]))
                 if len(buckets[bucket_idx]) == self.batch_size:
                     yield default_collate(buckets[bucket_idx])
                     buckets[bucket_idx] = []
@@ -120,12 +122,12 @@ class FaceTestDataset(Dataset):
 
     def __getitem__(self, idx: int):
         img_path = self.img_dir / self.filenames[idx]
-        img = decode_image(img_path, mode=ImageReadMode.RGB, apply_exif_orientation=True)
+        img_pil = ImageOps.exif_transpose(Image.open(img_path)).convert("RGB")
 
         kpt = self.kpts[idx].copy()
-        kpt[..., 0] *= img.shape[2]
-        kpt[..., 1] *= img.shape[1]
-        img_np = img.permute(1, 2, 0).contiguous().numpy()
+        kpt[..., 0] *= img_pil.width
+        kpt[..., 1] *= img_pil.height
+        img_np = np.array(img_pil)
         crop = arcface_crop(img_np, kpt)
         crop = torch.from_numpy(crop).permute(2, 0, 1)
         crop = F.interpolate(crop.unsqueeze(0), 112, mode="bicubic", antialias=True).squeeze(0)
@@ -338,6 +340,7 @@ if __name__ == "__main__":
         if step % args.log_interval == 0:
             grad_norm = sum(p.grad.square().sum() for p in face_redux.parameters()) ** 0.5
             log_dict = dict(
+                lr=args.lr,
                 loss=loss.item(),
                 train_loss=train_loss.item(),
                 distill_loss=distill_loss.item(),
@@ -345,16 +348,20 @@ if __name__ == "__main__":
             )
             wandb.log(log_dict, step)
 
+        # TODO: LR schedule
         optim.step()
         optim.zero_grad()
         step += 1
         pbar.update()
 
         if step % args.log_interval == 0:
+            memory_info = psutil.virtual_memory()
             time1 = time.perf_counter()
             log_dict = dict(
                 imgs_per_second=args.batch_size * args.log_interval / (time1 - time0),
                 max_memory_allocated=torch.cuda.max_memory_allocated(),
+                cpu_mem_active=memory_info.active / 1e9,
+                cpu_mem_used=memory_info.used / 1e9,
             )
             wandb.log(log_dict, step=step)
             time0 = time1
