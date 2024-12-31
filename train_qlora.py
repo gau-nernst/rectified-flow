@@ -14,6 +14,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 import wandb
+from PIL import Image
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader, Dataset, Sampler
@@ -21,7 +22,7 @@ from torchvision.io import ImageReadMode, decode_image, write_png
 from torchvision.transforms import v2
 from tqdm import tqdm
 
-from flux_infer import flux_euler_generate
+from flux_infer import flux_euler_generate, flux_timesteps
 from modelling import (
     SD3,
     AutoEncoder,
@@ -100,15 +101,17 @@ def save_images(
         s = slice(offset, min(offset + batch_size, len(prompts)))
         t5_embeds = t5(prompts[s])
         clip_embeds = clip(prompts[s])
+
         shape = (t5_embeds.shape[0], 16, img_size[0] // 8, img_size[1] // 8)
         noise = torch.randn(shape, device="cuda", dtype=torch.bfloat16, generator=rng)
+        timesteps = flux_timesteps(img_seq_len=img_size[0] * img_size[1] // 256)
 
-        latents = flux_euler_generate(flux, t5_embeds, clip_embeds, img_size, noise, compile=True)
-        imgs = ae.decode(latents, uint8=True).cpu()
+        latents = flux_euler_generate(flux, noise, timesteps, t5_embeds, clip_embeds, compile=True)
+        imgs = ae.decode(latents, uint8=True).permute(0, 2, 3, 1).cpu()
 
         for img_idx in range(imgs.shape[0]):
-            # TODO: investigate saving with webp to save storage
-            write_png(imgs[img_idx], save_dir / f"{offset + img_idx:04d}.png")
+            save_path = save_dir / f"{offset + img_idx:04d}.webp"
+            Image.fromarray(imgs[img_idx].numpy()).save(save_path, lossless=True)
 
 
 class InfiniteSampler(Sampler):
