@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from typing import Iterable
 
 import torch
 from torch import Tensor, nn
@@ -175,9 +176,9 @@ def _get_flat_param(module: nn.Module, device: torch.types.Device | None = None,
 
 
 @torch.compiler.disable()
-def _view_into_flat_param(module: nn.Module, flat_param: Tensor):
+def _view_into_flat_param(params: Iterable[Tensor], flat_param: Tensor):
     offset = 0
-    for p in module.parameters():
+    for p in params:
         p.data = flat_param[offset : offset + p.numel()].view(p.shape)
         offset += p.numel()
 
@@ -200,6 +201,7 @@ class PerLayerOffloadWithBackward:
         self.stream = torch.cuda.Stream()
         self.key2flat_gpu_buffer = dict()
         self.key2flat_cpu_params = dict()
+        self.key2params = dict()
 
         manual_params = set()
 
@@ -258,7 +260,7 @@ class PerLayerOffloadWithBackward:
 
                 # set current layer to the compute buffer
                 compute_buffer, transfer_buffer = self.key2flat_gpu_buffer[key]
-                _view_into_flat_param(module, compute_buffer)
+                _view_into_flat_param(self.key2params[key][idx], compute_buffer)
                 current_stream = torch.cuda.current_stream()
 
                 # compute of current layer depends on H2D transfer of current layer
@@ -281,7 +283,7 @@ class PerLayerOffloadWithBackward:
             def pre_backward_hook(module, grad_output):
                 # NOTE: the order of compute and transfer buffer is swapped in backward
                 transfer_buffer, compute_buffer = self.key2flat_gpu_buffer[key]
-                _view_into_flat_param(module, compute_buffer)
+                _view_into_flat_param(self.key2params[key][idx], compute_buffer)
                 current_stream = torch.cuda.current_stream()
 
                 # synchronize, similar to forward pass
@@ -297,10 +299,12 @@ class PerLayerOffloadWithBackward:
             return pre_backward_hook
 
         self.key2flat_cpu_params[key] = []
+        self.key2params[key] = []
         desc = f"Copying params to pinned memory {key}"
         for i, curr_layer in enumerate(tqdm(module_list, desc=desc, dynamic_ncols=True)):
             flat_param = _get_flat_param(curr_layer, device="cpu", pin_memory=True)
             self.key2flat_cpu_params[key].append(flat_param)
+            self.key2params[key].extend(curr_layer.parameters())
             curr_layer.register_forward_pre_hook(create_pre_forward_hook(i))
             curr_layer.register_full_backward_pre_hook(create_pre_backward_hook(i))
 
@@ -402,7 +406,7 @@ class PerLayerOffloadWithBackwardGradient:
                     return
 
                 compute_buffer, transfer_buffer = self.key2flat_gpu_buffer[key]
-                _view_into_flat_param(module, compute_buffer)
+                _view_into_flat_param(module.parameters(), compute_buffer)
 
                 current_stream = torch.cuda.current_stream()
                 current_stream.wait_stream(self.stream)
@@ -419,7 +423,7 @@ class PerLayerOffloadWithBackwardGradient:
         def create_pre_backward_hook(idx: int):
             def pre_backward_hook(module, grad_output):
                 transfer_buffer, compute_buffer = self.key2flat_gpu_buffer[key]
-                _view_into_flat_param(module, compute_buffer)
+                _view_into_flat_param(module.parameters(), compute_buffer)
 
                 current_stream = torch.cuda.current_stream()
                 current_stream.wait_stream(self.stream)
