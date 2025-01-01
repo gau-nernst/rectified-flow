@@ -1,6 +1,7 @@
 import argparse
 import json
 import logging
+import math
 import os
 import time
 from datetime import datetime
@@ -10,15 +11,15 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # improve me
 
 from functools import partial
 
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
 import wandb
-from PIL import Image
+from PIL import Image, ImageOps
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
-from torch.utils.data import DataLoader, Dataset, Sampler
-from torchvision.io import ImageReadMode, decode_image, write_png
+from torch.utils.data import DataLoader, Dataset, IterableDataset, Sampler, default_collate, get_worker_info
 from torchvision.transforms import v2
 from tqdm import tqdm
 
@@ -42,44 +43,64 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 
-class FluxImageDataset(Dataset):
-    def __init__(self, meta_path: str, data_dir: str, img_size: tuple[int, int]) -> None:
-        self.data_dir = Path(data_dir)
-        self.img_size = img_size
-        self.random_crop = v2.RandomCrop(img_size)
+def bucket_resize_crop(img_pil: Image.Image, img_sizes: list[tuple[int, int]]):
+    ratio = img_pil.width / img_pil.height
+    ratios = [width / height for height, width in img_sizes]
+    _, bucket_idx = min((abs(math.log(ratio / x)), _i) for _i, x in enumerate(ratios))
+    height, width = img_sizes[bucket_idx]
 
-        df = pd.read_csv(meta_path)
-        self.img_paths = df["img_path"].tolist()
-        self.prompts = df["prompt"].tolist()
-
-    def __getitem__(self, idx: int):
-        # resize while maintaining aspect ratio, then make a random crop spanning 1 dimension.
-        # all images should have similar aspect ratios.
-        img = decode_image(self.data_dir / self.img_paths[idx], mode=ImageReadMode.RGB)
-        h, w = img.shape[1:]
-        scale = max(self.img_size[0] / h, self.img_size[1] / w)
-        new_h = round(h * scale)
-        new_w = round(w * scale)
-        img = F.interpolate(img.unsqueeze(0), (new_h, new_w), mode="bicubic", antialias=True).squeeze(0)
-        img = self.random_crop(img)
-
-        return img, self.prompts[idx]
-
-    def __len__(self):
-        return len(self.img_paths)
+    # resize while maintaining aspect ratio, then make a random crop spanning 1 dimension.
+    scale = max(height / img_pil.height, width / img_pil.width)
+    target_height = round(img_pil.height * scale)
+    target_width = round(img_pil.width * scale)
+    img_pil = img_pil.resize((target_width, target_height), Image.Resampling.BICUBIC)
+    img_pt = torch.from_numpy(np.array(img_pil)).permute(2, 0, 1)
+    img_pt = v2.RandomCrop((height, width))(img_pt)
+    return img_pt, bucket_idx
 
 
-class FluxLatentDataset(Dataset):
-    def __init__(self, data_path: str, img_size: tuple[int, int]) -> None:
-        self.data = torch.load(data_path, map_location="cpu", weights_only=True, mmap=True)
-        self.img_size = self.data["img_size"]
-        assert self.img_size == img_size, (self.img_size, img_size)
+class ImageDataset(IterableDataset):
+    def __init__(self, meta_path: str, img_dir: str, img_sizes: list[tuple[int, int]], batch_size: int) -> None:
+        self.img_dir = Path(img_dir)
+        self.img_sizes = img_sizes
+        self.batch_size = batch_size
 
-    def __getitem__(self, idx: int):
-        return tuple(self.data[key][idx] for key in ("latents", "prompts"))
+        meta = pd.read_csv(meta_path)
+        self.filenames = meta["filename"].tolist()
+        self.prompts = meta["prompt"].tolist()
 
-    def __len__(self):
-        return self.data["latents"].shape[0]
+        self.shuffle_rng = torch.Generator()
+        self.shuffle_rng.seed()
+
+    def __iter__(self):
+        buckets = [[] for _ in range(len(self.log_ratios))]
+        counter = -1
+
+        # NOTE: not handle distributed training for now
+        worker_info = get_worker_info()
+        if worker_info is not None:
+            num_workers = worker_info.num_workers
+            worker_id = worker_info.id
+        else:
+            num_workers = 1
+            worker_id = 0
+
+        while True:
+            # indices sequence is identical across workers
+            indices = torch.randperm(len(self.filenames), generator=self.shuffle_rng)
+            for idx in indices:
+                counter = (counter + 1) % num_workers
+                if counter != worker_id:
+                    continue
+
+                # torchvision 0.20 has memory leak when decoding webp. use PIL for robustness
+                img_path = self.img_dir / self.filenames[idx]
+                img_pil = ImageOps.exif_transpose(Image.open(img_path)).convert("RGB")
+                img_pt, bucket_idx = bucket_resize_crop(img_pil, self.img_sizes)
+                buckets[bucket_idx].append((img_pt, self.prompts[idx]))
+                if len(buckets[bucket_idx]) == self.batch_size:
+                    yield default_collate(buckets[bucket_idx])
+                    buckets[bucket_idx] = []
 
 
 @torch.no_grad()
@@ -114,15 +135,6 @@ def save_images(
             Image.fromarray(imgs[img_idx].numpy()).save(save_path, lossless=True)
 
 
-class InfiniteSampler(Sampler):
-    def __init__(self, size: int):
-        self.size = size
-
-    def __iter__(self):
-        while True:
-            yield from torch.randperm(self.size).tolist()
-
-
 def compute_loss(
     model: Flux | SD3,
     latents: Tensor,
@@ -153,24 +165,24 @@ def compute_loss(
     return F.mse_loss(noise.float() - latents.float(), v.float())
 
 
+def parse_img_size(img_size: str):
+    out = [int(x) for x in img_size.split(",")]
+    if len(out) == 1:
+        out = [out[0], out[0]]
+    assert len(out) == 2
+    return tuple(out)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-
-    def parse_img_size(img_size: str):
-        out = json.loads(img_size)
-        if isinstance(out, int):
-            out = [out, out]
-        return tuple(out)
-
-    parser.add_argument("--img_size", type=parse_img_size, default=(512, 512))
+    parser.add_argument("--img_sizes", nargs="+", type=parse_img_size, default=(512, 512))
     parser.add_argument("--lora", type=int, default=8)
     parser.add_argument("--time_sampler", default="Uniform()")
     parser.add_argument("--compile", action="store_true")
 
     parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--meta_path", required=True)
-    parser.add_argument("--data_dir", required=True)
-    parser.add_argument("--latents_path")  # for DreamBooth prior preservation loss
+    parser.add_argument("--train_ds", type=json.loads, required=True)
+    parser.add_argument("--distill_ds", type=json.loads)
 
     parser.add_argument("--num_steps", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=1)
@@ -179,6 +191,7 @@ if __name__ == "__main__":
     parser.add_argument("--gradient_accumulation", type=int, default=1)
 
     parser.add_argument("--eval_interval", type=int, default=100)
+    parser.add_argument("--test_img_size", type=parse_img_size, default=(512, 512))
     parser.add_argument("--test_prompt_path", required=True)
     parser.add_argument("--log_dir", type=Path, required=True)
     parser.add_argument("--log_interval", type=int, default=10)
@@ -190,44 +203,31 @@ if __name__ == "__main__":
 
     wandb.init(project="Flux finetune", name=args.run_name, dir="/tmp")
 
-    if args.latents_path is not None:
+    def create_dloader(ds_config: dict, batch_size: int):
+        ds = ImageDataset(ds_config["meta_path"], ds_config["img_dir"], args.img_sizes, batch_size)
+        dloader = DataLoader(ds, batch_size=None, num_workers=args.num_workers, pin_memory=True)
+        return iter(dloader)
+
+    if args.distill_ds is not None:
         assert batch_size % 2 == 0
-        batch_size = batch_size // 2
-
-        ds_latent = FluxLatentDataset(args.latents_path, args.img_size)
-        dloader_latent = DataLoader(
-            ds_latent,
-            batch_size=batch_size,
-            sampler=InfiniteSampler(len(ds_latent)),
-            num_workers=1,  # just read from disk, don't need a lot of workers
-            pin_memory=True,
-        )
-        dloader_latent_iter = iter(dloader_latent)
+        train_dloader = create_dloader(args.train_ds, batch_size // 2)
+        distill_dloader = create_dloader(args.distill_ds, batch_size // 2)
     else:
-        dloader_latent_iter = None
-
-    ds_img = FluxImageDataset(args.meta_path, args.data_dir, args.img_size)
-    dloader_img = DataLoader(
-        ds_img,
-        batch_size=batch_size,
-        sampler=InfiniteSampler(len(ds_img)),
-        num_workers=args.num_workers,
-        pin_memory=True,
-    )
-    dloader_img_iter = iter(dloader_img)
+        train_dloader = create_dloader(args.train_ds, batch_size)
+        distill_dloader = None
 
     # QLoRA
     flux = load_flux().requires_grad_(False)
-    for module_list in [flux.double_blocks, flux.single_blocks]:
-        quantize_(module_list, NF4Tensor, "cuda").cpu()
-        LoRALinear.to_lora(module_list, rank=args.lora)
+    for layer in [flux.double_blocks, flux.single_blocks]:
+        quantize_(layer, NF4Tensor, "cuda").cpu()
+        LoRALinear.to_lora(layer, rank=args.lora)
+
+        # activation checkpointing
+        layer.forward = partial(checkpoint, layer.forward, use_reentrant=False)
+
     ae = load_flux_autoencoder().cuda()
     optim = torch.optim.AdamW(flux.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True)
     logger.info(flux)
-
-    # activation checkpointing
-    for layer in list(flux.double_blocks) + list(flux.single_blocks):
-        layer.forward = partial(checkpoint, layer.forward, use_reentrant=False)
 
     t5 = load_t5()
     PerLayerOffloadCUDAStream(t5).cuda()
@@ -244,7 +244,7 @@ if __name__ == "__main__":
     # inference before any training
     step = 0
     flux.cuda()
-    save_images(flux, ae, t5, clip, args.test_prompt_path, img_dir / f"step{step:06d}", args.img_size)
+    save_images(flux, ae, t5, clip, args.test_prompt_path, img_dir / f"step{step:06d}", args.test_img_size)
 
     pbar = tqdm(total=args.num_steps, dynamic_ncols=True)
     loss_fn = torch.compile(compute_loss, disable=not args.compile)
@@ -252,18 +252,21 @@ if __name__ == "__main__":
     time0 = time.perf_counter()
     while step < args.num_steps:
         for _ in range(args.gradient_accumulation):
-            imgs, prompts = next(dloader_img_iter)
+            imgs, prompts = next(train_dloader)
             with torch.no_grad():
                 latents = ae.encode(imgs.cuda(), sample=True)
+            train_loss = loss_fn(flux, latents, t5(prompts), clip(prompts), time_sampler)
+            loss = train_loss
 
-            if dloader_latent_iter is not None:
-                latents2, prompts2 = next(dloader_latent_iter)
-                latents = torch.cat([latents, latents2.cuda()])
-                prompts = prompts + prompts2
+            if distill_dloader is not None:
+                imgs, prompts = next(distill_dloader)
+                with torch.no_grad():
+                    latents = ae.encode(imgs.cuda(), sample=True)
 
-            t5_embeds = t5(prompts)
-            clip_embeds = clip(prompts)
-            loss = loss_fn(flux, latents, t5_embeds, clip_embeds, time_sampler)
+                # TODO: use a different distill loss
+                distill_loss = loss_fn(flux, latents, t5(prompts), clip(prompts), time_sampler)
+                loss = (train_loss + distill_loss) * 0.5
+
             loss.backward()
 
         if step % args.log_interval == 0:
@@ -294,6 +297,6 @@ if __name__ == "__main__":
             torch.save(state_dict, ckpt_dir / f"step{step:06d}.pth")
 
             # infer with test prompts
-            save_images(flux, ae, t5, clip, args.test_prompt_path, img_dir / f"step{step:06d}", args.img_size)
+            save_images(flux, ae, t5, clip, args.test_prompt_path, img_dir / f"step{step:06d}", args.test_img_size)
 
     wandb.finish()

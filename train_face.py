@@ -23,7 +23,6 @@ import wandb
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader, Dataset, IterableDataset, default_collate, get_worker_info
-from torchvision.transforms import v2
 from tqdm import tqdm
 
 from flux_infer import FluxTextEmbedder, flux_euler_generate, flux_timesteps
@@ -42,7 +41,7 @@ from modelling.face_embedder import arcface_crop
 from offload import PerLayerOffloadWithBackward
 from sd3_infer import SD3TextEmbedder, sd3_euler_generate, sd3_timesteps
 from time_sampler import LogitNormal, Uniform
-from train_qlora import compute_loss
+from train_qlora import bucket_resize_crop, compute_loss, parse_img_size
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -86,8 +85,6 @@ class FaceTrainDataset(IterableDataset):
                 # torchvision 0.20 has memory leak when decoding webp. use PIL for robustness
                 img_path = self.img_dir / self.filenames[idx]
                 img_pil = ImageOps.exif_transpose(Image.open(img_path)).convert("RGB")
-                log_ratio = math.log(img_pil.width / img_pil.height)
-                _, bucket_idx = min((abs(log_ratio - x), _i) for _i, x in enumerate(self.log_ratios))
 
                 kpt = self.kpts[idx].copy()
                 kpt[..., 0] *= img_pil.width
@@ -98,13 +95,7 @@ class FaceTrainDataset(IterableDataset):
                 crop = F.interpolate(crop.unsqueeze(0), 112, mode="bicubic", antialias=True).squeeze(0)
                 crop = crop.float() / 127.5 - 1
 
-                height, width = self.img_sizes[bucket_idx]
-                img_pt = torch.from_numpy(img_np).permute(2, 0, 1)
-                scale = max(height / img_pt.shape[1], width / img_pt.shape[2])
-                target_size = (round(img_pt.shape[1] * scale), round(img_pt.shape[2] * scale))
-                img_pt = F.interpolate(img_pt.unsqueeze(0), target_size, mode="bicubic", antialias=True).squeeze(0)
-                img_pt = v2.RandomCrop((height, width))(img_pt)
-
+                img_pt, bucket_idx = bucket_resize_crop(img_pil, self.img_sizes)
                 buckets[bucket_idx].append((img_pt, crop, self.prompts[idx]))
                 if len(buckets[bucket_idx]) == self.batch_size:
                     yield default_collate(buckets[bucket_idx])
@@ -188,14 +179,6 @@ def save_images(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-
-    def parse_img_size(img_size: str):
-        out = [int(x) for x in img_size.split(",")]
-        if len(out) == 1:
-            out = [out[0], out[0]]
-        assert len(out) == 2
-        return tuple(out)
-
     parser.add_argument("--model", choices=["flux-dev", "sd3.5-medium"], default="flux-dev")
     parser.add_argument("--offload", action="store_true")
     parser.add_argument("--img_sizes", type=parse_img_size, nargs="+", default=(512, 512))
@@ -230,7 +213,7 @@ if __name__ == "__main__":
 
     def create_dloader(ds_config: dict):
         ds = FaceTrainDataset(ds_config["meta_path"], ds_config["img_dir"], args.img_sizes, batch_size // 2)
-        dloader = DataLoader(ds, batch_size=None, num_workers=4, pin_memory=True)
+        dloader = DataLoader(ds, batch_size=None, num_workers=args.num_workers, pin_memory=True)
         return iter(dloader)
 
     train_dloader = create_dloader(args.train_ds)
@@ -310,7 +293,9 @@ if __name__ == "__main__":
             with torch.autocast("cuda", torch.bfloat16):
                 face_embeds = face_redux(face_embeds.bfloat16())
 
-            # TODO: drop t5_embeds, similar to CFG training
+            # randomly drop t5_embeds, similar to CFG training
+            mask = torch.empty(embeds.shape[0], 1, 1, device="cuda").bernoulli_(p=0.5)
+            embeds *= mask
             embeds = torch.cat([embeds, face_embeds], dim=1)
             train_loss = compute_loss(model, latents, embeds, vecs, time_sampler)
 
