@@ -346,7 +346,7 @@ if __name__ == "__main__":
             time1 = time.perf_counter()
             log_dict = dict(
                 imgs_per_second=args.batch_size * args.log_interval / (time1 - time0),
-                max_memory_allocated=torch.cuda.max_memory_allocated(),
+                max_memory_allocated=torch.cuda.max_memory_allocated() / 1e9,
                 cpu_mem_active=memory_info.active / 1e9,
                 cpu_mem_used=memory_info.used / 1e9,
             )

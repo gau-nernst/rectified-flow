@@ -13,6 +13,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # improve me
 
 import numpy as np
 import pandas as pd
+import psutil
 import torch
 import torch.nn.functional as F
 import wandb
@@ -154,7 +155,8 @@ def compute_loss(
         # NOTE: this is a guidance-distilled model. using guidance for finetuning might be "problematic".
         # best is to fix the guidance for finetuning and later inference.
         # TODO: investigate train with guidance=1.0 and infer with guidance=3.5
-        guidance = torch.full((bsize,), 3.5, device="cuda", dtype=torch.bfloat16)  # FLUX-dev default
+        # guidance = torch.full((bsize,), 3.5, device="cuda", dtype=torch.bfloat16)  # FLUX-dev default
+        guidance = torch.full((bsize,), 1.0, device="cuda", dtype=torch.bfloat16)  # FLUX-dev default
         v = model(interpolate, t_vec, t5_embeds, clip_embeds, guidance)
 
     elif isinstance(model, SD3):
@@ -287,10 +289,13 @@ if __name__ == "__main__":
         pbar.update()
 
         if step % args.log_interval == 0:
+            memory_info = psutil.virtual_memory()
             time1 = time.perf_counter()
             log_dict = dict(
                 imgs_per_second=args.batch_size * args.log_interval / (time1 - time0),
-                max_memory_allocated=torch.cuda.max_memory_allocated(),
+                max_memory_allocated=torch.cuda.max_memory_allocated() / 1e9,
+                cpu_mem_active=memory_info.active / 1e9,
+                cpu_mem_used=memory_info.used / 1e9,
             )
             wandb.log(log_dict, step=step)
             time0 = time1
