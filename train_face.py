@@ -51,10 +51,12 @@ class FaceTrainDataset(IterableDataset):
     def __init__(self, meta_path: str, img_dir: str, img_sizes: list[tuple[int, int]], batch_size: int) -> None:
         self.img_dir = Path(img_dir)
         self.img_sizes = img_sizes
-        self.log_ratios = [math.log(width / height) for height, width in img_sizes]
         self.batch_size = batch_size
 
-        meta = pd.read_csv(meta_path)
+        if str(meta_path).endswith(".tsv"):
+            meta = pd.read_csv(meta_path, sep="\t")
+        else:
+            meta = pd.read_csv(meta_path)
         self.filenames = meta["filename"].tolist()
         self.kpts = np.array([x[0] for x in meta["keypoints"].map(json.loads)])
         self.prompts = meta["prompt"].tolist()
@@ -63,7 +65,7 @@ class FaceTrainDataset(IterableDataset):
         self.shuffle_rng.seed()
 
     def __iter__(self):
-        buckets = [[] for _ in range(len(self.log_ratios))]
+        buckets = [[] for _ in range(len(self.img_sizes))]
 
         counter = -1
         worker_info = get_worker_info()

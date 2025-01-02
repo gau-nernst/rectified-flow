@@ -31,10 +31,10 @@ files.sort()
 args.save_path.parent.mkdir(exist_ok=True, parents=True)
 
 with open(args.save_path, "w") as f:
-    f.write("filename,prompt\n")
+    f.write("filename\tprompt\n")
     for filename in tqdm(files, dynamic_ncols=True):
         img_pil = Image.open(args.img_dir / filename)
         image = load_image(img_pil)
         response = pipe((prompt, image), gen_config=gen_config)
         output = re.sub(r"\s+", " ", response.text)
-        f.write(f'{filename},"{output}"\n')
+        f.write(f"{filename}\t{output}\n")

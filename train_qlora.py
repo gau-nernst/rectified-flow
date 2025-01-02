@@ -5,11 +5,11 @@ import math
 import os
 import time
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # improve memory usage
 
-from functools import partial
 
 import numpy as np
 import pandas as pd
@@ -19,7 +19,7 @@ import wandb
 from PIL import Image, ImageOps
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
-from torch.utils.data import DataLoader, Dataset, IterableDataset, Sampler, default_collate, get_worker_info
+from torch.utils.data import DataLoader, IterableDataset, default_collate, get_worker_info
 from torchvision.transforms import v2
 from tqdm import tqdm
 
@@ -65,7 +65,10 @@ class ImageDataset(IterableDataset):
         self.img_sizes = img_sizes
         self.batch_size = batch_size
 
-        meta = pd.read_csv(meta_path)
+        if str(meta_path).endswith(".tsv"):
+            meta = pd.read_csv(meta_path, sep="\t")
+        else:
+            meta = pd.read_csv(meta_path)
         self.filenames = meta["filename"].tolist()
         self.prompts = meta["prompt"].tolist()
 
@@ -73,7 +76,7 @@ class ImageDataset(IterableDataset):
         self.shuffle_rng.seed()
 
     def __iter__(self):
-        buckets = [[] for _ in range(len(self.log_ratios))]
+        buckets = [[] for _ in range(len(self.img_sizes))]
         counter = -1
 
         # NOTE: not handle distributed training for now
@@ -161,7 +164,6 @@ def compute_loss(
         raise RuntimeError
 
     # rectified flow loss. predict velocity from latents (t=0) to noise (t=1).
-    # TODO: check if we use logit-normal sampling, whether we need to also apply loss weight
     return F.mse_loss(noise.float() - latents.float(), v.float())
 
 
@@ -200,6 +202,7 @@ if __name__ == "__main__":
 
     assert args.batch_size % args.gradient_accumulation == 0
     batch_size = args.batch_size // args.gradient_accumulation
+    torch._dynamo.config.cache_size_limit = 100
 
     wandb.init(project="Flux finetune", name=args.run_name, dir="/tmp")
 
@@ -218,12 +221,14 @@ if __name__ == "__main__":
 
     # QLoRA
     flux = load_flux().requires_grad_(False)
-    for layer in [flux.double_blocks, flux.single_blocks]:
+    for layer in list(flux.double_blocks) + list(flux.single_blocks):
         quantize_(layer, NF4Tensor, "cuda").cpu()
         LoRALinear.to_lora(layer, rank=args.lora)
 
         # activation checkpointing
         layer.forward = partial(checkpoint, layer.forward, use_reentrant=False)
+        if args.compile:
+            layer.forward = torch.compile(layer.forward)
 
     ae = load_flux_autoencoder().cuda()
     optim = torch.optim.AdamW(flux.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True)
@@ -247,7 +252,6 @@ if __name__ == "__main__":
     save_images(flux, ae, t5, clip, args.test_prompt_path, img_dir / f"step{step:06d}", args.test_img_size)
 
     pbar = tqdm(total=args.num_steps, dynamic_ncols=True)
-    loss_fn = torch.compile(compute_loss, disable=not args.compile)
     torch.cuda.reset_peak_memory_stats()
     time0 = time.perf_counter()
     while step < args.num_steps:
@@ -255,7 +259,7 @@ if __name__ == "__main__":
             imgs, prompts = next(train_dloader)
             with torch.no_grad():
                 latents = ae.encode(imgs.cuda(), sample=True)
-            train_loss = loss_fn(flux, latents, t5(prompts), clip(prompts), time_sampler)
+            train_loss = compute_loss(flux, latents, t5(prompts), clip(prompts), time_sampler)
             loss = train_loss
 
             if distill_dloader is not None:
@@ -264,7 +268,7 @@ if __name__ == "__main__":
                     latents = ae.encode(imgs.cuda(), sample=True)
 
                 # TODO: use a different distill loss
-                distill_loss = loss_fn(flux, latents, t5(prompts), clip(prompts), time_sampler)
+                distill_loss = compute_loss(flux, latents, t5(prompts), clip(prompts), time_sampler)
                 loss = (train_loss + distill_loss) * 0.5
 
             loss.backward()
