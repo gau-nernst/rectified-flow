@@ -81,6 +81,9 @@ class FluxGenerator:
 
         if cfg_scale != 1.0:
             neg_t5_embeds, neg_clip_vecs = self.text_embedder(negative_prompt)
+            if neg_t5_embeds.shape[0] == 1:
+                neg_t5_embeds = neg_t5_embeds.expand(bsize, -1, -1)
+                neg_clip_vecs = neg_clip_vecs.expand(bsize, -1)
         else:
             neg_t5_embeds = neg_clip_vecs = None
 
@@ -102,10 +105,8 @@ class FluxGenerator:
             vec=clip_vecs,
             neg_txt=neg_t5_embeds,
             neg_vec=neg_clip_vecs,
-            start_t=denoise,
             guidance=guidance,
             cfg_scale=cfg_scale,
-            num_steps=num_steps,
             pbar=pbar,
             compile=compile,
         )
@@ -180,7 +181,7 @@ def flux_step(
             t_vec,
             torch.cat([txt, neg_txt], dim=0),
             torch.cat([vec, neg_vec], dim=0),
-            guidance,
+            guidance.repeat(2),
         ).chunk(2, dim=0)
         v = neg_v.lerp(v, cfg_scale)
 
