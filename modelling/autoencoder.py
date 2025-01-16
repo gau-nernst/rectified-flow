@@ -40,16 +40,11 @@ class AttnBlock(nn.Module):
         self.register_load_state_dict_pre_hook(hook)
 
     def forward(self, x: Tensor) -> Tensor:
+        # F.sdpa's memory-efficient impl requires ndim=4
         B, C, H, W = x.shape
-        h = self.norm(x).view(B, C, -1).transpose(-1, -2)  # (N, C, H, W) -> (N, HW, C)
-        q = self.q(h)
-        k = self.k(h)
-        v = self.v(h)
-
-        h = F.scaled_dot_product_attention(q, k, v)
-        h = self.proj_out(h)
-        h = h.transpose(-1, -2).view(B, C, H, W)
-
+        h = self.norm(x).view(B, 1, C, H * W).transpose(-1, -2)  # (N, C, H, W) -> (N, 1, HW, C)
+        h = F.scaled_dot_product_attention(self.q(h), self.k(h), self.v(h))
+        h = self.proj_out(h).transpose(-1, -2).view(B, C, H, W)
         return x + h
 
 
