@@ -20,6 +20,7 @@ class AutoEncoderConfig:
     z_channels: int = 16
     scale_factor: float = 1.0
     shift_factor: float = 0.0
+    quant_conv: bool = False
 
 
 class AttnBlock(nn.Module):
@@ -242,6 +243,11 @@ class AutoEncoder(nn.Module):
             config.num_res_blocks,
             config.z_channels,
         )
+
+        ch = config.z_channels
+        self.quant_conv = nn.Conv2d(2 * ch, 2 * ch, 1) if config.quant_conv else nn.Identity()
+        self.post_quant_conv = nn.Conv2d(ch, ch, 1) if config.quant_conv else nn.Identity()
+
         self.scale_factor = config.scale_factor
         self.shift_factor = config.shift_factor
 
@@ -250,13 +256,13 @@ class AutoEncoder(nn.Module):
             x = x.float() / 127.5 - 1
         x = x.to(self.encoder.conv_in.weight.dtype)
 
-        z = diagonal_gaussian(self.encoder(x), sample)
+        z = diagonal_gaussian(self.quant_conv(self.encoder(x)), sample)
         z = self.scale_factor * (z - self.shift_factor)
         return z
 
     def decode(self, z: Tensor, uint8: bool = False) -> Tensor:
         z = z / self.scale_factor + self.shift_factor
-        x = self.decoder(z)
+        x = self.decoder(self.post_quant_conv(z))
 
         if uint8:
             x = x.float().add(1).mul(127.5).clip(0, 255).to(torch.uint8)
@@ -276,6 +282,7 @@ def load_autoencoder(
     state_dict = load_hf_state_dict(repo_id, filename, prefix=prefix)
     config = AutoEncoderConfig(
         z_channels=state_dict["encoder.conv_out.weight"].shape[0] // 2,
+        quant_conv="quant_conv.weight" in state_dict,
         scale_factor=scale_factor,
         shift_factor=shift_factor,
     )
