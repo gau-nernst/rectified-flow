@@ -5,6 +5,7 @@ Supported models:
 - [FLUX.1-dev](https://huggingface.co/black-forest-labs/FLUX.1-dev)
 - [FLUX.1-Redux-dev](https://huggingface.co/black-forest-labs/FLUX.1-Redux-dev)
 - SD3.5 [medium](https://huggingface.co/stabilityai/stable-diffusion-3.5-medium) and [large](https://huggingface.co/stabilityai/stable-diffusion-3.5-large)
+- UNet-based models [SDXL](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0) (ongoing)
 
 Supported features:
 
@@ -15,9 +16,6 @@ Supported features:
 - Single-GPU model offloading for inference and training.
 - [DPM-Solver++(2M)](https://arxiv.org/abs/2211.01095) for SD3.5 (TODO: support FLUX?)
 - Skip-layer guidance for SD3.5
-
-TODO:
-- Investigate the impact of T5 embeddings. SD3 paper says it's more important for text rendering.
 
 Resources:
 
@@ -32,3 +30,4 @@ Notes:
 - FLUX-Redux
   - To reduce influence of image guidance, we can just scale the embeddings down e.g. `* 0.2`. Similarly, to increase influence of text guidance, we can scale T5 embeddings up.
   - We can use multiple guidance images (>=2). Just concat the embeddings.
+- Finetune FLUX with `guidance=1.0` usually leads to better results. The finetuned model can be either used with built-in distilled CFG or true CFG (the latter gives slightly better results). Using both distilled CFG and true CFG is also possible, where distilled CFG > 1.0 can help with coherence, hi-res extrapolation, and the usual strange artifacts of finetuning.

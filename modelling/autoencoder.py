@@ -81,10 +81,10 @@ class Downsample(nn.Sequential):
 
 
 class Upsample(nn.Sequential):
-    def __init__(self, in_channels: int) -> None:
+    def __init__(self, in_channels: int, out_channels: int | None = None) -> None:
         super().__init__()
         self.upsample = nn.Upsample(scale_factor=2.0, mode="nearest")
-        self.conv = nn.Conv2d(in_channels, in_channels, 3, 1, 1)
+        self.conv = nn.Conv2d(in_channels, out_channels or in_channels, 3, 1, 1)
 
 
 class Encoder(nn.Module):
@@ -273,10 +273,14 @@ def load_autoencoder(
     shift_factor: float,
     prefix: str | None = None,
 ):
-    config = AutoEncoderConfig(scale_factor=scale_factor, shift_factor=shift_factor)
+    state_dict = load_hf_state_dict(repo_id, filename, prefix=prefix)
+    config = AutoEncoderConfig(
+        z_channels=state_dict["encoder.conv_out.weight"].shape[0] // 2,
+        scale_factor=scale_factor,
+        shift_factor=shift_factor,
+    )
     with torch.device("meta"):
         ae = AutoEncoder(config)
-    state_dict = load_hf_state_dict(repo_id, filename, prefix=prefix)
     ae.load_state_dict(state_dict, assign=True)
     return ae
 
@@ -300,5 +304,15 @@ def load_sd3_autoencoder():
         # https://github.com/Stability-AI/sd3.5/blob/fbf8f483f992d8d6ad4eaaeb23b1dc5f523c3b3a/sd3_impls.py#L275-L276
         scale_factor=1.5305,
         shift_factor=0.0609,
+        prefix="first_stage_model.",
+    )
+
+
+def load_sdxl_autoencoder():
+    return load_autoencoder(
+        "stabilityai/stable-diffusion-xl-base-1.0",
+        "sd_xl_base_1.0_0.9vae.safetensors",
+        scale_factor=0.13025,
+        shift_factor=0.0,
         prefix="first_stage_model.",
     )

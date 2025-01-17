@@ -57,8 +57,7 @@ class EmbedND(nn.Module):
 def timestep_embedding(t: Tensor, dim: int, max_period: float = 10000.0, time_factor: float = 1000.0):
     """
     Create sinusoidal timestep embeddings.
-    :param t: a 1-D Tensor of N indices, one per batch element.
-                      These may be fractional.
+    :param t: a 1-D Tensor of N indices, one per batch element. These may be fractional.
     :param dim: the dimension of the output.
     :param max_period: controls the minimum frequency of the embeddings.
     :return: an (N, D) Tensor of positional embeddings.
@@ -66,7 +65,6 @@ def timestep_embedding(t: Tensor, dim: int, max_period: float = 10000.0, time_fa
     t = time_factor * t.float()
     half = dim // 2
     freqs = torch.exp(-(math.log(max_period) / half) * torch.arange(0, half, dtype=torch.float32, device=t.device))
-
     args = t[:, None].float() * freqs[None]
     embedding = torch.cat([args.cos(), args.sin()], dim=-1)
     if dim % 2:
@@ -117,7 +115,7 @@ class SelfAttention(nn.Module):
 
     def forward(self, x: Tensor, pe: Tensor) -> Tensor:
         qkv = self.qkv(x)
-        q, k, v = qkv.unflatten(2, (3 * self.num_heads, -1)).permute(0, 2, 1, 3).chunk(3, dim=1)
+        q, k, v = qkv.unflatten(2, (3 * self.num_heads, -1)).transpose(1, 2).chunk(3, dim=1)
         q, k = self.norm(q, k, v)
         x = attention(q, k, v, pe=pe)
         x = self.proj(x)
