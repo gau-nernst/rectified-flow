@@ -2,6 +2,7 @@ from pathlib import Path
 
 import gradio as gr
 import pandas as pd
+import yaml
 
 STATE = dict()
 
@@ -10,13 +11,14 @@ shortcut_js = """
 document.addEventListener(
     'keydown',
     (e) => {
+        if (["input", "textarea"].includes(event.target.tagName.toLowerCase())) {
+            return;
+        }
         switch (event.key) {
             case "ArrowLeft":
-            case "a":
                 document.getElementById("prev_btn").click();
                 break;
             case "ArrowRight":
-            case "d":
                 document.getElementById("next_btn").click();
                 break;
         }
@@ -47,20 +49,40 @@ with gr.Blocks(head=shortcut_js) as demo:
         with gr.Column():
             img_dir = gr.Textbox(label="Input image folder")
 
-            @ (gr.Button("Load images")).click(inputs=[img_dir])
+            @img_dir.submit(inputs=[img_dir])
             def _(img_dir):
                 img_dir = Path(img_dir)
 
                 STATE["img_dir"] = img_dir
-                STATE["filenames"] = [str(x.relative_to(img_dir)) for x in img_dir.glob("**/*.jpg")]
+                STATE["filenames"] = []
+                for ext in ("jpg", "webp"):
+                    STATE["filenames"].extend([str(x.relative_to(img_dir)) for x in img_dir.glob(f"**/*.{ext}")])
                 STATE["filenames"].sort()
                 STATE["database"] = {}
 
                 gr.Info(f"Found {len(STATE['filenames'])} images in {img_dir}")
 
+            taglist_path = gr.Textbox(label="Path to taglist")
+
+            @gr.render(inputs=[taglist_path], triggers=[taglist_path.submit])
+            def _(taglist_path):
+                data = yaml.safe_load(open(taglist_path))
+
+                def add_tag(caption, tag):
+                    return f"{caption}, {tag}" if caption else tag
+
+                with gr.Column():
+                    for key, value in data.items():
+                        assert isinstance(value, list)
+
+                        with gr.Group(), gr.Row():
+                            for tag in value:
+                                tag_btn = gr.Button(tag, min_width=100)
+                                tag_btn.click(add_tag, inputs=[caption, tag_btn], outputs=[caption])
+
             caption = gr.Textbox(label="Caption")
 
-            @ (gr.Button("Save caption", variant="primary")).click(inputs=[filename, caption])
+            @ (gr.Button("Save caption", variant="primary", elem_id="submit_btn")).click(inputs=[filename, caption])
             def _(filename, caption):
                 STATE["database"][filename] = caption
                 gr.Info("Save caption successfully")
