@@ -1,8 +1,15 @@
 __pycache__/
+*.ipynb
 *.png
 *.jpg
+*.webp
 *.txt
-*.*_embeds
 *.csv
 *.pth
 *.onnx
+*.json
+*.jsonl
+*.gz
+*.tar
+*.tsv
+*.log
