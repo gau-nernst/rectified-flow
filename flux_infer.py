@@ -1,14 +1,11 @@
-import logging
 import math
 
 import torch
 from torch import Tensor
 from tqdm import tqdm
 
-from modelling import Flux, load_clip_l, load_flux, load_flux_autoencoder, load_t5
+from modelling import AutoEncoder, Flux, load_clip_l, load_flux, load_flux_autoencoder, load_t5
 from offload import PerLayerOffloadCUDAStream
-
-logger = logging.getLogger(__name__)
 
 
 class FluxTextEmbedder:
@@ -28,7 +25,49 @@ class FluxTextEmbedder:
         return self
 
     def __call__(self, prompt: list[str]):
-        return self.t5(prompt), self.clip(prompt)
+        return self.t5(prompt), self.clip(prompt)  # (B, 512, 4096) and (B, 768)
+
+
+def prepare_inputs(
+    ae: AutoEncoder,
+    text_embedder: FluxTextEmbedder,
+    prompt: str | list[str],
+    negative_prompt: str | list[str] = "",
+    img_size: int | tuple[int, int] = 512,
+    latents: Tensor | None = None,
+    denoise: float = 1.0,
+    cfg_scale: float = 1.0,
+    seed: int | None = None,
+):
+    if isinstance(prompt, str):
+        prompt = [prompt]
+    bsize = len(prompt)
+
+    if isinstance(img_size, int):
+        height = width = img_size
+    else:
+        height, width = img_size
+
+    embeds, vecs = text_embedder(prompt)
+
+    if cfg_scale != 1.0:
+        neg_embeds, neg_vecs = text_embedder(negative_prompt)
+        if neg_embeds.shape[0] == 1:
+            neg_embeds = neg_embeds.expand(bsize, -1, -1)
+            neg_vecs = neg_vecs.expand(bsize, -1)
+    else:
+        neg_embeds = neg_vecs = None
+
+    shape = (bsize, ae.z_dim, height // 8, width // 8)
+    weight = ae.encoder.conv_in.weight
+    rng = torch.Generator("cuda")
+    rng.manual_seed(seed) if seed is not None else rng.seed()
+    noise = torch.randn(shape, device=weight.device, dtype=weight.dtype, generator=rng)
+
+    # this is basically SDEdit https://arxiv.org/abs/2108.01073
+    latents = latents.lerp(noise, denoise) if latents is not None else noise
+
+    return latents, embeds, vecs, neg_embeds, neg_vecs
 
 
 class FluxGenerator:
@@ -57,7 +96,7 @@ class FluxGenerator:
         negative_prompt: str | list[str] = "",
         img_size: int | tuple[int, int] = 512,
         latents: Tensor | None = None,
-        extra_txt_embeds: Tensor | None = None,
+        extra_embeds: Tensor | None = None,
         denoise: float = 1.0,
         guidance: Tensor | float | None = 3.5,
         cfg_scale: float = 1.0,
@@ -66,45 +105,27 @@ class FluxGenerator:
         pbar: bool = False,
         compile: bool = False,
     ):
-        if isinstance(prompt, str):
-            prompt = [prompt]
-        bsize = len(prompt)
+        latents, embeds, vecs, neg_embeds, neg_vecs = prepare_inputs(
+            self.ae, self.text_embedder, prompt, negative_prompt, img_size, latents, denoise, cfg_scale, seed
+        )
 
-        if isinstance(img_size, int):
-            height = width = img_size
-        else:
-            height, width = img_size
-
-        t5_embeds, clip_vecs = self.text_embedder(prompt)  # (B, 512, 4096) and (B, 768)
-        if extra_txt_embeds is not None:  # e.g. Flux-Redux
-            t5_embeds = torch.cat([t5_embeds, extra_txt_embeds], dim=1)
-
-        if cfg_scale != 1.0:
-            neg_t5_embeds, neg_clip_vecs = self.text_embedder(negative_prompt)
-            if neg_t5_embeds.shape[0] == 1:
-                neg_t5_embeds = neg_t5_embeds.expand(bsize, -1, -1)
-                neg_clip_vecs = neg_clip_vecs.expand(bsize, -1)
-        else:
-            neg_t5_embeds = neg_clip_vecs = None
-
-        rng = torch.Generator("cuda")
-        rng.manual_seed(seed) if seed is not None else logger.info(f"Using seed={rng.seed()}")
-        noise = torch.randn(bsize, 16, height // 8, width // 8, device="cuda", dtype=torch.bfloat16, generator=rng)
-        # this is basically SDEdit https://arxiv.org/abs/2108.01073
-        latents = latents.lerp(noise, denoise) if latents is not None else noise
+        if extra_embeds is not None:  # e.g. Flux-Redux
+            embeds = torch.cat([embeds, extra_embeds], dim=1)
+            # NOTE: neg_embeds are not extended
 
         # denoise from t=1 (noise) to t=0 (latents)
-        # 256 = 64 (from VAE) * 4 (from FLUX's input patchification)
-        timesteps = flux_timesteps(denoise, 0.0, num_steps, width * height // 256)
+        # divide by 4 due to FLUX's input patchification
+        height, width = latents.shape[-2:]
+        timesteps = flux_timesteps(denoise, 0.0, num_steps, height * width // 4)
 
         latents = flux_euler_generate(
             flux=self.flux,
             latents=latents,
             timesteps=timesteps,
-            txt=t5_embeds,
-            vec=clip_vecs,
-            neg_txt=neg_t5_embeds,
-            neg_vec=neg_clip_vecs,
+            txt=embeds,
+            vec=vecs,
+            neg_txt=neg_embeds,
+            neg_vec=neg_vecs,
             guidance=guidance,
             cfg_scale=cfg_scale,
             pbar=pbar,

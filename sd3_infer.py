@@ -1,4 +1,3 @@
-import logging
 import math
 from typing import NamedTuple
 
@@ -7,10 +6,9 @@ import torch.nn.functional as F
 from torch import Tensor
 from tqdm import tqdm
 
+from flux_infer import prepare_inputs
 from modelling import SD3, load_clip_l, load_openclip_bigg, load_sd3_5, load_sd3_autoencoder, load_t5
 from offload import PerLayerOffloadCUDAStream
-
-logger = logging.getLogger(__name__)
 
 
 class SD3TextEmbedder:
@@ -52,28 +50,18 @@ class SkipLayerConfig(NamedTuple):
 
 
 class SD3Generator:
-    def __init__(
-        self,
-        sd3: SD3 | None = None,
-        offload_sd3: bool = False,
-        offload_t5: bool = False,
-        dtype: torch.dtype = torch.bfloat16,
-    ) -> None:
+    def __init__(self, sd3: SD3 | None = None, offload_t5: bool = False, dtype: torch.dtype = torch.bfloat16) -> None:
         self.sd3 = (sd3 or load_sd3_5()).to(dtype)  # 4.5 GB for medium in BF16
         self.ae = load_sd3_autoencoder().to(dtype)  # 168 MB in BF16
         self.text_embedder = SD3TextEmbedder(offload_t5, dtype=dtype)
 
-        # autoencoder and clip are small, don't need to offload
-        # NOTE: offload SD3 is not compatible with skip layer
-        self.sd3_offloader = PerLayerOffloadCUDAStream(self.sd3, enable=offload_sd3)
-
     def cpu(self):
-        for m in (self.ae, self.text_embedder, self.sd3_offloader):
+        for m in (self.sd3, self.ae, self.text_embedder):
             m.cpu()
         return self
 
     def cuda(self):
-        for m in (self.ae, self.text_embedder, self.sd3_offloader):
+        for m in (self.sd3, self.ae, self.text_embedder):
             m.cuda()
         return self
 
@@ -93,36 +81,11 @@ class SD3Generator:
         compile: bool = False,
         solver: str = "dpm++2m",
     ):
-        if isinstance(prompt, str):
-            prompt = [prompt]
-        bsize = len(prompt)
+        latents, embeds, vecs, neg_embeds, neg_vecs = prepare_inputs(
+            self.ae, self.text_embedder, prompt, negative_prompt, img_size, latents, denoise, cfg_scale, seed
+        )
+        timesteps = sd3_timesteps(denoise, 0.0, num_steps)  # denoise from t=1 (noise) to t=0 (latents)
 
-        if isinstance(negative_prompt, str):
-            negative_prompt = [negative_prompt] * bsize
-
-        if isinstance(img_size, int):
-            height = width = img_size
-        else:
-            height, width = img_size
-
-        embeds, clip_vecs = self.text_embedder(prompt)
-        if cfg_scale != 1.0:
-            neg_embeds, neg_clip_vecs = self.text_embedder(negative_prompt)
-        else:
-            neg_embeds = neg_clip_vecs = None
-
-        rng = torch.Generator("cuda")
-        rng.manual_seed(seed) if seed is not None else logger.info(f"Using seed={rng.seed()}")
-        dtype = self.sd3.context_embedder.weight.dtype
-        noise = torch.randn(bsize, 16, height // 8, width // 8, device="cuda", dtype=dtype, generator=rng)
-        # this is basically SDEdit https://arxiv.org/abs/2108.01073
-        latents = latents.lerp(noise, denoise) if latents is not None else noise
-
-        # denoise from t=1 (noise) to t=0 (latents)
-        timesteps = sd3_timesteps(denoise, 0.0, num_steps)
-
-        if not self.sd3_offloader.enable:
-            self.sd3.cuda()  # model offload
         solver_fn = {
             "euler": sd3_euler_generate,
             "dpm++2m": sd3_dpmpp2m_generate,
@@ -132,16 +95,14 @@ class SD3Generator:
             latents,
             timesteps,
             context=embeds,
-            vec=clip_vecs,
+            vec=vecs,
             neg_context=neg_embeds,
-            neg_vec=neg_clip_vecs,
+            neg_vec=neg_vecs,
             cfg_scale=cfg_scale,
             slg_config=slg_config,
             pbar=pbar,
             compile=compile,
         )
-        if not self.sd3_offloader.enable:
-            self.sd3.cpu()
         return self.ae.decode(latents, uint8=True)
 
 

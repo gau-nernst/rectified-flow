@@ -244,9 +244,9 @@ class AutoEncoder(nn.Module):
             config.z_channels,
         )
 
-        ch = config.z_channels
-        self.quant_conv = nn.Conv2d(2 * ch, 2 * ch, 1) if config.quant_conv else nn.Identity()
-        self.post_quant_conv = nn.Conv2d(ch, ch, 1) if config.quant_conv else nn.Identity()
+        self.z_dim = config.z_channels
+        self.quant_conv = nn.Conv2d(2 * self.z_dim, 2 * self.z_dim, 1) if config.quant_conv else nn.Identity()
+        self.post_quant_conv = nn.Conv2d(self.z_dim, self.z_dim, 1) if config.quant_conv else nn.Identity()
 
         self.scale_factor = config.scale_factor
         self.shift_factor = config.shift_factor
