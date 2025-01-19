@@ -101,7 +101,7 @@ with gr.Blocks(head=shortcut_js) as demo:
             def _(db_path):
                 Path(db_path).parent.mkdir(exist_ok=True, parents=True)
                 df = pd.DataFrame(list(STATE["database"].items()), columns=["filename", "prompt"])
-                df.to_csv(db_path, index=False)
+                df.sort_values("filename").to_csv(db_path, index=False)
                 gr.Info(f"Successfully exported data to {db_path}")
 
         # link img_idx to other stuff
