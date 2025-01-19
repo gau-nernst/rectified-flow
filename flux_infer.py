@@ -195,7 +195,8 @@ def flux_step(
     # t_curr and t_next must be Tensor (cpu is fine) to avoid recompilation
     t_vec = t_curr.view(1).cuda()
 
-    if cfg_scale != 1.0 and neg_txt is not None and neg_vec is not None:
+    if cfg_scale != 1.0:
+        assert neg_txt is not None and neg_vec is not None
         # classifier-free guidance
         v, neg_v = flux(
             latents.repeat(2, 1, 1, 1),

@@ -304,18 +304,23 @@ class PerLayerOffloadWithBackward:
         for i, curr_layer in enumerate(tqdm(module_list, desc=desc, dynamic_ncols=True)):
             flat_param = _get_flat_param(curr_layer, device="cpu", pin_memory=True)
             self.key2flat_cpu_params[key].append(flat_param)
-            self.key2params[key].extend(curr_layer.parameters())
+            self.key2params[key].append(list(curr_layer.parameters()))
             curr_layer.register_forward_pre_hook(create_pre_forward_hook(i))
             curr_layer.register_full_backward_pre_hook(create_pre_backward_hook(i))
 
-        # we will maintain this invariance: after forward or backward pass, 1st buffer
-        # always contains 1st layer, and 2nd buffer contains last layer.
+        # layers may have different number of params -> use max_size
         max_size = max(p.numel() for p in self.key2flat_cpu_params[key])
         buffer1 = torch.empty(max_size, device="cuda", dtype=flat_param.dtype)
         buffer2 = torch.empty(max_size, device="cuda", dtype=flat_param.dtype)
-        _copy_buffer(self.key2flat_cpu_params[key][0], buffer1)
-        _copy_buffer(self.key2flat_cpu_params[key][-1], buffer2)
         self.key2flat_gpu_buffer[key] = [buffer1, buffer2]
+
+        # we will maintain this invariance: after forward or backward pass, 1st buffer
+        # always contains 1st layer, and 2nd buffer contains last layer.
+        _copy_buffer(self.key2flat_cpu_params[key][0], buffer1)
+        _view_into_flat_param(self.key2params[key][0], buffer1)
+
+        _copy_buffer(self.key2flat_cpu_params[key][-1], buffer2)
+        _view_into_flat_param(self.key2params[key][-1], buffer2)
 
 
 class PerLayerOffloadWithBackwardGradient:

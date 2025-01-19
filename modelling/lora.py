@@ -4,7 +4,13 @@ from torch import Tensor, nn
 
 
 class LoRALinear(nn.Linear):
-    def init_lora(self, rank: int = 8, scale: float = 1.0, dtype: torch.dtype | None = torch.float32) -> None:
+    def init_lora(
+        self,
+        rank: int = 8,
+        scale: float = 1.0,
+        dtype: torch.dtype | None = torch.float32,
+        device: torch.types.Device = None,
+    ) -> None:
         """By default, use FP32 for LoRA weights."""
         assert rank > 0
         self.rank = rank
@@ -16,8 +22,8 @@ class LoRALinear(nn.Linear):
             self.bias.requires_grad_(False)
 
         dtype = dtype or self.weight.dtype
-        self.lora_a = nn.Parameter(torch.empty(rank, self.in_features, dtype=dtype))
-        self.lora_b = nn.Parameter(torch.empty(self.out_features, rank, dtype=dtype))
+        self.lora_a = nn.Parameter(torch.empty(rank, self.in_features, dtype=dtype, device=device))
+        self.lora_b = nn.Parameter(torch.empty(self.out_features, rank, dtype=dtype, device=device))
 
         nn.init.kaiming_normal_(self.lora_a, a=5**0.5)
         nn.init.zeros_(self.lora_b)
@@ -27,20 +33,25 @@ class LoRALinear(nn.Linear):
 
     def forward(self, x: Tensor):
         out = F.linear(x, self.weight, self.bias)
-        out = out + x @ self.lora_a.to(x.dtype).T @ self.lora_b.to(x.dtype).T * self.scale
+        out = out + x @ (self.lora_a * self.scale / self.rank).to(x.dtype).T @ self.lora_b.to(x.dtype).T
         return out
 
     @staticmethod
-    def to_lora(model: nn.Module, rank: int = 8, dtype: torch.dtype = torch.float32):
+    def add_lora(
+        model: nn.Module,
+        rank: int = 8,
+        dtype: torch.dtype = torch.float32,
+        device: torch.types.Device = None,
+    ):
         if rank == 0:
             return model
 
         if type(model) == nn.Linear:  # exact match, no subclass
             model.__class__ = LoRALinear
-            model.init_lora(rank=rank, dtype=dtype)
+            model.init_lora(rank=rank, dtype=dtype, device=device)
         else:
             for child in model.children():
-                LoRALinear.to_lora(child, rank=rank, dtype=dtype)
+                LoRALinear.add_lora(child, rank=rank, dtype=dtype, device=device)
         return model
 
     def merge_lora(model: nn.Module):

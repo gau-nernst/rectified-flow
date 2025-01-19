@@ -36,7 +36,7 @@ from modelling import (
     load_flux_autoencoder,
     load_t5,
 )
-from offload import PerLayerOffloadCUDAStream
+from offload import PerLayerOffloadCUDAStream, PerLayerOffloadWithBackward
 from subclass import NF4Tensor, quantize_
 from time_sampler import LogitNormal, TimeSampler, Uniform
 
@@ -122,6 +122,9 @@ def save_images(
     save_dir.mkdir(parents=True, exist_ok=True)
     rng = torch.Generator("cuda").manual_seed(2024)
 
+    neg_t5_embeds = t5([""])
+    neg_clip_embeds = clip([""])
+
     for offset in tqdm(range(0, len(prompts), batch_size), "Generating images", dynamic_ncols=True):
         s = slice(offset, min(offset + batch_size, len(prompts)))
         t5_embeds = t5(prompts[s])
@@ -131,12 +134,23 @@ def save_images(
         noise = torch.randn(shape, device="cuda", dtype=torch.bfloat16, generator=rng)
         timesteps = flux_timesteps(img_seq_len=img_size[0] * img_size[1] // 256)
 
-        latents = flux_euler_generate(flux, noise, timesteps, t5_embeds, clip_embeds, compile=True)
-        imgs = ae.decode(latents, uint8=True).permute(0, 2, 3, 1).cpu()
+        for guidance, cfg_scale in [(3.5, 1.0), (1.0, 3.5), (2.0, 2.0)]:
+            latents = flux_euler_generate(
+                flux,
+                noise.clone(),
+                timesteps,
+                t5_embeds,
+                clip_embeds,
+                neg_t5_embeds.expand_as(t5_embeds),
+                neg_clip_embeds.expand_as(clip_embeds),
+                guidance=guidance,
+                cfg_scale=cfg_scale,
+            )
+            imgs = ae.decode(latents, uint8=True).permute(0, 2, 3, 1).cpu()
 
-        for img_idx in range(imgs.shape[0]):
-            save_path = save_dir / f"{offset + img_idx:04d}.webp"
-            Image.fromarray(imgs[img_idx].numpy()).save(save_path, lossless=True)
+            for img_idx in range(imgs.shape[0]):
+                save_path = save_dir / f"{offset + img_idx:04d}_{guidance:.1f}-{cfg_scale:.1f}.webp"
+                Image.fromarray(imgs[img_idx].numpy()).save(save_path, lossless=True)
 
 
 def compute_loss(
@@ -152,11 +166,8 @@ def compute_loss(
     interpolate = latents.lerp(noise, t_vec.view(-1, 1, 1, 1))
 
     if isinstance(model, Flux):
-        # NOTE: this is a guidance-distilled model. using guidance for finetuning might be "problematic".
-        # best is to fix the guidance for finetuning and later inference.
-        # TODO: investigate train with guidance=1.0 and infer with guidance=3.5
-        # guidance = torch.full((bsize,), 3.5, device="cuda", dtype=torch.bfloat16)  # FLUX-dev default
-        guidance = torch.full((bsize,), 1.0, device="cuda", dtype=torch.bfloat16)  # FLUX-dev default
+        # finetune at guidance=1.0 is better than at 3.5
+        guidance = torch.full((bsize,), 1.0, device="cuda", dtype=torch.bfloat16)
         v = model(interpolate, t_vec, t5_embeds, clip_embeds, guidance)
 
     elif isinstance(model, SD3):
@@ -174,6 +185,7 @@ def parse_img_size(img_size: str):
     if len(out) == 1:
         out = [out[0], out[0]]
     assert len(out) == 2
+    assert out[0] % 16 == 0 and out[1] % 16 == 0, out
     return tuple(out)
 
 
@@ -181,7 +193,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--img_sizes", nargs="+", type=parse_img_size, default=(512, 512))
     parser.add_argument("--lora", type=int, default=8)
-    parser.add_argument("--time_sampler", default="Uniform()")
+    parser.add_argument("--time_sampler", default="LogitNormal()")
     parser.add_argument("--compile", action="store_true")
 
     parser.add_argument("--num_workers", type=int, default=4)
@@ -204,7 +216,8 @@ if __name__ == "__main__":
 
     assert args.batch_size % args.gradient_accumulation == 0
     batch_size = args.batch_size // args.gradient_accumulation
-    torch._dynamo.config.cache_size_limit = 100
+    torch._dynamo.config.cache_size_limit = 1000
+    torch._dynamo.config.accumulated_cache_size_limit = 1000
 
     wandb.init(project="Flux finetune", name=args.run_name, dir="/tmp")
 
@@ -221,16 +234,17 @@ if __name__ == "__main__":
         train_dloader = create_dloader(args.train_ds, batch_size)
         distill_dloader = None
 
-    # QLoRA
+    # TODO: seems like slower than QLoRA. to be investigated
     flux = load_flux().requires_grad_(False)
+    offloader = PerLayerOffloadWithBackward(flux).cuda()
     for layer in list(flux.double_blocks) + list(flux.single_blocks):
-        quantize_(layer, NF4Tensor, "cuda").cpu()
-        LoRALinear.to_lora(layer, rank=args.lora)
+        # quantize_(layer, NF4Tensor, "cuda").cpu()  # QLoRA
+        LoRALinear.add_lora(layer, rank=args.lora, device="cuda")
 
         # activation checkpointing
         layer.forward = partial(checkpoint, layer.forward, use_reentrant=False)
         if args.compile:
-            layer.forward = torch.compile(layer.forward)
+            layer.forward = torch.compile(layer.forward, dynamic=False)
 
     ae = load_flux_autoencoder().cuda()
     optim = torch.optim.AdamW(flux.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True)
@@ -250,7 +264,6 @@ if __name__ == "__main__":
 
     # inference before any training
     step = 0
-    flux.cuda()
     save_images(flux, ae, t5, clip, args.test_prompt_path, img_dir / f"step{step:06d}", args.test_img_size)
 
     pbar = tqdm(total=args.num_steps, dynamic_ncols=True)
@@ -273,7 +286,8 @@ if __name__ == "__main__":
                 distill_loss = compute_loss(flux, latents, t5(prompts), clip(prompts), time_sampler)
                 loss = (train_loss + distill_loss) * 0.5
 
-            loss.backward()
+            with offloader.disable_forward_hook():
+                loss.backward()
 
         if step % args.log_interval == 0:
             grad_norm = sum(p.grad.square().sum() for p in flux.parameters() if p.grad is not None) ** 0.5
