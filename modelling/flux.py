@@ -342,10 +342,19 @@ class Flux(nn.Module):
         return img
 
 
-def _load_flux(repo_id: str, filename: str):
+def _load_flux(repo_id: str, filename: str, prefix: str | None = None):
+    state_dict = load_hf_state_dict(repo_id, filename, prefix=prefix)
+
+    # support depth-pruned FLUX, such as Flex.1-alpha
+    config = FluxConfig(depth=0, depth_single_blocks=0)
+    for key in state_dict.keys():
+        if key.startswith("double_blocks."):
+            config.depth = max(config.depth, int(key.split(".")[1]) + 1)
+        elif key.startswith("single_blocks."):
+            config.depth_single_blocks = max(config.depth_single_blocks, int(key.split(".")[1]) + 1)
+
     with torch.device("meta"):
-        model = Flux()
-    state_dict = load_hf_state_dict(repo_id, filename)
+        model = Flux(config)
     model.load_state_dict(state_dict, assign=True)
     return model
 
@@ -353,13 +362,20 @@ def _load_flux(repo_id: str, filename: str):
 def load_flux(name: str = "dev"):
     # BF16
     assert name in ("dev", "schnell")
-    return _load_flux(f"black-forest-labs/FLUX.1-{name}", f"flux1-{name}.safetensors")
+    return _load_flux(
+        f"black-forest-labs/FLUX.1-{name}",
+        f"flux1-{name}.safetensors",
+    )
 
 
-def load_shuttle(name: str = "3.1-aesthetic"):
+def load_flex_alpha():
+    # 8.16M params -> 16.33GB in BF16
     # BF16
-    assert name in ("3-diffusion", "3.1-aesthetic")
-    return _load_flux(f"shuttleai/shuttle-{name}", f"shuttle-{name}.safetensors")
+    return _load_flux(
+        "ostris/Flex.1-alpha",
+        "Flex.1-alpha.safetensors",
+        prefix="model.diffusion_model.",
+    )
 
 
 # https://github.com/black-forest-labs/flux/blob/805da8571a0b49b6d4043950bd266a65328c243b/src/flux/modules/image_embedders.py#L66

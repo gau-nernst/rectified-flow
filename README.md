@@ -2,7 +2,7 @@
 
 Supported models:
 
-- [FLUX.1-dev](https://huggingface.co/black-forest-labs/FLUX.1-dev)
+- [FLUX.1-dev](https://huggingface.co/black-forest-labs/FLUX.1-dev) and its derivatives: [Flex.1-alpha](https://huggingface.co/ostris/Flex.1-alpha)
 - [FLUX.1-Redux-dev](https://huggingface.co/black-forest-labs/FLUX.1-Redux-dev)
 - SD3.5 [medium](https://huggingface.co/stabilityai/stable-diffusion-3.5-medium) and [large](https://huggingface.co/stabilityai/stable-diffusion-3.5-large)
 - UNet-based models [SDXL](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0) (ongoing)
