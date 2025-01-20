@@ -189,7 +189,7 @@ def flux_step(
     neg_vec: Tensor | None,
     t_curr: Tensor,
     t_next: Tensor,
-    guidance: Tensor,
+    guidance: Tensor | None,
     cfg_scale: float,
 ) -> None:
     # t_curr and t_next must be Tensor (cpu is fine) to avoid recompilation
@@ -203,7 +203,7 @@ def flux_step(
             t_vec,
             torch.cat([txt, neg_txt], dim=0),
             torch.cat([vec, neg_vec], dim=0),
-            guidance.repeat(2),
+            guidance.repeat(2) if guidance is not None else None,
         ).chunk(2, dim=0)
         v = neg_v.lerp(v, cfg_scale)
 

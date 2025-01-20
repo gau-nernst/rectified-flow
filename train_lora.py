@@ -10,7 +10,6 @@ from pathlib import Path
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # improve memory usage
 
-
 import numpy as np
 import pandas as pd
 import psutil
@@ -37,7 +36,6 @@ from modelling import (
     load_t5,
 )
 from offload import PerLayerOffloadCUDAStream, PerLayerOffloadWithBackward
-from subclass import NF4Tensor, quantize_
 from time_sampler import LogitNormal, TimeSampler, Uniform
 
 logger = logging.getLogger()
@@ -61,10 +59,18 @@ def bucket_resize_crop(img_pil: Image.Image, img_sizes: list[tuple[int, int]]):
 
 
 class ImageDataset(IterableDataset):
-    def __init__(self, meta_path: str, img_dir: str, img_sizes: list[tuple[int, int]], batch_size: int) -> None:
+    def __init__(
+        self,
+        meta_path: str,
+        img_dir: str,
+        img_sizes: list[tuple[int, int]],
+        batch_size: int,
+        drop_tag_rate: float = 0.0,
+    ) -> None:
         self.img_dir = Path(img_dir)
         self.img_sizes = img_sizes
         self.batch_size = batch_size
+        self.drop_tag_rate = drop_tag_rate
 
         if str(meta_path).endswith(".tsv"):
             meta = pd.read_csv(meta_path, sep="\t")
@@ -101,7 +107,16 @@ class ImageDataset(IterableDataset):
                 img_path = self.img_dir / self.filenames[idx]
                 img_pil = ImageOps.exif_transpose(Image.open(img_path)).convert("RGB")
                 img_pt, bucket_idx = bucket_resize_crop(img_pil, self.img_sizes)
-                buckets[bucket_idx].append((img_pt, self.prompts[idx]))
+
+                prompt = self.prompts[idx]
+                if self.drop_tag_rate > 0.0 and torch.rand(()).item() < self.drop_tag_rate:
+                    SEPARATOR = ", "
+                    tags = prompt.split(SEPARATOR)
+                    if len(tags) > 5:
+                        tags.pop(torch.randint(len(tags), size=()).item())
+                        prompt = SEPARATOR.join(tags)
+
+                buckets[bucket_idx].append((img_pt, prompt))
                 if len(buckets[bucket_idx]) == self.batch_size:
                     yield default_collate(buckets[bucket_idx])
                     buckets[bucket_idx] = []
@@ -199,6 +214,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--train_ds", type=json.loads, required=True)
     parser.add_argument("--distill_ds", type=json.loads)
+    parser.add_argument("--drop_tag_rate", type=float, default=0.0)
 
     parser.add_argument("--num_steps", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=1)
@@ -212,6 +228,7 @@ if __name__ == "__main__":
     parser.add_argument("--log_dir", type=Path, required=True)
     parser.add_argument("--log_interval", type=int, default=10)
     parser.add_argument("--run_name", default="Debug")
+    parser.add_argument("--resume")
     args = parser.parse_args()
 
     assert args.batch_size % args.gradient_accumulation == 0
@@ -222,7 +239,7 @@ if __name__ == "__main__":
     wandb.init(project="Flux finetune", name=args.run_name, dir="/tmp")
 
     def create_dloader(ds_config: dict, batch_size: int):
-        ds = ImageDataset(ds_config["meta_path"], ds_config["img_dir"], args.img_sizes, batch_size)
+        ds = ImageDataset(ds_config["meta_path"], ds_config["img_dir"], args.img_sizes, batch_size, args.drop_tag_rate)
         dloader = DataLoader(ds, batch_size=None, num_workers=args.num_workers, pin_memory=True)
         return iter(dloader)
 
@@ -238,7 +255,6 @@ if __name__ == "__main__":
     flux = load_flux().requires_grad_(False)
     offloader = PerLayerOffloadWithBackward(flux).cuda()
     for layer in list(flux.double_blocks) + list(flux.single_blocks):
-        # quantize_(layer, NF4Tensor, "cuda").cpu()  # QLoRA
         LoRALinear.add_lora(layer, rank=args.lora, device="cuda")
 
         # activation checkpointing
@@ -262,9 +278,21 @@ if __name__ == "__main__":
     ckpt_dir.mkdir(exist_ok=True)
     img_dir = log_dir / "images"
 
-    # inference before any training
     step = 0
-    save_images(flux, ae, t5, clip, args.test_prompt_path, img_dir / f"step{step:06d}", args.test_img_size)
+    if args.resume is not None:
+        ckpt = torch.load(args.resume, map_location="cpu", weights_only=True, mmap=True)
+
+        if "model" in ckpt:  # training checkpoint
+            print("Load FLUX: ", flux.load_state_dict(ckpt["model"], strict=False))
+            optim.load_state_dict(ckpt["optim"])
+            step = ckpt["step"]
+
+        else:  # model only
+            print("Load FLUX: ", flux.load_state_dict(ckpt, strict=False))
+
+    # inference before any training
+    if step == 0:
+        save_images(flux, ae, t5, clip, args.test_prompt_path, img_dir / f"step{step:06d}", args.test_img_size)
 
     pbar = tqdm(total=args.num_steps, dynamic_ncols=True)
     torch.cuda.reset_peak_memory_stats()
@@ -316,8 +344,12 @@ if __name__ == "__main__":
 
         if step % args.eval_interval == 0:
             # only save LoRA weights. Flux doesn't have buffers.
-            state_dict = {name: p.detach().bfloat16() for name, p in flux.named_parameters() if p.requires_grad}
-            torch.save(state_dict, ckpt_dir / f"step{step:06d}.pth")
+            ckpt = dict(
+                model={name: p.detach().bfloat16() for name, p in flux.named_parameters() if p.requires_grad},
+                optim=optim.state_dict(),
+                step=step,
+            )
+            torch.save(ckpt, ckpt_dir / f"step{step:06d}.pth")
 
             # infer with test prompts
             save_images(flux, ae, t5, clip, args.test_prompt_path, img_dir / f"step{step:06d}", args.test_img_size)
