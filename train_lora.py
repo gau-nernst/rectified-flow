@@ -294,7 +294,7 @@ if __name__ == "__main__":
     if step == 0:
         save_images(flux, ae, t5, clip, args.test_prompt_path, img_dir / f"step{step:06d}", args.test_img_size)
 
-    pbar = tqdm(total=args.num_steps, dynamic_ncols=True)
+    pbar = tqdm(initial=step, total=args.num_steps, dynamic_ncols=True)
     torch.cuda.reset_peak_memory_stats()
     time0 = time.perf_counter()
     while step < args.num_steps:
