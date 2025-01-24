@@ -12,20 +12,19 @@ from offload import PerLayerOffloadCUDAStream
 
 
 class SD3TextEmbedder:
-    def __init__(self, offload_t5: bool = False, offload_clip_g: bool = False, dtype: torch.dtype = torch.bfloat16):
+    def __init__(self, offload_t5: bool = False, dtype: torch.dtype = torch.bfloat16):
         self.t5 = load_t5(max_length=256).to(dtype)  # 9.5 GB in BF16
         self.clip_l = load_clip_l(output_key=["pooler_output", -2]).to(dtype)  # 246 MB in BF16
         self.clip_g = load_openclip_bigg().to(dtype)  # 1.4 GB in BF16
         self.t5_offloader = PerLayerOffloadCUDAStream(self.t5, enable=offload_t5)
-        self.clip_g_offloader = PerLayerOffloadCUDAStream(self.clip_g, enable=offload_clip_g)
 
     def cpu(self):
-        for m in (self.clip_l, self.t5_offloader, self.clip_g_offloader):
+        for m in (self.clip_l, self.clip_g, self.t5_offloader):
             m.cpu()
         return self
 
     def cuda(self):
-        for m in (self.clip_l, self.t5_offloader, self.clip_g_offloader):
+        for m in (self.clip_l, self.clip_g, self.t5_offloader):
             m.cuda()
         return self
 

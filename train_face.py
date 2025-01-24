@@ -1,47 +1,30 @@
 import argparse
 import json
 import logging
-import math
 import os
 import time
 from datetime import datetime
 from pathlib import Path
 
-import numpy as np
-from PIL import Image, ImageOps
-
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # improve memory usage
 
-import json
-from functools import partial
-
+import numpy as np
 import pandas as pd
 import psutil
 import torch
 import torch.nn.functional as F
 import wandb
+from PIL import Image, ImageOps
 from torch import nn
-from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader, Dataset, IterableDataset, default_collate, get_worker_info
 from tqdm import tqdm
 
 from flux_infer import FluxTextEmbedder, flux_euler_generate, flux_timesteps
-from modelling import (
-    SD3,
-    AutoEncoder,
-    Flux,
-    IResNet,
-    load_adaface_ir101,
-    load_flux,
-    load_flux_autoencoder,
-    load_sd3_5,
-    load_sd3_autoencoder,
-)
+from modelling import SD3, AutoEncoder, Flux, IResNet, load_adaface_ir101
 from modelling.face_embedder import arcface_crop
-from offload import PerLayerOffloadWithBackward
 from sd3_infer import SD3TextEmbedder, sd3_euler_generate, sd3_timesteps
 from time_sampler import LogitNormal, Uniform
-from train_qlora import bucket_resize_crop, compute_loss, parse_img_size
+from train_lora import bucket_resize_crop, compute_loss, parse_img_size, setup_model
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -181,7 +164,7 @@ def save_images(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", choices=["flux-dev", "sd3.5-medium"], default="flux-dev")
+    parser.add_argument("--model", default="flux-dev")
     parser.add_argument("--offload", action="store_true")
     parser.add_argument("--img_sizes", type=parse_img_size, nargs="+", default=(512, 512))
     parser.add_argument("--time_sampler", default="Uniform()")
@@ -221,31 +204,7 @@ if __name__ == "__main__":
     train_dloader = create_dloader(args.train_ds)
     distill_dloader = create_dloader(args.distill_ds)
 
-    if args.model == "flux-dev":
-        model = load_flux()
-        layers = list(model.double_blocks) + list(model.single_blocks)
-
-        ae = load_flux_autoencoder().eval().cuda()
-        text_embedder = FluxTextEmbedder(offload_t5=True).cuda()
-
-    elif args.model == "sd3.5-medium":
-        model = load_sd3_5()
-        layers = list(model.joint_blocks)
-
-        ae = load_sd3_autoencoder().eval().cuda()
-        text_embedder = SD3TextEmbedder(offload_t5=True, offload_clip_g=True).cuda()
-
-    else:
-        raise ValueError(f"Unsupported {args.model=}")
-
-    model.bfloat16().eval().requires_grad_(False)
-    offloader = PerLayerOffloadWithBackward(model, enable=args.offload).cuda()
-
-    # activation checkpointing
-    for layer in layers:
-        layer.forward = partial(checkpoint, layer.forward, use_reentrant=False)
-        if args.compile:  # might not be optimal to compile this way, but required for offloading
-            layer.forward = torch.compile(layer.forward)
+    model, offloader, ae, text_embedder = setup_model(args.model, args.offload, 0)
 
     # same MLP as redux
     adaface = load_adaface_ir101().cuda().eval()

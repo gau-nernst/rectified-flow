@@ -23,19 +23,20 @@ from torch.utils.data import DataLoader, IterableDataset, default_collate, get_w
 from torchvision.transforms import v2
 from tqdm import tqdm
 
-from flux_infer import flux_euler_generate, flux_timesteps
+from flux_infer import FluxTextEmbedder, flux_euler_generate, flux_timesteps
 from modelling import (
     SD3,
     AutoEncoder,
     Flux,
     LoRALinear,
-    TextEmbedder,
-    load_clip_l,
+    load_flex_alpha,
     load_flux,
     load_flux_autoencoder,
-    load_t5,
+    load_sd3_5,
+    load_sd3_autoencoder,
 )
-from offload import PerLayerOffloadCUDAStream, PerLayerOffloadWithBackward
+from offload import PerLayerOffloadWithBackward
+from sd3_infer import SD3TextEmbedder, sd3_euler_generate, sd3_timesteps
 from time_sampler import LogitNormal, TimeSampler, Uniform
 
 logger = logging.getLogger()
@@ -124,10 +125,9 @@ class ImageDataset(IterableDataset):
 
 @torch.no_grad()
 def save_images(
-    flux: Flux,
+    model: Flux | SD3,
     ae: AutoEncoder,
-    t5: TextEmbedder,
-    clip: TextEmbedder,
+    text_embedder: FluxTextEmbedder | SD3TextEmbedder,
     prompt_path: str,
     save_dir: Path,
     img_size: tuple[int, int],
@@ -137,62 +137,111 @@ def save_images(
     save_dir.mkdir(parents=True, exist_ok=True)
     rng = torch.Generator("cuda").manual_seed(2024)
 
-    neg_t5_embeds = t5([""])
-    neg_clip_embeds = clip([""])
+    neg_embeds, neg_vecs = text_embedder([""])
 
     for offset in tqdm(range(0, len(prompts), batch_size), "Generating images", dynamic_ncols=True):
-        s = slice(offset, min(offset + batch_size, len(prompts)))
-        t5_embeds = t5(prompts[s])
-        clip_embeds = clip(prompts[s])
+        embeds, vecs = text_embedder(prompts[offset : offset + batch_size])
 
-        shape = (t5_embeds.shape[0], 16, img_size[0] // 8, img_size[1] // 8)
+        shape = (embeds.shape[0], 16, img_size[0] // 8, img_size[1] // 8)
         noise = torch.randn(shape, device="cuda", dtype=torch.bfloat16, generator=rng)
-        timesteps = flux_timesteps(img_seq_len=img_size[0] * img_size[1] // 256)
 
-        for guidance, cfg_scale in [(3.5, 1.0), (1.0, 3.5), (2.0, 2.0)]:
-            latents = flux_euler_generate(
-                flux,
-                noise.clone(),
+        if isinstance(model, Flux):
+            timesteps = flux_timesteps(img_seq_len=shape[2] * shape[3] // 4)
+
+            if len(model.double_blocks) == 19:  # flux-dev
+                guidance_list = [(3.5, 1.0), (1.0, 3.5), (2.0, 2.0)]
+            elif len(model.double_blocks) == 8:  # flex-alpha
+                guidance_list = [(3.5, 1.0), (None, 3.5), (2.0, 2.0)]
+            else:
+                raise ValueError
+
+            for guidance, cfg_scale in guidance_list:
+                latents = flux_euler_generate(
+                    model,
+                    noise.clone(),
+                    timesteps,
+                    embeds,
+                    vecs,
+                    neg_embeds.expand_as(embeds),
+                    neg_vecs.expand_as(vecs),
+                    guidance=guidance,
+                    cfg_scale=cfg_scale,
+                )
+                imgs = ae.decode(latents, uint8=True).permute(0, 2, 3, 1).cpu()
+                for img_idx in range(imgs.shape[0]):
+                    save_path = save_dir / f"{offset + img_idx:04d}_{guidance}-{cfg_scale}.webp"
+                    Image.fromarray(imgs[img_idx].numpy()).save(save_path, lossless=True)
+
+        elif isinstance(model, SD3):
+            timesteps = sd3_timesteps()
+            latents = sd3_euler_generate(
+                model,
+                noise,
                 timesteps,
-                t5_embeds,
-                clip_embeds,
-                neg_t5_embeds.expand_as(t5_embeds),
-                neg_clip_embeds.expand_as(clip_embeds),
-                guidance=guidance,
-                cfg_scale=cfg_scale,
+                embeds,
+                vecs,
+                neg_embeds.expand_as(embeds),
+                neg_vecs.expand_as(vecs),
             )
             imgs = ae.decode(latents, uint8=True).permute(0, 2, 3, 1).cpu()
-
             for img_idx in range(imgs.shape[0]):
-                save_path = save_dir / f"{offset + img_idx:04d}_{guidance:.1f}-{cfg_scale:.1f}.webp"
+                save_path = save_dir / f"{offset + img_idx:04d}.webp"
                 Image.fromarray(imgs[img_idx].numpy()).save(save_path, lossless=True)
 
 
 def compute_loss(
     model: Flux | SD3,
     latents: Tensor,
-    t5_embeds: Tensor,
-    clip_embeds: Tensor,
+    embeds: Tensor,
+    vecs: Tensor,
     time_sampler: TimeSampler,
+    model_kwargs: dict,
 ) -> Tensor:
     bsize = latents.shape[0]
     t_vec = time_sampler(bsize, device=latents.device).bfloat16()
     noise = torch.randn_like(latents)
     interpolate = latents.lerp(noise, t_vec.view(-1, 1, 1, 1))
 
-    if isinstance(model, Flux):
-        # finetune at guidance=1.0 is better than at 3.5
-        guidance = torch.full((bsize,), 1.0, device="cuda", dtype=torch.bfloat16)
-        v = model(interpolate, t_vec, t5_embeds, clip_embeds, guidance)
-
-    elif isinstance(model, SD3):
-        v = model(interpolate, t_vec, t5_embeds, clip_embeds)
-
-    else:
-        raise RuntimeError
+    v = model(interpolate, t_vec, embeds, vecs, **model_kwargs)
 
     # rectified flow loss. predict velocity from latents (t=0) to noise (t=1).
     return F.mse_loss(noise.float() - latents.float(), v.float())
+
+
+def setup_model(model_name: str, offload: bool, lora: int):
+    if model_name in ("flux-dev", "flex-alpha"):
+        model = {
+            "flux-dev": load_flux,
+            "flex-alpha": load_flex_alpha,
+        }[model_name]()
+        layers = list(model.double_blocks) + list(model.single_blocks)
+
+        ae = load_flux_autoencoder()
+        text_embedder = FluxTextEmbedder(offload_t5=True)
+
+    elif model_name in ("sd3.5-medium", "sd3.5-large"):
+        model = load_sd3_5(model_name.removeprefix("sd3.5-"))
+        layers = list(model.joint_blocks)
+
+        ae = load_sd3_autoencoder()
+        text_embedder = SD3TextEmbedder(offload_t5=True)
+
+    else:
+        raise ValueError(f"Unsupported {model_name=}")
+
+    model.bfloat16().eval().requires_grad_(False)
+    offloader = PerLayerOffloadWithBackward(model, enable=offload).cuda()
+    ae.eval().cuda()
+    text_embedder.cuda()
+
+    for layer in layers:
+        if lora > 0:
+            LoRALinear.add_lora(layer, rank=lora, device="cuda")
+        layer.forward = partial(checkpoint, layer.forward, use_reentrant=False)
+        if args.compile:  # might not be optimal to compile this way, but required for offloading
+            layer.forward = torch.compile(layer.forward)
+
+    return model, offloader, ae, text_embedder
 
 
 def parse_img_size(img_size: str):
@@ -206,6 +255,8 @@ def parse_img_size(img_size: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--model", default="flux-dev")
+    parser.add_argument("--offload", action="store_true")
     parser.add_argument("--img_sizes", nargs="+", type=parse_img_size, default=(512, 512))
     parser.add_argument("--lora", type=int, default=8)
     parser.add_argument("--time_sampler", default="LogitNormal()")
@@ -251,25 +302,9 @@ if __name__ == "__main__":
         train_dloader = create_dloader(args.train_ds, batch_size)
         distill_dloader = None
 
-    # TODO: seems like slower than QLoRA. to be investigated
-    flux = load_flux().requires_grad_(False)
-    offloader = PerLayerOffloadWithBackward(flux).cuda()
-    for layer in list(flux.double_blocks) + list(flux.single_blocks):
-        LoRALinear.add_lora(layer, rank=args.lora, device="cuda")
-
-        # activation checkpointing
-        layer.forward = partial(checkpoint, layer.forward, use_reentrant=False)
-        if args.compile:
-            layer.forward = torch.compile(layer.forward, dynamic=False)
-
-    ae = load_flux_autoencoder().cuda()
-    optim = torch.optim.AdamW(flux.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True)
-    logger.info(flux)
-
-    t5 = load_t5()
-    PerLayerOffloadCUDAStream(t5).cuda()
-    clip = load_clip_l().bfloat16().cuda()
-
+    model, offloader, ae, text_embedder = setup_model(args.model, args.offload, args.lora)
+    optim = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True)
+    logger.info(model)
     time_sampler = eval(args.time_sampler, dict(Uniform=Uniform, LogitNormal=LogitNormal))
 
     log_dir = args.log_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{args.run_name}"
@@ -283,16 +318,16 @@ if __name__ == "__main__":
         ckpt = torch.load(args.resume, map_location="cpu", weights_only=True, mmap=True)
 
         if "model" in ckpt:  # training checkpoint
-            print("Load FLUX: ", flux.load_state_dict(ckpt["model"], strict=False))
+            print("Load model: ", model.load_state_dict(ckpt["model"], strict=False))
             optim.load_state_dict(ckpt["optim"])
             step = ckpt["step"]
 
         else:  # model only
-            print("Load FLUX: ", flux.load_state_dict(ckpt, strict=False))
+            print("Load model: ", model.load_state_dict(ckpt, strict=False))
 
     # inference before any training
     if step == 0:
-        save_images(flux, ae, t5, clip, args.test_prompt_path, img_dir / f"step{step:06d}", args.test_img_size)
+        save_images(model, ae, text_embedder, args.test_prompt_path, img_dir / f"step{step:06d}", args.test_img_size)
 
     pbar = tqdm(initial=step, total=args.num_steps, dynamic_ncols=True)
     torch.cuda.reset_peak_memory_stats()
@@ -300,25 +335,27 @@ if __name__ == "__main__":
     while step < args.num_steps:
         for _ in range(args.gradient_accumulation):
             imgs, prompts = next(train_dloader)
-            with torch.no_grad():
-                latents = ae.encode(imgs.cuda(), sample=True)
-            train_loss = compute_loss(flux, latents, t5(prompts), clip(prompts), time_sampler)
-            loss = train_loss
 
             if distill_dloader is not None:
-                imgs, prompts = next(distill_dloader)
-                with torch.no_grad():
-                    latents = ae.encode(imgs.cuda(), sample=True)
+                distill_imgs, distill_prompts = next(distill_dloader)
+                imgs = torch.cat([imgs, distill_imgs], dim=0)
+                prompts = prompts + distill_prompts
 
-                # TODO: use a different distill loss
-                distill_loss = compute_loss(flux, latents, t5(prompts), clip(prompts), time_sampler)
-                loss = (train_loss + distill_loss) * 0.5
+            with torch.no_grad():
+                latents = ae.encode(imgs.cuda(), sample=True)
 
+            if args.model == "flux-dev":
+                # finetune at guidance=1.0 is better than at 3.5
+                model_kwargs = dict(guidance=torch.full((imgs.shape[0],), 1.0, device="cuda", dtype=torch.bfloat16))
+            else:
+                model_kwargs = dict()
+
+            loss = compute_loss(model, latents, *text_embedder(prompts), time_sampler, model_kwargs)
             with offloader.disable_forward_hook():
                 loss.backward()
 
         if step % args.log_interval == 0:
-            grad_norm = sum(p.grad.square().sum() for p in flux.parameters() if p.grad is not None) ** 0.5
+            grad_norm = sum(p.grad.square().sum() for p in model.parameters() if p.grad is not None) ** 0.5
             log_dict = dict(
                 loss=loss.item(),
                 grad_norm=grad_norm,
@@ -345,13 +382,15 @@ if __name__ == "__main__":
         if step % args.eval_interval == 0:
             # only save LoRA weights. Flux doesn't have buffers.
             ckpt = dict(
-                model={name: p.detach().bfloat16() for name, p in flux.named_parameters() if p.requires_grad},
+                model={name: p.detach().bfloat16() for name, p in model.named_parameters() if p.requires_grad},
                 optim=optim.state_dict(),
                 step=step,
             )
             torch.save(ckpt, ckpt_dir / f"step{step:06d}.pth")
 
             # infer with test prompts
-            save_images(flux, ae, t5, clip, args.test_prompt_path, img_dir / f"step{step:06d}", args.test_img_size)
+            save_images(
+                model, ae, text_embedder, args.test_prompt_path, img_dir / f"step{step:06d}", args.test_img_size
+            )
 
     wandb.finish()
