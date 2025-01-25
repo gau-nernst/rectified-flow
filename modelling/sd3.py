@@ -226,8 +226,15 @@ class SD3(nn.Module):
         w = w // self.patch_size
         assert h <= self.pos_embed_size, (h, self.pos_embed_size)
         assert w <= self.pos_embed_size, (w, self.pos_embed_size)
-        top = (self.pos_embed_size - h) // 2
-        left = (self.pos_embed_size - w) // 2
+        if self.training:
+            # random crop on pos_embed as outlined in
+            # https://huggingface.co/stabilityai/stable-diffusion-3.5-medium
+            top = torch.randint(0, self.pos_embed_size - h + 1, size=()).item()
+            left = torch.randint(0, self.pos_embed_size - w + 1, size=()).item()
+        else:
+            # center crop
+            top = (self.pos_embed_size - h) // 2
+            left = (self.pos_embed_size - w) // 2
         pos_embed = self.pos_embed.view(1, self.pos_embed_size, self.pos_embed_size, -1)
         pos_embed = pos_embed[:, top : top + h, left : left + w, :]
         pos_embed = pos_embed.flatten(1, 2)
@@ -252,11 +259,11 @@ class SD3(nn.Module):
 
 
 def load_sd3_5(size: str = "medium"):
-    if size == "large":
+    if size == "large":  # 8.06 M params
         depth = 38
         pos_embed_size = 192
         num_x_self_attn_layers = 0
-    elif size == "medium":
+    elif size == "medium":  # 2.24 M params
         depth = 24
         pos_embed_size = 384
         num_x_self_attn_layers = 13

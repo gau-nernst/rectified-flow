@@ -1,62 +1,29 @@
 import argparse
 import json
 import logging
-import math
 import os
 import time
 from datetime import datetime
-from functools import partial
 from pathlib import Path
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # improve memory usage
 
-import numpy as np
 import pandas as pd
 import psutil
 import torch
-import torch.nn.functional as F
 import wandb
 from PIL import Image, ImageOps
-from torch import Tensor
-from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader, IterableDataset, default_collate, get_worker_info
-from torchvision.transforms import v2
 from tqdm import tqdm
 
 from flux_infer import FluxTextEmbedder, flux_euler_generate, flux_timesteps
-from modelling import (
-    SD3,
-    AutoEncoder,
-    Flux,
-    LoRALinear,
-    load_flex_alpha,
-    load_flux,
-    load_flux_autoencoder,
-    load_sd3_5,
-    load_sd3_autoencoder,
-)
-from offload import PerLayerOffloadWithBackward
+from modelling import SD3, AutoEncoder, Flux
 from sd3_infer import SD3TextEmbedder, sd3_euler_generate, sd3_timesteps
-from time_sampler import LogitNormal, TimeSampler, Uniform
+from time_sampler import LogitNormal, Uniform
+from train_utils import EMA, compute_loss, parse_img_size, random_resize, setup_model
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-
-
-def bucket_resize_crop(img_pil: Image.Image, img_sizes: list[tuple[int, int]]):
-    ratio = img_pil.width / img_pil.height
-    ratios = [width / height for height, width in img_sizes]
-    _, bucket_idx = min((abs(math.log(ratio / x)), _i) for _i, x in enumerate(ratios))
-    height, width = img_sizes[bucket_idx]
-
-    # resize while maintaining aspect ratio, then make a random crop spanning 1 dimension.
-    scale = max(height / img_pil.height, width / img_pil.width)
-    target_height = round(img_pil.height * scale)
-    target_width = round(img_pil.width * scale)
-    img_pil = img_pil.resize((target_width, target_height), Image.Resampling.BICUBIC)
-    img_pt = torch.from_numpy(np.array(img_pil)).permute(2, 0, 1)
-    img_pt = v2.RandomCrop((height, width))(img_pt)
-    return img_pt, bucket_idx
 
 
 class ImageDataset(IterableDataset):
@@ -64,12 +31,14 @@ class ImageDataset(IterableDataset):
         self,
         meta_path: str,
         img_dir: str,
-        img_sizes: list[tuple[int, int]],
+        min_size: int,
+        max_size: int,
         batch_size: int,
         drop_tag_rate: float = 0.0,
     ) -> None:
         self.img_dir = Path(img_dir)
-        self.img_sizes = img_sizes
+        self.min_size = min_size
+        self.max_size = max_size
         self.batch_size = batch_size
         self.drop_tag_rate = drop_tag_rate
 
@@ -84,7 +53,7 @@ class ImageDataset(IterableDataset):
         self.shuffle_rng.seed()
 
     def __iter__(self):
-        buckets = [[] for _ in range(len(self.img_sizes))]
+        buckets = dict()
         counter = -1
 
         # NOTE: not handle distributed training for now
@@ -107,7 +76,7 @@ class ImageDataset(IterableDataset):
                 # torchvision 0.20 has memory leak when decoding webp. use PIL for robustness
                 img_path = self.img_dir / self.filenames[idx]
                 img_pil = ImageOps.exif_transpose(Image.open(img_path)).convert("RGB")
-                img_pt, bucket_idx = bucket_resize_crop(img_pil, self.img_sizes)
+                img_pt = random_resize(img_pil, self.min_size, self.max_size)
 
                 prompt = self.prompts[idx]
                 if self.drop_tag_rate > 0.0 and torch.rand(()).item() < self.drop_tag_rate:
@@ -117,10 +86,14 @@ class ImageDataset(IterableDataset):
                         tags.pop(torch.randint(len(tags), size=()).item())
                         prompt = SEPARATOR.join(tags)
 
-                buckets[bucket_idx].append((img_pt, prompt))
-                if len(buckets[bucket_idx]) == self.batch_size:
-                    yield default_collate(buckets[bucket_idx])
-                    buckets[bucket_idx] = []
+                img_size = tuple(img_pt.shape[-2:])
+                if img_size not in buckets:
+                    buckets[img_size] = []
+                buckets[img_size].append((img_pt, prompt))
+
+                if len(buckets[img_size]) == self.batch_size:
+                    yield default_collate(buckets[img_size])
+                    buckets[img_size] = []
 
 
 @torch.no_grad()
@@ -133,6 +106,7 @@ def save_images(
     img_size: tuple[int, int],
     batch_size: int = 4,
 ):
+    model.eval()
     prompts = [line.rstrip() for line in open(prompt_path, encoding="utf-8")]
     save_dir.mkdir(parents=True, exist_ok=True)
     rng = torch.Generator("cuda").manual_seed(2024)
@@ -189,78 +163,16 @@ def save_images(
                 Image.fromarray(imgs[img_idx].numpy()).save(save_path, lossless=True)
 
 
-def compute_loss(
-    model: Flux | SD3,
-    latents: Tensor,
-    embeds: Tensor,
-    vecs: Tensor,
-    time_sampler: TimeSampler,
-    model_kwargs: dict,
-) -> Tensor:
-    bsize = latents.shape[0]
-    t_vec = time_sampler(bsize, device=latents.device).bfloat16()
-    noise = torch.randn_like(latents)
-    interpolate = latents.lerp(noise, t_vec.view(-1, 1, 1, 1))
-
-    v = model(interpolate, t_vec, embeds, vecs, **model_kwargs)
-
-    # rectified flow loss. predict velocity from latents (t=0) to noise (t=1).
-    return F.mse_loss(noise.float() - latents.float(), v.float())
-
-
-def setup_model(model_name: str, offload: bool, lora: int):
-    if model_name in ("flux-dev", "flex-alpha"):
-        model = {
-            "flux-dev": load_flux,
-            "flex-alpha": load_flex_alpha,
-        }[model_name]()
-        layers = list(model.double_blocks) + list(model.single_blocks)
-
-        ae = load_flux_autoencoder()
-        text_embedder = FluxTextEmbedder(offload_t5=True)
-
-    elif model_name in ("sd3.5-medium", "sd3.5-large"):
-        model = load_sd3_5(model_name.removeprefix("sd3.5-"))
-        layers = list(model.joint_blocks)
-
-        ae = load_sd3_autoencoder()
-        text_embedder = SD3TextEmbedder(offload_t5=True)
-
-    else:
-        raise ValueError(f"Unsupported {model_name=}")
-
-    model.bfloat16().eval().requires_grad_(False)
-    offloader = PerLayerOffloadWithBackward(model, enable=offload).cuda()
-    ae.eval().cuda()
-    text_embedder.cuda()
-
-    for layer in layers:
-        if lora > 0:
-            LoRALinear.add_lora(layer, rank=lora, device="cuda")
-        layer.forward = partial(checkpoint, layer.forward, use_reentrant=False)
-        if args.compile:  # might not be optimal to compile this way, but required for offloading
-            layer.forward = torch.compile(layer.forward)
-
-    return model, offloader, ae, text_embedder
-
-
-def parse_img_size(img_size: str):
-    out = [int(x) for x in img_size.split(",")]
-    if len(out) == 1:
-        out = [out[0], out[0]]
-    assert len(out) == 2
-    assert out[0] % 16 == 0 and out[1] % 16 == 0, out
-    return tuple(out)
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="flux-dev")
     parser.add_argument("--offload", action="store_true")
-    parser.add_argument("--img_sizes", nargs="+", type=parse_img_size, default=(512, 512))
+    parser.add_argument("--min_size", type=int, default=512)
+    parser.add_argument("--max_size", type=int, default=1024)
     parser.add_argument("--lora", type=int, default=8)
     parser.add_argument("--time_sampler", default="LogitNormal()")
     parser.add_argument("--compile", action="store_true")
+    parser.add_argument("--ema", action="store_true")
 
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--train_ds", type=json.loads, required=True)
@@ -290,7 +202,9 @@ if __name__ == "__main__":
     wandb.init(project="Flux finetune", name=args.run_name, dir="/tmp")
 
     def create_dloader(ds_config: dict, batch_size: int):
-        ds = ImageDataset(ds_config["meta_path"], ds_config["img_dir"], args.img_sizes, batch_size, args.drop_tag_rate)
+        ds = ImageDataset(
+            ds_config["meta_path"], ds_config["img_dir"], args.min_size, args.max_size, batch_size, args.drop_tag_rate
+        )
         dloader = DataLoader(ds, batch_size=None, num_workers=args.num_workers, pin_memory=True)
         return iter(dloader)
 
@@ -302,7 +216,8 @@ if __name__ == "__main__":
         train_dloader = create_dloader(args.train_ds, batch_size)
         distill_dloader = None
 
-    model, offloader, ae, text_embedder = setup_model(args.model, args.offload, args.lora)
+    model, offloader, ae, text_embedder = setup_model(args.model, args.offload, args.lora, args.compile)
+    ema = EMA(model) if args.ema else None
     optim = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True)
     logger.info(model)
     time_sampler = eval(args.time_sampler, dict(Uniform=Uniform, LogitNormal=LogitNormal))
@@ -318,12 +233,14 @@ if __name__ == "__main__":
         ckpt = torch.load(args.resume, map_location="cpu", weights_only=True, mmap=True)
 
         if "model" in ckpt:  # training checkpoint
-            print("Load model: ", model.load_state_dict(ckpt["model"], strict=False))
+            logger.info("Load model: ", model.load_state_dict(ckpt["model"], strict=False))
+            if ema is not None:
+                ema.load_state_dict(ckpt["ema"])
             optim.load_state_dict(ckpt["optim"])
             step = ckpt["step"]
 
         else:  # model only
-            print("Load model: ", model.load_state_dict(ckpt, strict=False))
+            logger.info("Load model: ", model.load_state_dict(ckpt, strict=False))
 
     # inference before any training
     if step == 0:
@@ -331,6 +248,7 @@ if __name__ == "__main__":
 
     pbar = tqdm(initial=step, total=args.num_steps, dynamic_ncols=True)
     torch.cuda.reset_peak_memory_stats()
+    model.train()
     time0 = time.perf_counter()
     while step < args.num_steps:
         for _ in range(args.gradient_accumulation):
@@ -364,6 +282,8 @@ if __name__ == "__main__":
 
         optim.step()
         optim.zero_grad()
+        if ema is not None:
+            ema.update(step)
         step += 1
         pbar.update()
 
@@ -383,14 +303,31 @@ if __name__ == "__main__":
             # only save LoRA weights. Flux doesn't have buffers.
             ckpt = dict(
                 model={name: p.detach().bfloat16() for name, p in model.named_parameters() if p.requires_grad},
+                ema=ema.state_dict(),
                 optim=optim.state_dict(),
                 step=step,
             )
             torch.save(ckpt, ckpt_dir / f"step{step:06d}.pth")
 
-            # infer with test prompts
             save_images(
-                model, ae, text_embedder, args.test_prompt_path, img_dir / f"step{step:06d}", args.test_img_size
+                model,
+                ae,
+                text_embedder,
+                args.test_prompt_path,
+                img_dir / f"step{step:06d}",
+                args.test_img_size,
             )
+            if ema is not None:
+                ema.swap_params()
+                save_images(
+                    model,
+                    ae,
+                    text_embedder,
+                    args.test_prompt_path,
+                    img_dir / f"step{step:06d}_ema",
+                    args.test_img_size,
+                )
+                ema.swap_params()
+            model.train()
 
     wandb.finish()

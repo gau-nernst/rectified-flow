@@ -24,16 +24,17 @@ from modelling import SD3, AutoEncoder, Flux, IResNet, load_adaface_ir101
 from modelling.face_embedder import arcface_crop
 from sd3_infer import SD3TextEmbedder, sd3_euler_generate, sd3_timesteps
 from time_sampler import LogitNormal, Uniform
-from train_lora import bucket_resize_crop, compute_loss, parse_img_size, setup_model
+from train_utils import compute_loss, parse_img_size, random_resize, setup_model
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 
 class FaceTrainDataset(IterableDataset):
-    def __init__(self, meta_path: str, img_dir: str, img_sizes: list[tuple[int, int]], batch_size: int) -> None:
+    def __init__(self, meta_path: str, img_dir: str, min_size: int, max_size: int, batch_size: int) -> None:
         self.img_dir = Path(img_dir)
-        self.img_sizes = img_sizes
+        self.min_size = min_size
+        self.max_size = max_size
         self.batch_size = batch_size
 
         if str(meta_path).endswith(".tsv"):
@@ -48,7 +49,7 @@ class FaceTrainDataset(IterableDataset):
         self.shuffle_rng.seed()
 
     def __iter__(self):
-        buckets = [[] for _ in range(len(self.img_sizes))]
+        buckets = dict()
 
         counter = -1
         worker_info = get_worker_info()
@@ -80,11 +81,17 @@ class FaceTrainDataset(IterableDataset):
                 crop = F.interpolate(crop.unsqueeze(0), 112, mode="bicubic", antialias=True).squeeze(0)
                 crop = crop.float() / 127.5 - 1
 
-                img_pt, bucket_idx = bucket_resize_crop(img_pil, self.img_sizes)
-                buckets[bucket_idx].append((img_pt, crop, self.prompts[idx]))
-                if len(buckets[bucket_idx]) == self.batch_size:
-                    yield default_collate(buckets[bucket_idx])
-                    buckets[bucket_idx] = []
+                img_pt = random_resize(img_pil, self.min_size, self.max_size)
+
+                img_size = tuple(img_pt.shape[-2:])
+                if img_size not in buckets:
+                    buckets[img_size] = []
+                    logger.info(f"New {img_size=}")
+                buckets[img_size].append((img_pt, crop, self.prompts[idx]))
+
+                if len(buckets[img_size]) == self.batch_size:
+                    yield default_collate(buckets[img_size])
+                    buckets[img_size] = []
 
 
 class FaceTestDataset(Dataset):
@@ -166,8 +173,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="flux-dev")
     parser.add_argument("--offload", action="store_true")
-    parser.add_argument("--img_sizes", type=parse_img_size, nargs="+", default=(512, 512))
-    parser.add_argument("--time_sampler", default="Uniform()")
+    parser.add_argument("--min_size", type=int, default=512)
+    parser.add_argument("--max_size", type=int, default=1024)
+    parser.add_argument("--time_sampler", default="LogitNormal()")
     parser.add_argument("--compile", action="store_true")
 
     parser.add_argument("--num_workers", type=int, default=4)
@@ -197,14 +205,16 @@ if __name__ == "__main__":
     wandb.init(project="Flux face", config=vars(args), name=args.run_name, dir="/tmp")
 
     def create_dloader(ds_config: dict):
-        ds = FaceTrainDataset(ds_config["meta_path"], ds_config["img_dir"], args.img_sizes, batch_size // 2)
+        ds = FaceTrainDataset(
+            ds_config["meta_path"], ds_config["img_dir"], args.min_size, args.max_size, batch_size // 2
+        )
         dloader = DataLoader(ds, batch_size=None, num_workers=args.num_workers, pin_memory=True)
         return iter(dloader)
 
     train_dloader = create_dloader(args.train_ds)
     distill_dloader = create_dloader(args.distill_ds)
 
-    model, offloader, ae, text_embedder = setup_model(args.model, args.offload, 0)
+    model, offloader, ae, text_embedder = setup_model(args.model, args.offload, 0, args.compile)
 
     # same MLP as redux
     adaface = load_adaface_ir101().cuda().eval()
