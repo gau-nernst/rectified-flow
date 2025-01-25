@@ -158,7 +158,7 @@ def save_images(
             for guidance, cfg_scale in guidance_list:
                 latents = flux_euler_generate(
                     model,
-                    noise.clone(),
+                    noise,
                     timesteps,
                     embeds,
                     vecs,

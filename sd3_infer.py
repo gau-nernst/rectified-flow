@@ -49,18 +49,25 @@ class SkipLayerConfig(NamedTuple):
 
 
 class SD3Generator:
-    def __init__(self, sd3: SD3 | None = None, offload_t5: bool = False, dtype: torch.dtype = torch.bfloat16) -> None:
-        self.sd3 = (sd3 or load_sd3_5()).to(dtype)  # 4.5 GB for medium in BF16
+    def __init__(
+        self,
+        sd3: SD3 | None = None,
+        offload_sd3: bool = False,
+        offload_t5: bool = False,
+        dtype: torch.dtype = torch.bfloat16,
+    ) -> None:
+        self.sd3 = (sd3 or load_sd3_5()).to(dtype)  # 4.5 GB for medium, 16.1 GB for large in BF16
         self.ae = load_sd3_autoencoder().to(dtype)  # 168 MB in BF16
         self.text_embedder = SD3TextEmbedder(offload_t5, dtype=dtype)
+        self.sd3_offloader = PerLayerOffloadCUDAStream(self.sd3, enable=offload_sd3)
 
     def cpu(self):
-        for m in (self.sd3, self.ae, self.text_embedder):
+        for m in (self.ae, self.text_embedder, self.sd3_offloader):
             m.cpu()
         return self
 
     def cuda(self):
-        for m in (self.sd3, self.ae, self.text_embedder):
+        for m in (self.ae, self.text_embedder, self.sd3_offloader):
             m.cuda()
         return self
 
@@ -162,6 +169,7 @@ def sd3_euler_generate(
 ):
     num_steps = len(timesteps) - 1
     forward = torch.compile(sd3_forward, disable=not compile)
+    latents = latents.clone()
     for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
         t = torch.tensor(timesteps[i])
         slg_scale = slg_config.scale if slg_config.start < i / num_steps < slg_config.end else 0.0

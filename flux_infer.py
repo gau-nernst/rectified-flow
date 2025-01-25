@@ -153,6 +153,7 @@ def flux_euler_generate(
 
     num_steps = len(timesteps) - 1
     timesteps_pt = torch.tensor(timesteps)
+    latents = latents.clone()
     for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
         torch.compile(flux_step, disable=not compile)(
             flux, latents, txt, vec, neg_txt, neg_vec, timesteps_pt[i], timesteps_pt[i + 1], guidance, cfg_scale
