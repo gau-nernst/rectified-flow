@@ -134,34 +134,6 @@ class FluxGenerator:
         return self.ae.decode(latents, uint8=True)
 
 
-@torch.no_grad()
-def flux_euler_generate(
-    flux: Flux,
-    latents: Tensor,
-    timesteps: list[float],
-    txt: Tensor,
-    vec: Tensor,
-    neg_txt: Tensor | None = None,
-    neg_vec: Tensor | None = None,
-    guidance: Tensor | float | None = 3.5,
-    cfg_scale: float = 1.0,
-    pbar: bool = False,
-    compile: bool = False,
-):
-    if isinstance(guidance, (int, float)):
-        guidance = torch.full(latents.shape[:1], guidance, device="cuda", dtype=torch.bfloat16)
-
-    num_steps = len(timesteps) - 1
-    timesteps_pt = torch.tensor(timesteps)
-    latents = latents.clone()
-    for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
-        torch.compile(flux_step, disable=not compile)(
-            flux, latents, txt, vec, neg_txt, neg_vec, timesteps_pt[i], timesteps_pt[i + 1], guidance, cfg_scale
-        )
-
-    return latents
-
-
 def flux_timesteps(start: float = 1.0, end: float = 0.0, num_steps: int = 50, img_seq_len: int = 0):
     # only dev version has time shift
     timesteps = torch.linspace(start, end, num_steps + 1)
@@ -181,20 +153,19 @@ def flux_time_shift(timesteps: Tensor | float, img_seq_len: int, base_shift: flo
     return exp_mu / (exp_mu + 1 / timesteps - 1)
 
 
-def flux_step(
+def flux_forward(
     flux: Flux,
     latents: Tensor,
+    t: Tensor,
     txt: Tensor,
     vec: Tensor,
     neg_txt: Tensor | None,
     neg_vec: Tensor | None,
-    t_curr: Tensor,
-    t_next: Tensor,
     guidance: Tensor | None,
     cfg_scale: float,
 ) -> None:
     # t_curr and t_next must be Tensor (cpu is fine) to avoid recompilation
-    t_vec = t_curr.view(1).cuda()
+    t_vec = t.view(1).cuda()
 
     if cfg_scale != 1.0:
         assert neg_txt is not None and neg_vec is not None
@@ -212,4 +183,31 @@ def flux_step(
         # built-in distilled guidance
         v = flux(latents, t_vec, txt, vec, guidance)
 
-    latents.add_(v, alpha=t_next - t_curr)  # Euler's method. move from t_curr to t_next
+    return v
+
+
+@torch.no_grad()
+def flux_euler_generate(
+    flux: Flux,
+    latents: Tensor,
+    timesteps: list[float],
+    txt: Tensor,
+    vec: Tensor,
+    neg_txt: Tensor | None = None,
+    neg_vec: Tensor | None = None,
+    guidance: Tensor | float | None = 3.5,
+    cfg_scale: float = 1.0,
+    pbar: bool = False,
+    compile: bool = False,
+):
+    if isinstance(guidance, (int, float)):
+        guidance = torch.full(latents.shape[:1], guidance, device="cuda", dtype=torch.bfloat16)
+
+    num_steps = len(timesteps) - 1
+    forward = torch.compile(flux_forward, disable=not compile)
+    latents = latents.clone()
+    for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
+        t = torch.tensor(timesteps[i])
+        v = forward(flux, latents, t, txt, vec, neg_txt, neg_vec, guidance, cfg_scale)
+        latents.add_(v, alpha=timesteps[i + 1] - timesteps[i])  # Euler's method. move from t_curr to t_next
+    return latents

@@ -132,7 +132,9 @@ def sd3_forward(
 ):
     # t must be Tensor (cpu is fine) to avoid recompilation
     t_vec = t.view(1).cuda()
-    if cfg_scale != 1.0 and neg_context is not None and neg_vec is not None:
+
+    if cfg_scale != 1.0:
+        assert neg_context is not None and neg_vec is not None
         pos_v, neg_v = sd3(
             latents.repeat(2, 1, 1, 1),
             t_vec,
