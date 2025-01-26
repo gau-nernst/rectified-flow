@@ -220,6 +220,8 @@ if __name__ == "__main__":
     ema = EMA(model) if args.ema else None
     optim = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True)
     logger.info(model)
+    logger.info(f"No. of trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+    logger.info(f"No. of non-trainable params: {sum(p.numel() for p in model.parameters() if not p.requires_grad):,}")
     time_sampler = eval(args.time_sampler, dict(Uniform=Uniform, LogitNormal=LogitNormal))
 
     log_dir = args.log_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{args.run_name}"
@@ -303,10 +305,11 @@ if __name__ == "__main__":
             # only save LoRA weights. Flux doesn't have buffers.
             ckpt = dict(
                 model={name: p.detach().bfloat16() for name, p in model.named_parameters() if p.requires_grad},
-                ema=ema.state_dict(),
                 optim=optim.state_dict(),
                 step=step,
             )
+            if ema is not None:
+                ckpt["ema"] = ema.state_dict()
             torch.save(ckpt, ckpt_dir / f"step{step:06d}.pth")
 
             save_images(
