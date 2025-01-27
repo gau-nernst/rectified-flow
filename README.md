@@ -9,13 +9,12 @@ Supported models:
 
 Supported features:
 
-- Training: QLoRA fine-tuning (NF4), logit-normal sampler
-- [RF-inversion](https://arxiv.org/abs/2410.10792) (FLUX-Redux is simpler and superior)
-- INT8 matmul (2x inference speedup for consumer cards)
-- Aspect ratio bucketing for training with multiple aspect ratios.
+- Training: LoRA fine-tuning with CPU offload, logit-normal sampler, and multi-resolution/multi-aspect-ratio training.
+- [RF-inversion](https://arxiv.org/abs/2410.10792) (FLUX-Redux is simpler and superior).
+- INT8 matmul (2x inference speedup for consumer cards).
 - Single-GPU model offloading for inference and training.
-- [DPM-Solver++(2M)](https://arxiv.org/abs/2211.01095) for SD3.5 (TODO: support FLUX?)
-- Skip-layer guidance for SD3.5
+- [DPM-Solver++(2M)](https://arxiv.org/abs/2211.01095) for SD3.5 (TODO: support FLUX?).
+- Skip-layer guidance for SD3.5 medium.
 
 Resources:
 
@@ -26,7 +25,7 @@ Resources:
 Notes:
 
 - Finetune with logit-normal sampler seems to be more stable than uniform sampler. The changes are less abrupt. Not necessarily mean the final result is better.
-- If you only have low-res images, you can train in low-res and FLUX can extrapolate to hi-res.
+- If you only have low-res images, you can train in low-res and FLUX can extrapolate to hi-res. However, for foreign concepts, resolution extrapolation is not reliable. It's best to do inference at similar resolution as fine-tuning (or we can do multi-resolution fine-tuning).
 - FLUX-Redux
   - To reduce influence of image guidance, we can just scale the embeddings down e.g. `* 0.2`. Similarly, to increase influence of text guidance, we can scale T5 embeddings up.
   - We can use multiple guidance images (>=2). Just concat the embeddings.
