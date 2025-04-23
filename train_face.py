@@ -6,7 +6,12 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # improve memory usage
+# improve memory usage
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+# by default, torch.compile cache are written to /tmp/torchinductor_username,
+# which does not persist across restarts. write to local dir for persistence.
+os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(Path(__file__).parent / "torchinductor")
 
 import numpy as np
 import pandas as pd
@@ -177,6 +182,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_size", type=int, default=1024)
     parser.add_argument("--time_sampler", default="LogitNormal()")
     parser.add_argument("--compile", action="store_true")
+    parser.add_argument("--int8_training", action="store_true")
 
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--train_ds", type=json.loads, required=True)
@@ -214,7 +220,7 @@ if __name__ == "__main__":
     train_dloader = create_dloader(args.train_ds)
     distill_dloader = create_dloader(args.distill_ds)
 
-    model, offloader, ae, text_embedder = setup_model(args.model, args.offload, 0, args.compile)
+    model, offloader, ae, text_embedder = setup_model(args.model, args.offload, 0, args.compile, args.int8_training)
 
     # same MLP as redux
     adaface = load_adaface_ir101().cuda().eval()

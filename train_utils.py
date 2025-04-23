@@ -24,7 +24,7 @@ from sd3_infer import SD3TextEmbedder
 from time_sampler import TimeSampler
 
 
-def setup_model(model_name: str, offload: bool, lora: int, use_compile: bool):
+def setup_model(model_name: str, offload: bool, lora: int, use_compile: bool, int8_training: bool):
     if model_name in ("flux-dev", "flex-alpha"):
         model = {
             "flux-dev": load_flux,
@@ -51,8 +51,8 @@ def setup_model(model_name: str, offload: bool, lora: int, use_compile: bool):
     text_embedder.cuda()
 
     for layer in layers:
-        if lora > 0:
-            LoRALinear.add_lora(layer, rank=lora, device="cuda")
+        if lora > 0 or int8_training:
+            LoRALinear.add_lora(layer, rank=lora, quantization="int8_training", device="cuda")
         layer.forward = partial(checkpoint, layer.forward, use_reentrant=False)
         if use_compile:  # might not be optimal to compile this way, but required for offloading
             layer.forward = torch.compile(layer.forward)
