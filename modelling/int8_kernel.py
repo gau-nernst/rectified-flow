@@ -135,15 +135,7 @@ lib.define("scaled_mm(Tensor A, Tensor B, Tensor scale_A, Tensor scale_B, Tensor
 
 
 def scaled_int8_mm(A: Tensor, B: Tensor, scale_A: Tensor, scale_B: Tensor, bias: Tensor | None) -> Tensor:
-    """Matmul for tile-wise quantized A and B. `A` and `B` are both INT8 or FP8 to utilize
-    INT8/FP8 tensor cores. `scale_A` and `scaled_B` are quantization scales for A and B
-    respectively with appropriate shapes.
-
-    E.g.
-      - if `A` is quantized with tile shape (128, 64), `scale_A`'s shape will be
-    `(A.shape[0] / 128, A.shape[1] / 64)`.
-      - if `A` is row-wise quantized, `scale_A`'s shape will be `(A.shape[0], 1)`.
-    """
+    """Matmul for row-wise quantized A and column-wise quantized B."""
     assert A.dtype == B.dtype == torch.int8
     assert scale_A.dtype == scale_B.dtype
     assert A.ndim == B.ndim == scale_A.ndim == scale_B.ndim == 2
