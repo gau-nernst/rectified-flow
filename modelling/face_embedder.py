@@ -1,12 +1,16 @@
 from pathlib import Path
 
-import cv2
 import numpy as np
 import requests
 import torch
 import torch.nn.functional as F
 import torchvision
 from PIL import Image
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 from .iresnet import load_adaface_ir101
 
