@@ -16,6 +16,13 @@ Supported features:
 - [DPM-Solver++(2M)](https://arxiv.org/abs/2211.01095) for SD3.5 (TODO: support FLUX?).
 - Skip-layer guidance for SD3.5 medium.
 
+```bash
+uv venv --seed python=3.11
+source .venv/bin/activate
+uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+uv pip install pandas psutil wandb Pillow tqdm safetensors huggingface_hub numpy transformers sentencepiece
+```
+
 Resources:
 
 - Rectified-Flow paper: https://arxiv.org/abs/2209.03003
