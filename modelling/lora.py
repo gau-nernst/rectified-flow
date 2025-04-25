@@ -7,11 +7,10 @@ from .int8_kernel import scaled_int8_mm
 
 def quantize_row_wise(x: Tensor):
     assert x.ndim == 2
-    abs_max = x.abs().amax(dim=1, keepdim=True)
+    abs_max = x.abs().amax(dim=1, keepdim=True).float()
     scales = abs_max / 127
-    normalizer = 127 / abs_max.clip(1e-5)
-    x_i8 = (x * normalizer).clip(-128, 127).round().to(torch.int8)
-    return x_i8, scales
+    x_i8 = (x / scales.clip(1e-5)).clip(-128, 127).round().to(torch.int8)
+    return x_i8, scales.to(x.dtype)  # check if FP32 scales is much better?
 
 
 class LoRALinear(nn.Linear):
