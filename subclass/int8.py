@@ -1,5 +1,3 @@
-from typing import NamedTuple
-
 import torch
 import torch.nn.functional as F
 from torch import Tensor
@@ -16,43 +14,37 @@ def rowwise_quantize(x: Tensor, eps: float = 1e-12):
     return int_data, scale
 
 
-class ScaledInt8Config(NamedTuple):
-    int8_output: bool = False
-    int8_grad_weight: bool = False
-
-
-class ScaledInt8Tensor(Tensor):
+class Int8W8A8Tensor(Tensor):
     tensor_attrs = ["i8_data", "scale"]
 
-    def __new__(cls, i8_data: Tensor, scale: Tensor, dtype, config: ScaledInt8Config):
+    def __new__(cls, i8_data: Tensor, scale: Tensor, dtype):
         return Tensor._make_wrapper_subclass(cls, i8_data.shape, device=i8_data.device, dtype=dtype)
 
-    def __init__(self, i8_data: Tensor, scale: Tensor, dtype, config: ScaledInt8Config):
+    def __init__(self, i8_data: Tensor, scale: Tensor, dtype):
         assert i8_data.dtype is torch.int8
         assert scale.dtype is torch.float32
         assert i8_data.device == scale.device
         assert scale.ndim == i8_data.ndim
         self.i8_data = i8_data
         self.scale = scale
-        self.config = config
 
     def __tensor_flatten__(self):
-        return self.tensor_attrs, [self.dtype, self.config]
+        return self.tensor_attrs, [self.dtype]
 
     @classmethod
     def __tensor_unflatten__(cls, tensor_data_dict, tensor_attributes, outer_size=None, outer_stride=None):
         return cls(*[tensor_data_dict[name] for name in cls.tensor_attrs], *tensor_attributes)
 
     def __repr__(self):
-        return f"{self.__class__.__name__}(config={self.config}, shape={tuple(self.shape)}, device={self.device})"
+        return f"{self.__class__.__name__}(shape={tuple(self.shape)}, device={self.device})"
 
     def dequantize(self):
         return (self.i8_data.float() * self.scale).to(self.dtype)
 
     @classmethod
-    def from_float(cls, x: Tensor, config: ScaledInt8Config = ScaledInt8Config()):
+    def from_float(cls, x: Tensor):
         int_data, scale = rowwise_quantize(x)
-        return cls(int_data, scale, x.dtype, config)
+        return cls(int_data, scale, x.dtype)
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
@@ -82,7 +74,7 @@ class ScaledInt8Tensor(Tensor):
 
             data_names, _ = args[0].__tensor_flatten__()
             data = [getattr(args[0], name).to(device=device) for name in data_names]
-            return cls(*data, dtype, args[0].config)  # only change appearance dtype
+            return cls(*data, dtype)  # only change appearance dtype
 
         elif func is aten.copy_.default:
             if isinstance(args[0], cls) and isinstance(args[1], cls):
@@ -104,15 +96,11 @@ class ScaledInt8Tensor(Tensor):
 
 class _Int8LinearFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input: Tensor, weight: ScaledInt8Tensor):
+    def forward(ctx, input: Tensor, weight: Int8W8A8Tensor):
         ctx.save_for_backward(input, weight)
-        if weight.config.int8_output:
-            input_i8, input_scale = rowwise_quantize(input.reshape(-1, weight.shape[1]))
-            out = scaled_int8_mm(input_i8, weight.i8_data.T, input_scale.view(-1), weight.scale.view(-1))
-            return out.view(*input.shape[:-1], weight.shape[0])
-        else:
-            # mixed matmul
-            return (input @ weight.i8_data.to(input.dtype).T) * weight.scale.T
+        input_i8, input_scale = rowwise_quantize(input.reshape(-1, weight.shape[1]))
+        out = scaled_int8_mm(input_i8, weight.i8_data.T, input_scale.view(-1), weight.scale.view(-1))
+        return out.view(*input.shape[:-1], weight.shape[0])
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -125,14 +113,6 @@ class _Int8LinearFunction(torch.autograd.Function):
         if ctx.needs_input_grad[1]:
             grad_output = grad_output.view(-1, weight.shape[0])
             input = input.view(-1, weight.shape[1])
-
-            if weight.config.int8_grad_weight:
-                grad_output_i8_t, grad_output_scale_t = rowwise_quantize(grad_output.T)
-                input_i8_t, input_scale_t = rowwise_quantize(input.T)
-                grad_weight = scaled_int8_mm(
-                    grad_output_i8_t, input_i8_t.T, grad_output_scale_t.view(-1), input_scale_t.view(-1)
-                )
-            else:
-                grad_weight = grad_output.T @ input
+            grad_weight = grad_output.T @ input
 
         return grad_input, grad_weight
