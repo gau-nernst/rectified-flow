@@ -44,12 +44,7 @@ class ScaledInt8Tensor(Tensor):
         return cls(*[tensor_data_dict[name] for name in cls.tensor_attrs], *tensor_attributes)
 
     def __repr__(self):
-        return (
-            f"{self.__class__.__name__}("
-            f"config={self.config}, "
-            f"shape={tuple(self.shape)}, "
-            f"device={self.device})"
-        )
+        return f"{self.__class__.__name__}(config={self.config}, shape={tuple(self.shape)}, device={self.device})"
 
     def dequantize(self):
         return (self.i8_data.float() * self.scale).to(self.dtype)
@@ -112,7 +107,7 @@ class _Int8LinearFunction(torch.autograd.Function):
     def forward(ctx, input: Tensor, weight: ScaledInt8Tensor):
         ctx.save_for_backward(input, weight)
         if weight.config.int8_output:
-            input_i8, input_scale = rowwise_quantize(input.view(-1, weight.shape[1]))
+            input_i8, input_scale = rowwise_quantize(input.reshape(-1, weight.shape[1]))
             out = scaled_int8_mm(input_i8, weight.i8_data.T, input_scale.view(-1), weight.scale.view(-1))
             return out.view(*input.shape[:-1], weight.shape[0])
         else:

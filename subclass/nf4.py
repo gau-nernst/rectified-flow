@@ -80,10 +80,7 @@ class NF4Tensor(Tensor):
 
     def __repr__(self):
         return (
-            f"{self.__class__.__name__}("
-            f"block_size={self.block_size}, "
-            f"shape={tuple(self.shape)}, "
-            f"device={self.device})"
+            f"{self.__class__.__name__}(block_size={self.block_size}, shape={tuple(self.shape)}, device={self.device})"
         )
 
     def dequantize(self):

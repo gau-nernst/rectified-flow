@@ -1,5 +1,11 @@
+pandas
+psutil
+wandb
+Pillow
+tqdm
 safetensors
-opencv-python-headless
+huggingface_hub
 transformers
+numpy
 protobuf
 sentencepiece

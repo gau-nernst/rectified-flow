@@ -17,10 +17,10 @@ Supported features:
 - Skip-layer guidance for SD3.5 medium.
 
 ```bash
-uv venv --seed python=3.11
+uv venv --seed --python=3.11
 source .venv/bin/activate
 uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
-uv pip install pandas psutil wandb Pillow tqdm safetensors huggingface_hub numpy transformers sentencepiece
+uv pip install -r requirements.txt
 ```
 
 Resources:

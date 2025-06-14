@@ -359,23 +359,16 @@ def _load_flux(repo_id: str, filename: str, prefix: str | None = None):
     return model
 
 
-def load_flux(name: str = "dev"):
-    # BF16
-    assert name in ("dev", "schnell")
-    return _load_flux(
-        f"black-forest-labs/FLUX.1-{name}",
-        f"flux1-{name}.safetensors",
-    )
+def load_flux(name: str = "flux-dev"):
+    repo_id, filename, prefix = {
+        "flux-dev": ("black-forest-labs/FLUX.1-dev", "flux1-dev.safetensors", None),
+        "flux-schnell": ("black-forest-labs/FLUX.1-schnell", "flux1-schnell.safetensors", None),
+        "flex1-alpha": ("ostris/Flex.1-alpha", "Flex.1-alpha.safetensors", "model.diffusion_model."),
+        "flex2-preview": ("ostris/Flex.2-preview", "Flex.2-preview.safetensors", None),
+    }[name]
 
-
-def load_flex_alpha():
-    # 8.16M params -> 16.33GB in BF16
     # BF16
-    return _load_flux(
-        "ostris/Flex.1-alpha",
-        "Flex.1-alpha.safetensors",
-        prefix="model.diffusion_model.",
-    )
+    return _load_flux(repo_id, filename, prefix=prefix)
 
 
 # https://github.com/black-forest-labs/flux/blob/805da8571a0b49b6d4043950bd266a65328c243b/src/flux/modules/image_embedders.py#L66

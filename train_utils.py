@@ -13,7 +13,6 @@ from modelling import (
     SD3,
     Flux,
     LoRALinear,
-    load_flex_alpha,
     load_flux,
     load_flux_autoencoder,
     load_sd3_5,
@@ -25,11 +24,8 @@ from time_sampler import TimeSampler
 
 
 def setup_model(model_name: str, offload: bool, lora: int, use_compile: bool, int8_training: bool):
-    if model_name in ("flux-dev", "flex-alpha"):
-        model = {
-            "flux-dev": load_flux,
-            "flex-alpha": load_flex_alpha,
-        }[model_name]()
+    if model_name.startswith(("flux", "flex")):
+        model = load_flux(model_name)
         layers = list(model.double_blocks) + list(model.single_blocks)
 
         ae = load_flux_autoencoder()
