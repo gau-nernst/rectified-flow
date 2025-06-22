@@ -1,7 +1,7 @@
 from torch import nn, Tensor
 import torch
 
-from gn_kernels import quantize_nvfp4, pack_block_scales_nv, nvfp4_mm
+from gn_kernels import quantize_nvfp4_triton, nvfp4_mm
 
 
 def nvfp4_calibration_hook(module: nn.Module, args):
@@ -34,15 +34,17 @@ class NVFP4Linear(nn.Module):
             if not input_amax_list:
                 return
 
-            x_tensor_scale = torch.stack(input_amax_list).amax() / (448.0 * 6.0)
+            x_tensor_scale = torch.stack(input_amax_list).amax().float() / (448.0 * 6.0)
             model.nvfp4_handle.remove()
             del model.input_amax_list
             del model.nvfp4_handle
 
             model.__class__ = NVFP4Linear
-            wq, ws, w_tensor_scale = quantize_nvfp4(model.weight.detach())
+            w = model.weight.detach()
+            w_tensor_scale = w.abs().amax().float() / (448.0 * 6.0)
+            wq, ws = quantize_nvfp4_triton(w, w_tensor_scale)
             model.register_buffer("wq", wq)
-            model.register_buffer("ws", pack_block_scales_nv(ws))
+            model.register_buffer("ws", ws)
             model.register_buffer("x_tensor_scale", x_tensor_scale)
             model.register_buffer("output_scale", x_tensor_scale * w_tensor_scale)
             del model.weight
@@ -54,8 +56,6 @@ class NVFP4Linear(nn.Module):
 
     def forward(self, x: Tensor):
         x_2d = x.reshape(-1, x.shape[-1])
-        xq, xs, _ = quantize_nvfp4(x_2d, self.x_tensor_scale)
-        xs = pack_block_scales_nv(xs)
-
+        xq, xs = quantize_nvfp4_triton(x_2d, self.x_tensor_scale)
         out = nvfp4_mm(xq, self.wq.T, xs, self.ws, self.output_scale, self.bias)
         return out.view(*x.shape[:-1], out.shape[-1])
