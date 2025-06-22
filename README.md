@@ -37,3 +37,31 @@ Notes:
   - To reduce influence of image guidance, we can just scale the embeddings down e.g. `* 0.2`. Similarly, to increase influence of text guidance, we can scale T5 embeddings up.
   - We can use multiple guidance images (>=2). Just concat the embeddings.
 - Finetune FLUX with `guidance=1.0` usually leads to better results. The finetuned model can be either used with built-in distilled CFG or true CFG (the latter gives slightly better results). Using both distilled CFG and true CFG is also possible, where distilled CFG > 1.0 can help with coherence, hi-res extrapolation, and the usual strange artifacts of finetuning.
+
+## Matmul shapes
+
+### Flux
+
+Note: there is always bias
+
+M|N|K|count
+---|---|---|---
+(B,)|3072|256|1
+(B,)|3072|768|1
+(B,)|3072|3072|2
+(B,)|6144|3072|1
+(B,)|9216|3072|38
+(B,)|18432|3072|38
+(B, 512)|3072|3072|19
+(B, 512)|3072|4096|1
+(B, 512)|3072|12288|19
+(B, 512)|9216|3072|19
+(B, 512)|12288|3072|19
+(B, 4096)|64|3072|1
+(B, 4096)|3072|64|1
+(B, 4096)|3072|3072|19
+(B, 4096)|3072|12288|19
+(B, 4096)|9216|3072|19
+(B, 4096)|12288|3072|19
+(B, 4608)|3072|15360|38
+(B, 4608)|21504|3072|38
