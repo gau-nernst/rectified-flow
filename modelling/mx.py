@@ -11,21 +11,21 @@ class MXLinear(nn.Module):
             return
 
         linear.__class__ = MXLinear
-        wq, w_scales = quantize_mx(linear.weight.detach(), dtype)
+        wq, ws = quantize_mx(linear.weight.detach(), dtype)
         linear.register_buffer("wq", wq)
-        linear.register_buffer("w_scales", pack_block_scales_nv(w_scales))
+        linear.register_buffer("ws", pack_block_scales_nv(ws))
         del linear.weight
 
     def forward(self, x: Tensor):
         x_2d = x.reshape(-1, x.shape[-1])
-        xq, x_scales = quantize_mx(x_2d, self.wq.dtype)
-        x_scales = pack_block_scales_nv(x_scales)
+        xq, xs = quantize_mx(x_2d, self.wq.dtype)
+        xs = pack_block_scales_nv(xs)
 
         if self.wq.dtype == torch.float4_e2m1fn_x2:
-            out = mxfp4_mm(xq, self.wq.T, x_scales, self.w_scales)
+            out = mxfp4_mm(xq, self.wq.T, xs, self.ws)
             if self.bias is not None:
                 out = out + self.bias
         else:
-            out = torch._scaled_mm(xq, self.wq.T, x_scales, self.w_scales, self.bias, out_dtype=torch.bfloat16)
+            out = torch._scaled_mm(xq, self.wq.T, xs, self.ws, self.bias, out_dtype=torch.bfloat16)
 
         return out.reshape(*x.shape[:-1], out.shape[-1])
