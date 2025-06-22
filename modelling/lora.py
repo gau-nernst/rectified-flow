@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from .int8_kernel import scaled_int8_mm
+from .kernels import scaled_int8_mm
 
 
 def quantize_row_wise(x: Tensor):
