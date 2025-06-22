@@ -1,7 +1,7 @@
 from torch import nn, Tensor
 import torch
 
-from gn_kernels import quantize_nvfp4, pack_block_scales_nv
+from gn_kernels import quantize_nvfp4, pack_block_scales_nv, nvfp4_mm
 
 
 def nvfp4_calibration_hook(module: nn.Module, args):
@@ -57,11 +57,5 @@ class NVFP4Linear(nn.Module):
         xq, xs, _ = quantize_nvfp4(x_2d, self.x_tensor_scale)
         xs = pack_block_scales_nv(xs)
 
-        # out = nvfp4_mm(xq, self.wq.T, xs, self.ws, self.output_scale)
-        out = torch._scaled_mm(xq, self.wq.T, xs, self.ws, out_dtype=torch.bfloat16)
-        out = out * self.output_scale
-        if self.bias is not None:  # TODO: fuse bias into nvfp4_mm
-            out = out + self.bias
-        out = out.bfloat16()
-
+        out = nvfp4_mm(xq, self.wq.T, xs, self.ws, self.output_scale, self.bias)
         return out.view(*x.shape[:-1], out.shape[-1])
