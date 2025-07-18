@@ -1,0 +1,3 @@
+[submodule "gn_kernels"]
+	path = gn_kernels
+	url = https://github.com/gau-nernst/gn_kernels
