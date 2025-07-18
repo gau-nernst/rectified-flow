@@ -1,7 +1,7 @@
 from torch import nn, Tensor
 import torch
 
-from gn_kernels import quantize_nvfp4_triton, nvfp4_mm
+from gn_kernels import quantize_nvfp4_triton, cutlass_nvfp4_mm
 
 
 def nvfp4_calibration_hook(module: nn.Module, args):
@@ -57,5 +57,5 @@ class NVFP4Linear(nn.Module):
     def forward(self, x: Tensor):
         x_2d = x.reshape(-1, x.shape[-1])
         xq, xs = quantize_nvfp4_triton(x_2d, self.x_tensor_scale)
-        out = nvfp4_mm(xq, self.wq.T, xs, self.ws, self.output_scale, self.bias)
+        out = cutlass_nvfp4_mm(xq, self.wq.T, xs, self.ws, self.output_scale, self.bias)
         return out.view(*x.shape[:-1], out.shape[-1])
