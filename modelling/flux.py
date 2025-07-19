@@ -11,11 +11,12 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from .utils import load_hf_state_dict
+from .attn import dispatch_attention
 
 
-def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor) -> Tensor:
+def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor, impl: str = "pt") -> Tensor:
     q, k = apply_rope(q, k, pe)
-    x = F.scaled_dot_product_attention(q, k, v)
+    x = dispatch_attention(q, k, v, impl=impl)
     x = x.transpose(-2, -3).flatten(-2)  # (B, num_head, L, head_dim) -> (B, L, num_head * head_dim)
     return x
 
@@ -98,10 +99,8 @@ class QKNorm(nn.Module):
         self.query_norm = RMSNorm(dim)
         self.key_norm = RMSNorm(dim)
 
-    def forward(self, q: Tensor, k: Tensor, v: Tensor) -> tuple[Tensor, Tensor]:
-        q = self.query_norm(q)
-        k = self.key_norm(k)
-        return q.to(v), k.to(v)
+    def forward(self, q: Tensor, k: Tensor) -> tuple[Tensor, Tensor]:
+        return self.query_norm(q), self.key_norm(k)
 
 
 class SelfAttention(nn.Module):
@@ -113,13 +112,13 @@ class SelfAttention(nn.Module):
         self.norm = QKNorm(head_dim)
         self.proj = nn.Linear(dim, dim)
 
-    def forward(self, x: Tensor, pe: Tensor) -> Tensor:
-        qkv = self.qkv(x)
-        q, k, v = qkv.unflatten(2, (3 * self.num_heads, -1)).transpose(1, 2).chunk(3, dim=1)
-        q, k = self.norm(q, k, v)
-        x = attention(q, k, v, pe=pe)
-        x = self.proj(x)
-        return x
+    # def forward(self, x: Tensor, pe: Tensor) -> Tensor:
+    #     qkv = self.qkv(x)
+    #     q, k, v = qkv.unflatten(2, (3 * self.num_heads, -1)).transpose(1, 2).chunk(3, dim=1)
+    #     q, k = self.norm(q, k)
+    #     x = attention(q, k, v, pe=pe)
+    #     x = self.proj(x)
+    #     return x
 
 
 class ModulationOut(NamedTuple):
@@ -145,10 +144,14 @@ class Modulation(nn.Module):
 
 
 class DoubleStreamBlock(nn.Module):
-    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float, qkv_bias: bool = False) -> None:
+    def __init__(
+        self, hidden_size: int, num_heads: int, mlp_ratio: float, qkv_bias: bool = False, attn_impl: str = "pt"
+    ) -> None:
         super().__init__()
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.num_heads = num_heads
+        self.attn_impl = attn_impl
+
         self.img_mod = Modulation(hidden_size, double=True)
         self.img_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.img_attn = SelfAttention(dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias)
@@ -180,21 +183,21 @@ class DoubleStreamBlock(nn.Module):
         img_modulated = (1 + img_mod1.scale) * img_modulated + img_mod1.shift
         img_qkv = self.img_attn.qkv(img_modulated)
         img_q, img_k, img_v = img_qkv.unflatten(2, (3 * self.num_heads, -1)).permute(0, 2, 1, 3).chunk(3, dim=1)
-        img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
+        img_q, img_k = self.img_attn.norm(img_q, img_k)
 
         # prepare txt for attention
         txt_modulated = self.txt_norm1(txt)
         txt_modulated = (1 + txt_mod1.scale) * txt_modulated + txt_mod1.shift
         txt_qkv = self.txt_attn.qkv(txt_modulated)
         txt_q, txt_k, txt_v = txt_qkv.unflatten(2, (3 * self.num_heads, -1)).permute(0, 2, 1, 3).chunk(3, dim=1)
-        txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
+        txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k)
 
         # run actual attention
         q = torch.cat((txt_q, img_q), dim=2)
         k = torch.cat((txt_k, img_k), dim=2)
         v = torch.cat((txt_v, img_v), dim=2)
 
-        attn = attention(q, k, v, pe=pe)
+        attn = attention(q, k, v, pe=pe, impl=self.attn_impl)
         txt_attn = attn[:, : txt.shape[1]].contiguous()
         img_attn = attn[:, txt.shape[1] :].contiguous()
 
@@ -214,10 +217,11 @@ class SingleStreamBlock(nn.Module):
     https://arxiv.org/abs/2302.05442 and adapted modulation interface.
     """
 
-    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float = 4.0) -> None:
+    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float = 4.0, attn_impl: str = "pt") -> None:
         super().__init__()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
+        self.attn_impl = attn_impl
         head_dim = hidden_size // num_heads
 
         self.mlp_hidden_dim = int(hidden_size * mlp_ratio)
@@ -236,8 +240,8 @@ class SingleStreamBlock(nn.Module):
         qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1)
 
         q, k, v = qkv.unflatten(2, (3 * self.num_heads, -1)).permute(0, 2, 1, 3).chunk(3, dim=1)
-        q, k = self.norm(q, k, v)
-        attn = attention(q, k, v, pe=pe)
+        q, k = self.norm(q, k)
+        attn = attention(q, k, v, pe=pe, impl=self.attn_impl)
 
         # compute activation in mlp stream, cat again and run second linear layer
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))

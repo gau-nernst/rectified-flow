@@ -38,9 +38,9 @@ Notes:
   - We can use multiple guidance images (>=2). Just concat the embeddings.
 - Finetune FLUX with `guidance=1.0` usually leads to better results. The finetuned model can be either used with built-in distilled CFG or true CFG (the latter gives slightly better results). Using both distilled CFG and true CFG is also possible, where distilled CFG > 1.0 can help with coherence, hi-res extrapolation, and the usual strange artifacts of finetuning.
 
-## Matmul shapes
+## Flux (1024 x 1024)
 
-### Flux
+### Matmul shapes
 
 Note: there is always bias
 
@@ -65,3 +65,11 @@ M|N|K|count
 (B, 4096)|12288|3072|19
 (B, 4608)|3072|15360|38
 (B, 4608)|21504|3072|38
+
+### Attention shapes
+
+```
+num_heads = 24
+seq_len = 4096 + 512 = 4608
+head_dim = 128
+```
