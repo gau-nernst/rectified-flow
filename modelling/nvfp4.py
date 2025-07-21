@@ -1,7 +1,7 @@
-from torch import nn, Tensor
 import torch
+from torch import Tensor, nn
 
-from gn_kernels import quantize_nvfp4_triton, cutlass_nvfp4_mm
+from gn_kernels import cutlass_nvfp4_mm, quantize_nvfp4_triton
 
 
 def nvfp4_calibration_hook(module: nn.Module, args):

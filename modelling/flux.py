@@ -7,11 +7,10 @@ from dataclasses import dataclass
 from typing import NamedTuple
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor, nn
 
-from .utils import load_hf_state_dict
 from .attn import dispatch_attention
+from .utils import load_hf_state_dict
 
 
 def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor, impl: str = "pt") -> Tensor:

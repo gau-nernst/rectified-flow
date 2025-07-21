@@ -1,7 +1,7 @@
 import torch
-from torch import nn, Tensor
+from torch import Tensor, nn
 
-from gn_kernels import quantize_mx, pack_block_scales_nv, cutlass_mxfp4_mm
+from gn_kernels import cutlass_mxfp4_mm, pack_block_scales_nv, quantize_mx
 
 
 class MXLinear(nn.Module):
