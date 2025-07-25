@@ -1,7 +1,7 @@
 import torch
 from torch import Tensor, nn
 
-from gn_kernels import cutlass_mxfp4_mm, pack_block_scales_nv, quantize_mx
+from gn_kernels import FP4_DTYPE, cutlass_mxfp4_mm, pack_block_scales_nv, quantize_mx
 
 
 class MXLinear(nn.Module):
@@ -22,7 +22,7 @@ class MXLinear(nn.Module):
         xq, xs = quantize_mx(x_2d, self.wq.dtype, compute_scale_method=self.compute_scale_method)
         xs = pack_block_scales_nv(xs)
 
-        if self.wq.dtype == torch.float4_e2m1fn_x2:
+        if self.wq.dtype == FP4_DTYPE:
             out = cutlass_mxfp4_mm(xq, self.wq.T, xs, self.ws, self.bias)
         else:
             out = torch._scaled_mm(xq, self.wq.T, xs, self.ws, self.bias, out_dtype=torch.bfloat16)
