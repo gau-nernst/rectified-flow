@@ -367,6 +367,7 @@ def load_flux(name: str = "flux-dev"):
     repo_id, filename, prefix = {
         "flux-dev": ("black-forest-labs/FLUX.1-dev", "flux1-dev.safetensors", None),
         "flux-schnell": ("black-forest-labs/FLUX.1-schnell", "flux1-schnell.safetensors", None),
+        "flux-krea-dev": ("black-forest-labs/FLUX.1-Krea-dev", "flux1-krea-dev.safetensors", None),
         "flex1-alpha": ("ostris/Flex.1-alpha", "Flex.1-alpha.safetensors", "model.diffusion_model."),
         "flex2-preview": ("ostris/Flex.2-preview", "Flex.2-preview.safetensors", None),
     }[name]
