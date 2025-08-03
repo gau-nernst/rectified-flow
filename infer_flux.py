@@ -59,13 +59,14 @@ def prepare_inputs(
         neg_embeds = neg_vecs = None
 
     shape = (bsize, ae.z_dim, height // 8, width // 8)
-    weight = ae.encoder.conv_in.weight
-    rng = torch.Generator("cuda")
-    rng.manual_seed(seed) if seed is not None else rng.seed()
-    noise = torch.randn(shape, device=weight.device, dtype=weight.dtype, generator=rng)
+    device = ae.encoder.conv_in.weight.device
+
+    # keep latents in FP32 for accurate .lerp()
+    rng = torch.Generator(device).manual_seed(seed) if seed is not None else None
+    noise = torch.randn(shape, device=device, dtype=torch.float, generator=rng)
 
     # this is basically SDEdit https://arxiv.org/abs/2108.01073
-    latents = latents.lerp(noise, denoise) if latents is not None else noise
+    latents = latents.float().lerp(noise, denoise) if latents is not None else noise
 
     return latents, embeds, vecs, neg_embeds, neg_vecs
 
@@ -106,7 +107,15 @@ class FluxGenerator:
         compile: bool = False,
     ):
         latents, embeds, vecs, neg_embeds, neg_vecs = prepare_inputs(
-            self.ae, self.text_embedder, prompt, negative_prompt, img_size, latents, denoise, cfg_scale, seed
+            self.ae,
+            self.text_embedder,
+            prompt,
+            negative_prompt,
+            img_size,
+            latents,
+            denoise,
+            cfg_scale,
+            seed,
         )
 
         if extra_embeds is not None:  # e.g. Flux-Redux
@@ -163,25 +172,29 @@ def flux_forward(
     neg_vec: Tensor | None,
     guidance: Tensor | None,
     cfg_scale: float,
-) -> None:
+) -> Tensor:
     # t_curr and t_next must be Tensor (cpu is fine) to avoid recompilation
     t_vec = t.view(1).cuda()
 
     if cfg_scale != 1.0:
         assert neg_txt is not None and neg_vec is not None
         # classifier-free guidance
-        v, neg_v = flux(
-            latents.repeat(2, 1, 1, 1),
-            t_vec,
-            torch.cat([txt, neg_txt], dim=0),
-            torch.cat([vec, neg_vec], dim=0),
-            guidance.repeat(2) if guidance is not None else None,
-        ).chunk(2, dim=0)
+        v, neg_v = (
+            flux(
+                latents.repeat(2, 1, 1, 1),
+                t_vec,
+                torch.cat([txt, neg_txt], dim=0),
+                torch.cat([vec, neg_vec], dim=0),
+                guidance.repeat(2) if guidance is not None else None,
+            )
+            .float()
+            .chunk(2, dim=0)
+        )
         v = neg_v.lerp(v, cfg_scale)
 
     else:
         # built-in distilled guidance
-        v = flux(latents, t_vec, txt, vec, guidance)
+        v = flux(latents, t_vec, txt, vec, guidance).float()
 
     return v
 
@@ -200,14 +213,17 @@ def flux_euler_generate(
     pbar: bool = False,
     compile: bool = False,
 ):
+    latents = latents.clone()
     if isinstance(guidance, (int, float)):
-        guidance = torch.full(latents.shape[:1], guidance, device="cuda", dtype=torch.bfloat16)
+        guidance = torch.full(latents.shape[:1], guidance, device=latents.device)
 
     num_steps = len(timesteps) - 1
     forward = torch.compile(flux_forward, disable=not compile)
-    latents = latents.clone()
     for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
         t = torch.tensor(timesteps[i])
         v = forward(flux, latents, t, txt, vec, neg_txt, neg_vec, guidance, cfg_scale)
-        latents.add_(v, alpha=timesteps[i + 1] - timesteps[i])  # Euler's method. move from t_curr to t_next
+
+        # Euler's method. move from t_curr to t_next
+        latents.add_(v.float(), alpha=timesteps[i + 1] - timesteps[i])
+
     return latents

@@ -256,12 +256,13 @@ class AutoEncoder(nn.Module):
             x = x.float() / 127.5 - 1
         x = x.to(self.encoder.conv_in.weight.dtype)
 
-        z = diagonal_gaussian(self.quant_conv(self.encoder(x)), sample)
+        z = diagonal_gaussian(self.quant_conv(self.encoder(x)).float(), sample)
         z = self.scale_factor * (z - self.shift_factor)
         return z
 
     def decode(self, z: Tensor, uint8: bool = False) -> Tensor:
-        z = z / self.scale_factor + self.shift_factor
+        z = z.float() / self.scale_factor + self.shift_factor
+        z = z.to(self.decoder.conv_in.weight.dtype)
         x = self.decoder(self.post_quant_conv(z))
 
         if uint8:

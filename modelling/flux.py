@@ -319,6 +319,7 @@ class Flux(nn.Module):
     def forward(self, img: Tensor, timesteps: Tensor, txt: Tensor, y: Tensor, guidance: Tensor | None = None) -> Tensor:
         # we integrate patchify and unpatchify into model's forward pass
         B, _, H, W = img.shape
+        img = img.to(self.img_in.weight.dtype)
         img = img.view(B, -1, H // 2, 2, W // 2, 2).permute(0, 2, 4, 1, 3, 5).reshape(B, H * W // 4, -1)
 
         img = self.img_in(img)
