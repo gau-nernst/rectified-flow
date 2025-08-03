@@ -48,27 +48,16 @@ class CausalConv3d(nn.Conv3d):
         return out
 
 
-# TODO: set axis
 class RMSNorm(nn.Module):
-    def __init__(self, dim: int, channel_first: bool = True, images: int = True) -> None:
+    def __init__(self, dim: int, images: int = True) -> None:
         super().__init__()
         broadcastable_dims = (1, 1, 1) if not images else (1, 1)
-        shape = (dim, *broadcastable_dims) if channel_first else (dim,)
-
-        self.channel_first = channel_first
         self.scale = dim**0.5
-        self.gamma = nn.Parameter(torch.ones(shape))
+        self.gamma = nn.Parameter(torch.ones(dim, *broadcastable_dims))
 
     def forward(self, x: Tensor) -> Tensor:
-        out = F.normalize(x.float(), dim=(1 if self.channel_first else -1))
-        out = out * (self.gamma * self.scale)
+        out = F.normalize(x.float(), dim=1) * (self.gamma * self.scale)
         return out.to(x.dtype)
-
-
-# Fix bfloat16 support for nearest neighbor interpolation.
-class Upsample(nn.Upsample):
-    def forward(self, x: Tensor) -> Tensor:
-        return super().forward(x.float()).type_as(x)
 
 
 class Resample(nn.Module):
@@ -79,13 +68,13 @@ class Resample(nn.Module):
 
         if mode == "upsample2d":
             self.resample = nn.Sequential(
-                Upsample(scale_factor=(2.0, 2.0), mode="nearest-exact"),
+                nn.Upsample(scale_factor=(2.0, 2.0), mode="nearest-exact"),
                 nn.Conv2d(in_dim, out_dim, 3, padding=1),
             )
         elif mode == "upsample3d":
             self.time_conv = CausalConv3d(in_dim, in_dim * 2, (3, 1, 1), padding=(1, 0, 0))
             self.resample = nn.Sequential(
-                Upsample(scale_factor=(2.0, 2.0), mode="nearest-exact"),
+                nn.Upsample(scale_factor=(2.0, 2.0), mode="nearest-exact"),
                 nn.Conv2d(in_dim, out_dim, 3, padding=1),
             )
         elif mode == "downsample2d":
