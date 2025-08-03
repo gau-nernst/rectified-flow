@@ -529,7 +529,7 @@ def unpatchify(x: Tensor, patch_size: int) -> Tensor:
     return x
 
 
-class _WanVAE(nn.Module):
+class WanVAE(nn.Module):
     def __init__(
         self,
         encode_dim: int = 96,
@@ -554,6 +554,8 @@ class _WanVAE(nn.Module):
         self.decoder = Decoder3d(
             img_dim, decode_dim, z_dim, dim_mult, num_res_blocks, temporal_downsample[::-1], dropout, version
         )
+        self.register_buffer("mean", torch.zeros(z_dim), persistent=False)
+        self.register_buffer("scale", torch.ones(z_dim), persistent=False)
 
     def forward(self, x: Tensor) -> Tensor:
         mu, log_var = self.encode(x)
@@ -561,7 +563,7 @@ class _WanVAE(nn.Module):
         x_recon = self.decode(z)
         return x_recon, mu, log_var
 
-    def encode(self, x: Tensor, scale: list[Tensor]) -> Tensor:
+    def encode(self, x: Tensor) -> Tensor:
         self.clear_cache()
         x = patchify(x, self.patch_size)
 
@@ -576,15 +578,15 @@ class _WanVAE(nn.Module):
             out = torch.cat([out, out_], 2)
 
         mu, log_var = self.conv1(out).chunk(2, dim=1)
-        mu = (mu - scale[0][:, None, None, None]) * scale[1][:, None, None, None]
+        mu = (mu - self.mean[:, None, None, None]) * self.scale[:, None, None, None]
 
         self.clear_cache()
         return mu
 
-    def decode(self, z: Tensor, scale: list[Tensor]) -> Tensor:
+    def decode(self, z: Tensor) -> Tensor:
         self.clear_cache()
 
-        z = z / scale[1][:, None, None, None] + scale[0][:, None, None, None]
+        z = z / self.scale[:, None, None, None] + self.mean[:, None, None, None]
         x = self.conv2(z)
 
         # process 1st frame, no upsampling
@@ -623,70 +625,60 @@ class _WanVAE(nn.Module):
         self._enc_feat_map = [None] * self._enc_conv_num
 
 
-# TODO: merge this to _WanVAE
-class WanVAE:
-    def __init__(self, version: str = "2.1", device="cpu"):
-        self.device = device
+def load_wan_vae(version: str = "2.1") -> WanVAE:
+    if version == "2.1":
+        cfg = dict(encode_dim=96, decode_dim=96, z_dim=16, patch_size=1)
+        repo_id = "Wan-AI/Wan2.1-T2V-14B"
+        filename = "Wan2.1_VAE.pth"
 
-        if version == "2.1":
-            cfg = dict(encode_dim=96, decode_dim=96, z_dim=16, patch_size=1)
-            repo_id = "Wan-AI/Wan2.1-T2V-14B"
-            filename = "Wan2.1_VAE.pth"
+        # fmt: off
+        mean = [
+            -0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517, 1.5508,
+            0.4134, -0.0715, 0.5517, -0.3632, -0.1922, -0.9497, 0.2503, -0.2921
+        ]
+        std = [
+            2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743,
+            3.2687, 2.1526, 2.8652, 1.5579, 1.6382, 1.1253, 2.8251, 1.9160
+        ]
+        # fmt: on
 
-            # fmt: off
-            mean = [
-                -0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517, 1.5508,
-                0.4134, -0.0715, 0.5517, -0.3632, -0.1922, -0.9497, 0.2503, -0.2921
-            ]
-            std = [
-                2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743,
-                3.2687, 2.1526, 2.8652, 1.5579, 1.6382, 1.1253, 2.8251, 1.9160
-            ]
-            # fmt: on
+    elif version == "2.2":
+        cfg = dict(encode_dim=160, decode_dim=256, z_dim=48, patch_size=2)
+        repo_id = "Wan-AI/Wan2.2-TI2V-5B"
+        filename = "Wan2.2_VAE.pth"
 
-        elif version == "2.2":
-            cfg = dict(encode_dim=160, decode_dim=256, z_dim=48, patch_size=2)
-            repo_id = "Wan-AI/Wan2.2-TI2V-5B"
-            filename = "Wan2.2_VAE.pth"
+        # fmt: off
+        mean = [
+            -0.2289, -0.0052, -0.1323, -0.2339, -0.2799, 0.0174, 0.1838, 0.1557,
+            -0.1382, 0.0542, 0.2813, 0.0891, 0.1570, -0.0098, 0.0375, -0.1825,
+            -0.2246, -0.1207, -0.0698, 0.5109, 0.2665, -0.2108, -0.2158, 0.2502,
+            -0.2055, -0.0322, 0.1109, 0.1567, -0.0729, 0.0899, -0.2799, -0.1230,
+            -0.0313, -0.1649, 0.0117, 0.0723, -0.2839, -0.2083, -0.0520, 0.3748,
+            0.0152, 0.1957, 0.1433, -0.2944, 0.3573, -0.0548, -0.1681, -0.0667,
+        ]
+        std = [
+            0.4765, 1.0364, 0.4514, 1.1677, 0.5313, 0.4990, 0.4818, 0.5013,
+            0.8158, 1.0344, 0.5894, 1.0901, 0.6885, 0.6165, 0.8454, 0.4978,
+            0.5759, 0.3523, 0.7135, 0.6804, 0.5833, 1.4146, 0.8986, 0.5659,
+            0.7069, 0.5338, 0.4889, 0.4917, 0.4069, 0.4999, 0.6866, 0.4093,
+            0.5709, 0.6065, 0.6415, 0.4944, 0.5726, 1.2042, 0.5458, 1.6887,
+            0.3971, 1.0600, 0.3943, 0.5537, 0.5444, 0.4089, 0.7468, 0.7744,
+        ]
+        # fmt: on
 
-            # fmt: off
-            mean = [
-                -0.2289, -0.0052, -0.1323, -0.2339, -0.2799, 0.0174, 0.1838, 0.1557,
-                -0.1382, 0.0542, 0.2813, 0.0891, 0.1570, -0.0098, 0.0375, -0.1825,
-                -0.2246, -0.1207, -0.0698, 0.5109, 0.2665, -0.2108, -0.2158, 0.2502,
-                -0.2055, -0.0322, 0.1109, 0.1567, -0.0729, 0.0899, -0.2799, -0.1230,
-                -0.0313, -0.1649, 0.0117, 0.0723, -0.2839, -0.2083, -0.0520, 0.3748,
-                0.0152, 0.1957, 0.1433, -0.2944, 0.3573, -0.0548, -0.1681, -0.0667,
-            ]
-            std = [
-                0.4765, 1.0364, 0.4514, 1.1677, 0.5313, 0.4990, 0.4818, 0.5013,
-                0.8158, 1.0344, 0.5894, 1.0901, 0.6885, 0.6165, 0.8454, 0.4978,
-                0.5759, 0.3523, 0.7135, 0.6804, 0.5833, 1.4146, 0.8986, 0.5659,
-                0.7069, 0.5338, 0.4889, 0.4917, 0.4069, 0.4999, 0.6866, 0.4093,
-                0.5709, 0.6065, 0.6415, 0.4944, 0.5726, 1.2042, 0.5458, 1.6887,
-                0.3971, 1.0600, 0.3943, 0.5537, 0.5444, 0.4089, 0.7468, 0.7744,
-            ]
-            # fmt: on
+    else:
+        raise ValueError(f"Unsupported {version=}")
 
-        else:
-            raise ValueError(f"Unsupported {version=}")
+    mean = torch.tensor(mean, dtype=torch.float)
+    scale = 1.0 / torch.tensor(std, dtype=torch.float)
 
-        self.mean = torch.tensor(mean, dtype=torch.float, device=device)
-        self.std = torch.tensor(std, dtype=torch.float, device=device)
-        self.scale = [self.mean, 1.0 / self.std]
+    with torch.device("meta"):
+        model = WanVAE(**cfg, version=version)
+    model.register_buffer("mean", mean, persistent=False)
+    model.register_buffer("scale", scale, persistent=False)
 
-        with torch.device("meta"):
-            model = _WanVAE(**cfg, version=version)
+    state_dict = load_hf_state_dict(repo_id, filename)
+    model.load_state_dict(state_dict, assign=True)
+    model.eval().requires_grad_(False)
 
-        state_dict = load_hf_state_dict(repo_id, filename)
-        model.load_state_dict(state_dict, assign=True)
-        model.eval().requires_grad_(False).to(device)
-
-        self.model = model
-
-    def encode(self, videos: list[Tensor]):
-        # each video is [C, T, H, W]
-        return [self.model.encode(u.unsqueeze(0), self.scale).float().squeeze(0) for u in videos]
-
-    def decode(self, zs: list[Tensor]):
-        return [self.model.decode(u.unsqueeze(0), self.scale).float().clamp_(-1, 1).squeeze(0) for u in zs]
+    return model

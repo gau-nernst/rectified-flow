@@ -12,4 +12,4 @@ from .sd3 import SD3, load_sd3_5
 from .text_embedder import TextEmbedder, load_clip_l, load_openclip_bigg, load_t5
 from .unet import UNet, load_sdxl, load_unet
 from .utils import load_hf_state_dict
-from .wan import WanModel, WanVAE, _WanVAE, load_wan
+from .wan import WanModel, WanVAE, load_wan, load_wan_vae
