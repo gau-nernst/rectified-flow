@@ -56,7 +56,7 @@ class RMSNorm(nn.Module):
         self.gamma = nn.Parameter(torch.ones(dim, *broadcastable_dims))
 
     def forward(self, x: Tensor) -> Tensor:
-        out = F.normalize(x.float(), dim=1) * (self.gamma * self.scale)
+        out = F.normalize(x.float(), dim=1) * self.gamma * self.scale
         return out.to(x.dtype)
 
 
