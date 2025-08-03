@@ -8,7 +8,8 @@ from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 from torchvision.transforms import v2
 
-from flux_infer import FluxTextEmbedder
+from infer_flux import FluxTextEmbedder
+from infer_sd3 import SD3TextEmbedder
 from modelling import (
     SD3,
     Flux,
@@ -19,7 +20,6 @@ from modelling import (
     load_sd3_autoencoder,
 )
 from offload import PerLayerOffloadWithBackward
-from sd3_infer import SD3TextEmbedder
 from time_sampler import TimeSampler
 
 

@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from tqdm import tqdm
 
-from flux_infer import prepare_inputs
+from infer_flux import prepare_inputs
 from modelling import SD3, load_clip_l, load_openclip_bigg, load_sd3_5, load_sd3_autoencoder, load_t5
 from offload import PerLayerOffloadCUDAStream
 

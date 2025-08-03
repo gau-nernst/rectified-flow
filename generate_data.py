@@ -7,8 +7,8 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # improve me
 from PIL import Image
 from tqdm import tqdm
 
-from flux_infer import FluxGenerator
-from sd3_infer import SD3Generator, SkipLayerConfig
+from infer_flux import FluxGenerator
+from infer_sd3 import SD3Generator, SkipLayerConfig
 
 if __name__ == "__main__":
 

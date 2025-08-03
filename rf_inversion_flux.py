@@ -7,7 +7,7 @@ import torch
 from torch import Tensor
 from tqdm import tqdm
 
-from flux_infer import flux_time_shift
+from infer_flux import flux_time_shift
 from modelling import Flux
 
 logger = logging.getLogger(__name__)

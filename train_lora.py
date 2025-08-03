@@ -21,9 +21,9 @@ from PIL import Image, ImageOps
 from torch.utils.data import DataLoader, IterableDataset, default_collate, get_worker_info
 from tqdm import tqdm
 
-from flux_infer import FluxTextEmbedder, flux_euler_generate, flux_timesteps
+from infer_flux import FluxTextEmbedder, flux_euler_generate, flux_timesteps
+from infer_sd3 import SD3TextEmbedder, sd3_euler_generate, sd3_timesteps
 from modelling import SD3, AutoEncoder, Flux
-from sd3_infer import SD3TextEmbedder, sd3_euler_generate, sd3_timesteps
 from time_sampler import LogitNormal, Uniform
 from train_utils import EMA, compute_loss, parse_img_size, random_resize, setup_model
 
