@@ -9,10 +9,9 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..utils import load_hf_state_dict
-from .attention import flash_attention
 
 
-def sinusoidal_embedding_1d(dim: int, position: Tensor, theta: float = 10_000.0) -> Tensor:
+def sinusoidal_embedding_1d(dim: int, position: Tensor, theta: float = 1e4) -> Tensor:
     assert dim % 2 == 0
     half = dim // 2
     position = position.type(torch.float64)
@@ -25,7 +24,7 @@ def sinusoidal_embedding_1d(dim: int, position: Tensor, theta: float = 10_000.0)
     return x.float()
 
 
-def rope_params(seqlen: int, dim: int, theta: float = 10_000.0, device: torch.types.Device = None) -> Tensor:
+def rope_params(seqlen: int, dim: int, theta: float = 1e4, device: torch.types.Device = None) -> Tensor:
     assert dim % 2 == 0
     freqs = torch.outer(
         torch.arange(seqlen, dtype=torch.float64, device=device),
@@ -34,35 +33,21 @@ def rope_params(seqlen: int, dim: int, theta: float = 10_000.0, device: torch.ty
     return torch.polar(torch.ones_like(freqs), freqs)
 
 
-def rope_apply(x: Tensor, grid_sizes: Tensor, rope_embeds: Tensor) -> Tensor:
-    N = x.shape[2]
-    C = x.shape[3] // 2
-    rope_embeds = rope_embeds.split([C - 2 * (C // 3), C // 3, C // 3], dim=1)
+def apply_rope(x: Tensor, rope_embeds: tuple[Tensor, Tensor, Tensor]) -> Tensor:
+    # x: [B, L, num_heads, head_dim]
+    # rope_embeds: [1024, head_dim / 2] (complex number)
+    rope_F, rope_H, rope_W = rope_embeds
+    F = rope_F.shape[0]
+    H = rope_H.shape[0]
+    W = rope_W.shape[0]
 
-    # loop over samples
-    # NOTE: grid_sizes doesn't need to be a tensor?
-    output = []
-    for i, (F, H, W) in enumerate(grid_sizes.tolist()):
-        seq_len = F * H * W
+    rope_F = rope_F.view(F, 1, 1, -1).expand(F, H, W, -1)
+    rope_H = rope_H.view(1, H, 1, -1).expand(F, H, W, -1)
+    rope_W = rope_W.view(1, 1, W, -1).expand(F, H, W, -1)
+    rope = torch.cat([rope_F, rope_H, rope_W], dim=-1).reshape(F * H * W, 1, -1)
 
-        # precompute multipliers
-        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(seq_len, N, -1, 2))
-        rope_i = torch.cat(
-            [
-                rope_embeds[0][:F].view(F, 1, 1, -1).expand(F, H, W, -1),
-                rope_embeds[1][:H].view(1, H, 1, -1).expand(F, H, W, -1),
-                rope_embeds[2][:W].view(1, 1, W, -1).expand(F, H, W, -1),
-            ],
-            dim=-1,
-        ).reshape(seq_len, 1, -1)
-
-        # apply rotary embedding
-        x_i = torch.view_as_real(x_i * rope_i).flatten(2)
-        x_i = torch.cat([x_i, x[i, seq_len:]])
-
-        # append to collection
-        output.append(x_i)
-    return torch.stack(output).to(x.dtype)
+    x_f64 = torch.view_as_complex(x.to(torch.float64).unflatten(-1, (-1, 2)))
+    return torch.view_as_real(x_f64 * rope).flatten(3).to(x.dtype)
 
 
 class RMSNorm(nn.Module):
@@ -122,39 +107,33 @@ class WanSelfAttention(nn.Module):
         self.norm_q = RMSNorm(dim, eps=eps)
         self.norm_k = RMSNorm(dim, eps=eps)
 
-    def forward(
-        self,
-        x: Tensor,  # [B, L, num_heads, C / num_heads]
-        seq_lens: Tensor,  # [B]
-        grid_sizes: Tensor,  # [B, 3]
-        rope_embeds: Tensor,  # [1024, C / num_heads / 2]
-    ) -> Tensor:
-        q = self.norm_q(self.q(x)).unflatten(-1, (-1, self.head_dim))
-        k = self.norm_k(self.k(x)).unflatten(-1, (-1, self.head_dim))
-        v = self.v(x).unflatten(-1, (-1, self.head_dim))
+    def forward(self, x: Tensor, rope_embeds: tuple[Tensor, Tensor, Tensor]) -> Tensor:
+        # x: [B, L, D]
+        shape = (x.shape[0], -1, self.num_heads, self.head_dim)
+        q = self.norm_q(self.q(x)).view(shape)
+        k = self.norm_k(self.k(x)).view(shape)
+        v = self.v(x).view(shape).transpose(1, 2)
 
-        q = rope_apply(q, grid_sizes, rope_embeds)
-        k = rope_apply(k, grid_sizes, rope_embeds)
-        x = flash_attention(q, k, v, k_lens=seq_lens)
+        q = apply_rope(q, rope_embeds).transpose(1, 2)
+        k = apply_rope(k, rope_embeds).transpose(1, 2)
 
-        x = x.flatten(2)
-        x = self.o(x)
-        return x
+        out = F.scaled_dot_product_attention(q, k, v)
+        out = self.o(out.transpose(1, 2).flatten(2))
+        return out
 
 
 class WanCrossAttention(WanSelfAttention):
     def forward(self, x: Tensor, context: Tensor) -> Tensor:
         # x: [B, L1, C]
         # context: [B, L2, C]
-        q = self.norm_q(self.q(x)).unflatten(-1, (-1, self.head_dim))
-        k = self.norm_k(self.k(context)).unflatten(-1, (-1, self.head_dim))
-        v = self.v(context).unflatten(-1, (-1, self.head_dim))
+        shape = (x.shape[0], -1, self.num_heads, self.head_dim)
+        q = self.norm_q(self.q(x)).view(shape).transpose(1, 2)
+        k = self.norm_k(self.k(context)).view(shape).transpose(1, 2)
+        v = self.v(context).view(shape).transpose(1, 2)
 
-        x = flash_attention(q, k, v)
-
-        x = x.flatten(2)
-        x = self.o(x)
-        return x
+        out = F.scaled_dot_product_attention(q, k, v)
+        out = self.o(out.transpose(1, 2).flatten(2))
+        return out
 
 
 def modulate(x: Tensor, scale: Tensor, bias: Tensor) -> Tensor:
@@ -180,21 +159,14 @@ class WanAttentionBlock(nn.Module):
 
         self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
 
-    def forward(
-        self,
-        x: Tensor,  # [B, L, C]
-        e: Tensor,  # [B, L1, 6, C]
-        seq_lens: Tensor,  # [B]
-        grid_sizes: Tensor,  # [B, 3]
-        rope_embeds: Tensor,  # [1024, C/num_heads/2]
-        context: Tensor,
-    ) -> Tensor:
+    def forward(self, x: Tensor, e: Tensor, rope_embeds: tuple[Tensor, Tensor, Tensor], context: Tensor) -> Tensor:
+        # x: [B, L, C]
+        # e: [B, L, 6, C]
         assert e.dtype == torch.float32
         b0, s0, s1, b2, s2, s3 = (self.modulation.unsqueeze(0) + e).unbind(2)
 
         # x will become FP32 since e is FP32
-        y = self.self_attn(modulate(self.norm1(x), s0, b0), seq_lens, grid_sizes, rope_embeds)
-        x = x + y * s1
+        x = x + self.self_attn(modulate(self.norm1(x), s0, b0), rope_embeds) * s1
         x = x + self.cross_attn(self.norm3(x), context)
         x = x + self.ffn(modulate(self.norm2(x), s2, b2)) * s3
         return x
@@ -212,7 +184,7 @@ class Head(nn.Module):
         # x: [B, L, C]
         # e: [B, L, C]
         assert e.dtype == torch.float32
-        bias, scale = (self.modulation.unsqueeze(0) + e.unsqueeze(2)).unbind(2)
+        bias, scale = (self.modulation + e.unsqueeze(2)).unbind(2)
         return self.head(modulate(self.norm(x.float()), scale, bias))
 
 
@@ -223,7 +195,7 @@ class WanConfig:
     num_layers: int
     in_dim: int = 16
     out_dim: int = 16
-    patch_size: tuple[int, int, int] = (1, 2, 2)  # t, h, w
+    patch_size: tuple[int, int, int] = (1, 2, 2)  # nF, nH, nW
     text_len: int = 512
     freq_dim: int = 256
     text_dim: int = 4096
@@ -235,15 +207,12 @@ class WanModel(nn.Module):
     def __init__(self, cfg: WanConfig) -> None:
         super().__init__()
         self.cfg = cfg
-
-        # embeddings
         self.patch_embedding = nn.Conv3d(cfg.in_dim, cfg.dim, kernel_size=cfg.patch_size, stride=cfg.patch_size)
         self.text_embedding = nn.Sequential(
             Linear(cfg.text_dim, cfg.dim),
             nn.GELU(approximate="tanh"),
             Linear(cfg.dim, cfg.dim),
         )
-
         self.time_embedding = nn.Sequential(
             FP32Linear(cfg.freq_dim, cfg.dim),
             nn.SiLU(),
@@ -253,89 +222,53 @@ class WanModel(nn.Module):
             nn.SiLU(),
             FP32Linear(cfg.dim, cfg.dim * 6),
         )
-
-        # blocks
         self.blocks = nn.ModuleList(
             [WanAttentionBlock(cfg.dim, cfg.ffn_dim, cfg.head_dim, eps=cfg.eps) for _ in range(cfg.num_layers)]
         )
-
-        # head
         self.head = Head(cfg.dim, cfg.out_dim, cfg.patch_size, cfg.eps)
 
-    def get_rope(self, seqlen: int = 1024, device: torch.types.Device = None):
+    def get_rope(self, F: int, H: int, W: int, device: torch.types.Device = None) -> tuple[Tensor, Tensor, Tensor]:
         d = self.cfg.head_dim
-        return torch.cat(
-            [
-                rope_params(seqlen, d - 4 * (d // 6), device=device),
-                rope_params(seqlen, 2 * (d // 6), device=device),
-                rope_params(seqlen, 2 * (d // 6), device=device),
-            ],
-            dim=1,
+        return (
+            rope_params(F, d - 4 * (d // 6), device=device),
+            rope_params(H, 2 * (d // 6), device=device),
+            rope_params(W, 2 * (d // 6), device=device),
         )
 
-    def forward(
-        self,
-        x: list[Tensor],  # each is [Cin, F, H, W]
-        t: Tensor,  # [B]
-        context: list[Tensor],  # each is [L, C]
-        seq_len: int,
-        y: list[Tensor] | None = None,  # same shape as x
-    ) -> list[Tensor]:
-        # TOOD: remove x, context, and y being lists so that we don't need to bother with padding
+    def forward(self, x: Tensor, t: Tensor, context: Tensor, y: Tensor | None = None) -> Tensor:
+        # x: [B, C, F, H, W]
+        # t: [B]
+        # context: [B, L, C]
+        # y: [B, C, F, H, W]
         if y is not None:
-            x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
+            x = torch.cat([x, y], dim=0)
 
-        # embeddings
-        # TODO: device for grid_sizes and seq_lens
-        x = [self.patch_embedding(u.to(self.patch_embedding.weight.dtype)) for u in x]
-        grid_sizes = torch.stack([torch.tensor(u.shape[1:], dtype=torch.long) for u in x])
+        x = self.patch_embedding(x.to(self.patch_embedding.weight.dtype))
+        F, H, W = x.shape[2:]
+        seqlen = F * H * W
+        x = x.flatten(2).transpose(1, 2)  # (B, F*H*W, C)
 
-        x = [u.flatten(1) for u in x]  # each is (dim, F*H*W)
-        seq_lens = torch.tensor([u.shape[1] for u in x], dtype=torch.long)
-        assert seq_lens.max() <= seq_len  # NOTE: this will graph-break?
-
-        # pad and stack. transpose to (B, seq_len, dim)
-        x = torch.stack([F.pad(u, (0, seq_len - u.shape[1])).T for u in x], dim=0)
-
-        # time embeddings
+        # time embeddings -> modulation
         if t.ndim == 1:  # this is a bit strange
-            t = t.expand(t.shape[0], seq_len)
-        time_embeds = sinusoidal_embedding_1d(self.cfg.freq_dim, t.flatten()).unflatten(0, (t.shape[0], seq_len))
+            t = t.expand(t.shape[0], seqlen)
+        time_embeds = sinusoidal_embedding_1d(self.cfg.freq_dim, t.flatten()).unflatten(0, (t.shape[0], seqlen))
         e = self.time_embedding(time_embeds)
         e0 = self.time_projection(e).unflatten(2, (6, -1))
         assert e.dtype == torch.float32 and e0.dtype == torch.float32
 
-        # context
-        context = torch.stack([F.pad(u, (0, 0, 0, self.cfg.text_len - u.shape[0])) for u in context], dim=0)
+        rope_embeds = self.get_rope(F, H, W, device=x.device)
         context = self.text_embedding(context)
-
-        # TODO: pass in seqlen
-        rope_embeds = self.get_rope(device=x.device)
         for block in self.blocks:
-            x = block(
-                x=x,
-                e=e0,
-                seq_lens=seq_lens,
-                grid_sizes=grid_sizes,
-                rope_embeds=rope_embeds,
-                context=context,
-            )
+            x = block(x, e0, rope_embeds, context)
 
         x = self.head(x, e)
-        x = self.unpatchify(x, grid_sizes)
-        return [u.float() for u in x]
 
-    def unpatchify(self, x: list[Tensor], grid_sizes: Tensor):
-        # x: each is [L, Cout, prod(patch_size)]
-        # grid_sizes: shape [B, 3] - F/H/W patches
-        c = self.cfg.out_dim
-        out = []
-        for u, v in zip(x, grid_sizes.tolist()):
-            u = u[: math.prod(v)].view(*v, *self.cfg.patch_size, c)
-            u = torch.einsum("fhwpqrc->cfphqwr", u)
-            u = u.reshape(c, *[i * j for i, j in zip(v, self.cfg.patch_size)])
-            out.append(u)
-        return out
+        nF, nH, nW = self.cfg.patch_size
+        out_dim = self.cfg.out_dim
+        x = x.reshape(x.shape[0], F, H, W, nF, nH, nW, out_dim)
+        x = x.permute(0, 7, 1, 4, 2, 5, 3, 6)
+        x = x.reshape(x.shape[0], out_dim, F * nF, H * nH, W * nW)
+        return x
 
 
 def load_wan(name: str):
