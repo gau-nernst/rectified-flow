@@ -31,34 +31,33 @@ def rope_params(max_seq_len: int, dim: int, theta: float = 10_000.0, device: tor
         torch.arange(max_seq_len, dtype=torch.float, device=device),
         1.0 / theta ** torch.arange(0, dim, 2, dtype=torch.float64, device=device).div(dim),
     )
-    freqs = torch.polar(torch.ones_like(freqs), freqs)
-    return freqs
+    return torch.polar(torch.ones_like(freqs), freqs)
 
 
-def rope_apply(x: Tensor, grid_sizes: Tensor, freqs: Tensor) -> Tensor:
-    n, c = x.shape[2], x.shape[3] // 2
-
-    # split freqs
-    freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+def rope_apply(x: Tensor, grid_sizes: Tensor, rope_embeds: Tensor) -> Tensor:
+    N = x.shape[2]
+    C = x.shape[3] // 2
+    rope_embeds = rope_embeds.split([C - 2 * (C // 3), C // 3, C // 3], dim=1)
 
     # loop over samples
+    # NOTE: grid_sizes doesn't need to be a tensor?
     output = []
-    for i, (f, h, w) in enumerate(grid_sizes.tolist()):
-        seq_len = f * h * w
+    for i, (F, H, W) in enumerate(grid_sizes.tolist()):
+        seq_len = F * H * W
 
         # precompute multipliers
-        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(seq_len, n, -1, 2))
-        freqs_i = torch.cat(
+        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(seq_len, N, -1, 2))
+        rope_i = torch.cat(
             [
-                freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
-                freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-                freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1),
+                rope_embeds[0][:F].view(F, 1, 1, -1).expand(F, H, W, -1),
+                rope_embeds[1][:H].view(1, H, 1, -1).expand(F, H, W, -1),
+                rope_embeds[2][:W].view(1, 1, W, -1).expand(F, H, W, -1),
             ],
             dim=-1,
         ).reshape(seq_len, 1, -1)
 
         # apply rotary embedding
-        x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
+        x_i = torch.view_as_real(x_i * rope_i).flatten(2)
         x_i = torch.cat([x_i, x[i, seq_len:]])
 
         # append to collection
@@ -100,7 +99,7 @@ class WanSelfAttention(nn.Module):
         x: Tensor,  # [B, L, num_heads, C / num_heads]
         seq_lens: Tensor,  # [B]
         grid_sizes: Tensor,  # [B, 3]
-        freqs: Tensor,  # [1024, C / num_heads / 2]
+        rope_embeds: Tensor,  # [1024, C / num_heads / 2]
     ) -> Tensor:
         B, S, N, D = *x.shape[:2], self.num_heads, self.head_dim
 
@@ -109,8 +108,8 @@ class WanSelfAttention(nn.Module):
         v = self.v(x).view(B, S, N, D)
 
         x = flash_attention(
-            rope_apply(q, grid_sizes, freqs),
-            rope_apply(k, grid_sizes, freqs),
+            rope_apply(q, grid_sizes, rope_embeds),
+            rope_apply(k, grid_sizes, rope_embeds),
             v,
             k_lens=seq_lens,
         )
@@ -167,13 +166,13 @@ class WanAttentionBlock(nn.Module):
         e: Tensor,  # [B, L1, 6, C]
         seq_lens: Tensor,  # [B]
         grid_sizes: Tensor,  # [B, 3]
-        freqs: Tensor,  # [1024, C/num_heads/2]
+        rope_embeds: Tensor,  # [1024, C/num_heads/2]
         context: Tensor,
         context_lens: Tensor | None,
     ) -> Tensor:
         e = self.modulation.unsqueeze(0) + e
 
-        y = self.self_attn(modulate(self.norm1(x), e[:, :, :2]), seq_lens, grid_sizes, freqs)
+        y = self.self_attn(modulate(self.norm1(x), e[:, :, :2]), seq_lens, grid_sizes, rope_embeds)
         x = (x + y * e[:, :, 2]).to(x.dtype)
 
         x = x + self.cross_attn(self.norm3(x), context, context_lens)
@@ -253,7 +252,7 @@ class WanModel(nn.Module):
         # head
         self.head = Head(cfg.dim, cfg.out_dim, cfg.patch_size, cfg.eps)
 
-    def get_freqs(self, device: torch.types.Device = None):
+    def get_rope(self, device: torch.types.Device = None):
         d = self.cfg.head_dim
         return torch.cat(
             [
@@ -300,14 +299,14 @@ class WanModel(nn.Module):
         context = torch.stack([F.pad(u, (0, 0, self.cfg.text_len - u.shape[0], 0)) for u in context], dim=0)
         context = self.text_embedding(context.to(self.text_embedding[0].weight.dtype))
 
-        freqs = self.get_freqs(x.device)
+        rope_embeds = self.get_rope(x.device)
         for block in self.blocks:
             x = block(
-                x,
+                x=x,
                 e=e0,
                 seq_lens=seq_lens,
                 grid_sizes=grid_sizes,
-                freqs=freqs,
+                rope_embeds=rope_embeds,
                 context=context,
                 context_lens=context_lens,
             )
