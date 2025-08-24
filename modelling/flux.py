@@ -13,13 +13,6 @@ from .attn import dispatch_attention
 from .utils import load_hf_state_dict
 
 
-def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor, impl: str = "pt") -> Tensor:
-    q, k = apply_rope(q, k, pe)
-    x = dispatch_attention(q, k, v, impl=impl)
-    x = x.transpose(-2, -3).flatten(-2)  # (B, num_head, L, head_dim) -> (B, L, num_head * head_dim)
-    return x
-
-
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
     assert dim % 2 == 0
     scale = torch.arange(0, dim, 2, dtype=torch.float64, device=pos.device) / dim
@@ -30,12 +23,10 @@ def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
     return out.float()
 
 
-def apply_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Tensor, Tensor]:
-    xq_ = xq.float().reshape(*xq.shape[:-1], -1, 1, 2)
-    xk_ = xk.float().reshape(*xk.shape[:-1], -1, 1, 2)
-    xq_out = freqs_cis[..., 0] * xq_[..., 0] + freqs_cis[..., 1] * xq_[..., 1]
-    xk_out = freqs_cis[..., 0] * xk_[..., 0] + freqs_cis[..., 1] * xk_[..., 1]
-    return xq_out.reshape(*xq.shape).type_as(xq), xk_out.reshape(*xk.shape).type_as(xk)
+def apply_rope(x: Tensor, freqs_cis: Tensor) -> Tensor:
+    x_ = x.float().reshape(*x.shape[:-1], -1, 1, 2)
+    out = freqs_cis[..., 0] * x_[..., 0] + freqs_cis[..., 1] * x_[..., 1]
+    return out.reshape(x.shape).type_as(x)
 
 
 class EmbedND(nn.Module):
@@ -111,19 +102,15 @@ class SelfAttention(nn.Module):
         self.norm = QKNorm(head_dim)
         self.proj = nn.Linear(dim, dim)
 
-    # def forward(self, x: Tensor, pe: Tensor) -> Tensor:
-    #     qkv = self.qkv(x)
-    #     q, k, v = qkv.unflatten(2, (3 * self.num_heads, -1)).transpose(1, 2).chunk(3, dim=1)
-    #     q, k = self.norm(q, k)
-    #     x = attention(q, k, v, pe=pe)
-    #     x = self.proj(x)
-    #     return x
-
 
 class ModulationOut(NamedTuple):
     shift: Tensor
     scale: Tensor
     gate: Tensor
+
+
+def modulate(x: Tensor, mod: ModulationOut) -> Tensor:
+    return (1.0 + mod.scale) * x + mod.shift
 
 
 class Modulation(nn.Module):
@@ -178,35 +165,30 @@ class DoubleStreamBlock(nn.Module):
         txt_mod1, txt_mod2 = self.txt_mod(vec)
 
         # prepare image for attention
-        img_modulated = self.img_norm1(img)
-        img_modulated = (1 + img_mod1.scale) * img_modulated + img_mod1.shift
-        img_qkv = self.img_attn.qkv(img_modulated)
-        img_q, img_k, img_v = img_qkv.unflatten(2, (3 * self.num_heads, -1)).permute(0, 2, 1, 3).chunk(3, dim=1)
+        img_qkv = self.img_attn.qkv(modulate(self.img_norm1(img), img_mod1))
+        img_q, img_k, img_v = img_qkv.unflatten(2, (3 * self.num_heads, -1)).transpose(1, 2).chunk(3, dim=1)
         img_q, img_k = self.img_attn.norm(img_q, img_k)
 
         # prepare txt for attention
-        txt_modulated = self.txt_norm1(txt)
-        txt_modulated = (1 + txt_mod1.scale) * txt_modulated + txt_mod1.shift
-        txt_qkv = self.txt_attn.qkv(txt_modulated)
-        txt_q, txt_k, txt_v = txt_qkv.unflatten(2, (3 * self.num_heads, -1)).permute(0, 2, 1, 3).chunk(3, dim=1)
+        txt_qkv = self.txt_attn.qkv(modulate(self.txt_norm1(txt), txt_mod1))
+        txt_q, txt_k, txt_v = txt_qkv.unflatten(2, (3 * self.num_heads, -1)).transpose(1, 2).chunk(3, dim=1)
         txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k)
 
         # run actual attention
-        q = torch.cat((txt_q, img_q), dim=2)
-        k = torch.cat((txt_k, img_k), dim=2)
+        q = apply_rope(torch.cat((txt_q, img_q), dim=2), pe)
+        k = apply_rope(torch.cat((txt_k, img_k), dim=2), pe)
         v = torch.cat((txt_v, img_v), dim=2)
 
-        attn = attention(q, k, v, pe=pe, impl=self.attn_impl)
-        txt_attn = attn[:, : txt.shape[1]].contiguous()
-        img_attn = attn[:, txt.shape[1] :].contiguous()
+        attn = dispatch_attention(q, k, v, impl=self.attn_impl)
+        txt_attn, img_attn = attn.transpose(1, 2).flatten(2).split([txt.shape[1], img.shape[1]], dim=1)
 
-        # calculate the img bloks
+        # calculate the img blocks
         img = img + img_mod1.gate * self.img_attn.proj(img_attn)
-        img = img + img_mod2.gate * self.img_mlp((1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift)
+        img = img + img_mod2.gate * self.img_mlp(modulate(self.img_norm2(img), img_mod2))
 
-        # calculate the txt bloks
+        # calculate the txt blocks
         txt = txt + txt_mod1.gate * self.txt_attn.proj(txt_attn)
-        txt = txt + txt_mod2.gate * self.txt_mlp((1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift)
+        txt = txt + txt_mod2.gate * self.txt_mlp(modulate(self.txt_norm2(txt), txt_mod2))
         return img, txt
 
 
@@ -235,12 +217,15 @@ class SingleStreamBlock(nn.Module):
 
     def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
         mod, _ = self.modulation(vec)
-        x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
+        x_mod = modulate(self.pre_norm(x), mod)
         qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1)
 
-        q, k, v = qkv.unflatten(2, (3 * self.num_heads, -1)).permute(0, 2, 1, 3).chunk(3, dim=1)
+        q, k, v = qkv.unflatten(2, (3 * self.num_heads, -1)).transpose(1, 2).chunk(3, dim=1)
         q, k = self.norm(q, k)
-        attn = attention(q, k, v, pe=pe, impl=self.attn_impl)
+        q = apply_rope(q, pe)
+        k = apply_rope(k, pe)
+        attn = dispatch_attention(q, k, v, impl=self.attn_impl)
+        attn = attn.transpose(1, 2).flatten(2)
 
         # compute activation in mlp stream, cat again and run second linear layer
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
