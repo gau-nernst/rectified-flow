@@ -50,6 +50,11 @@ def apply_rope(x: Tensor, rope_embeds: tuple[Tensor, Tensor, Tensor]) -> Tensor:
     return torch.view_as_real(x_f64 * rope).flatten(3).to(x.dtype)
 
 
+def sdpa(q: Tensor, k: Tensor, v: Tensor):
+    # q, k, v: [B, L, num_heads, head_dim]
+    return F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)).transpose(1, 2)
+
+
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-5) -> None:
         super().__init__()
@@ -110,16 +115,10 @@ class WanSelfAttention(nn.Module):
     def forward(self, x: Tensor, rope_embeds: tuple[Tensor, Tensor, Tensor]) -> Tensor:
         # x: [B, L, D]
         shape = (x.shape[0], -1, self.num_heads, self.head_dim)
-        q = self.norm_q(self.q(x)).view(shape)
-        k = self.norm_k(self.k(x)).view(shape)
-        v = self.v(x).view(shape).transpose(1, 2)
-
-        q = apply_rope(q, rope_embeds).transpose(1, 2)
-        k = apply_rope(k, rope_embeds).transpose(1, 2)
-
-        out = F.scaled_dot_product_attention(q, k, v)
-        out = self.o(out.transpose(1, 2).flatten(2))
-        return out
+        q = apply_rope(self.norm_q(self.q(x)).view(shape), rope_embeds)
+        k = apply_rope(self.norm_k(self.k(x)).view(shape), rope_embeds)
+        v = self.v(x).view(shape)
+        return self.o(sdpa(q, k, v).flatten(2))
 
 
 class WanCrossAttention(WanSelfAttention):
@@ -127,13 +126,10 @@ class WanCrossAttention(WanSelfAttention):
         # x: [B, L1, C]
         # context: [B, L2, C]
         shape = (x.shape[0], -1, self.num_heads, self.head_dim)
-        q = self.norm_q(self.q(x)).view(shape).transpose(1, 2)
-        k = self.norm_k(self.k(context)).view(shape).transpose(1, 2)
-        v = self.v(context).view(shape).transpose(1, 2)
-
-        out = F.scaled_dot_product_attention(q, k, v)
-        out = self.o(out.transpose(1, 2).flatten(2))
-        return out
+        q = self.norm_q(self.q(x)).view(shape)
+        k = self.norm_k(self.k(context)).view(shape)
+        v = self.v(context).view(shape)
+        return self.o(sdpa(q, k, v).flatten(2))
 
 
 def modulate(x: Tensor, scale: Tensor, bias: Tensor) -> Tensor:
