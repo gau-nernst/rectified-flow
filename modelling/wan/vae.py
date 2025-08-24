@@ -2,6 +2,8 @@
 # https://github.com/Wan-Video/Wan2.2/blob/388807310646ed5f318a99f8e8d9ad28c5b65373/wan/modules/vae2_2.py
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
@@ -292,43 +294,51 @@ class UpResidualBlock(nn.Module):
         return x
 
 
-class Encoder3d(nn.Module):
-    def __init__(
-        self,
-        img_dim: int = 3,
-        dim: int = 128,
-        z_dim: int = 4,
-        dim_mult: list[int] = [1, 2, 4, 4],
-        num_res_blocks: int = 2,
-        temporal_downsample: list[bool] = [False, True, True],
-        dropout: float = 0.0,
-        version: str = "2.1",
-    ) -> None:
-        super().__init__()
-        dims = [dim * u for u in [1] + dim_mult]
+@dataclass
+class WanVAEConfig:
+    encode_dim: int = 96
+    decode_dim: int = 96
+    z_dim: int = 16
+    dim_mult: tuple[int] = (1, 2, 4, 4)
+    num_res_blocks: int = 2
+    temporal_downsample: tuple[bool] = (False, True, True)
+    patch_size: int = 1
+    version: str = "2.1"
 
-        self.conv1 = CausalConv3d(img_dim, dims[0], 3, padding=1)
+    def get_stride(self):
+        temporal_stride = int(2 ** sum(self.temporal_downsample))
+        spatial_stride = int(2 ** (len(self.dim_mult) - 1)) * self.patch_size
+        return (temporal_stride, spatial_stride, spatial_stride)
+
+
+class Encoder3d(nn.Module):
+    def __init__(self, cfg: WanVAEConfig, dropout: float = 0.0) -> None:
+        super().__init__()
+        self.conv1 = CausalConv3d(3 * cfg.patch_size * cfg.patch_size, cfg.encode_dim, 3, padding=1)
+        in_dim = cfg.encode_dim
 
         self.downsamples = nn.ModuleList()
-        for i, (img_dim, out_dim) in enumerate(zip(dims[:-1], dims[1:])):
-            if version == "2.1":
+        for i, multiplier in enumerate(cfg.dim_mult):
+            out_dim = cfg.encode_dim * multiplier
+
+            if cfg.version == "2.1":
                 # residual (+attention) blocks
-                for _ in range(num_res_blocks):
-                    self.downsamples.append(ResidualBlock(img_dim, out_dim, dropout))
-                    img_dim = out_dim
+                for _ in range(cfg.num_res_blocks):
+                    self.downsamples.append(ResidualBlock(in_dim, out_dim, dropout))
+                    in_dim = out_dim
 
                 # downsample block
-                if i != len(dim_mult) - 1:
-                    mode = "downsample3d" if temporal_downsample[i] else "downsample2d"
+                if i != len(cfg.dim_mult) - 1:
+                    mode = "downsample3d" if cfg.temporal_downsample[i] else "downsample2d"
                     self.downsamples.append(Resample(out_dim, out_dim, mode))
 
-            elif version == "2.2":
-                down_t = temporal_downsample[i] if i < len(temporal_downsample) else False
-                down_s = i != len(dim_mult) - 1
-                self.downsamples.append(DownResidualBlock(img_dim, out_dim, dropout, num_res_blocks, down_t, down_s))
+            elif cfg.version == "2.2":
+                down_t = cfg.temporal_downsample[i] if i < len(cfg.temporal_downsample) else False
+                down_s = i != len(cfg.dim_mult) - 1
+                self.downsamples.append(DownResidualBlock(in_dim, out_dim, dropout, cfg.num_res_blocks, down_t, down_s))
 
             else:
-                raise ValueError(f"Unsupported {version=}")
+                raise ValueError(f"Unsupported {cfg.version=}")
 
         middle = [
             ResidualBlock(out_dim, out_dim, dropout),
@@ -339,7 +349,7 @@ class Encoder3d(nn.Module):
         head = [
             RMSNorm(out_dim, images=False),
             nn.SiLU(),
-            CausalConv3d(out_dim, z_dim, 3, padding=1),
+            CausalConv3d(out_dim, cfg.z_dim * 2, 3, padding=1),
         ]
         self.head = nn.ModuleList(head)
 
@@ -365,55 +375,48 @@ class Encoder3d(nn.Module):
 
 
 class Decoder3d(nn.Module):
-    def __init__(
-        self,
-        img_dim: int = 3,
-        dim: int = 96,
-        z_dim: int = 16,
-        dim_mult: list[int] = [1, 2, 4, 4],
-        num_res_blocks: int = 2,
-        temporal_upsample: list[bool] = [True, True, False],
-        dropout: float = 0.0,
-        version: str = "2.1",
-    ) -> None:
+    def __init__(self, cfg: WanVAEConfig, dropout: float = 0.0) -> None:
         super().__init__()
-        dims = [dim * u for u in [dim_mult[-1]] + dim_mult[::-1]]
-
-        self.conv1 = CausalConv3d(z_dim, dims[0], 3, padding=1)
+        out_dim = cfg.decode_dim * cfg.dim_mult[-1]
+        self.conv1 = CausalConv3d(cfg.z_dim, out_dim, 3, padding=1)
+        in_dim = out_dim
         middle = [
-            ResidualBlock(dims[0], dims[0], dropout),
-            AttentionBlock(dims[0]),
-            ResidualBlock(dims[0], dims[0], dropout),
+            ResidualBlock(in_dim, in_dim, dropout),
+            AttentionBlock(in_dim),
+            ResidualBlock(in_dim, in_dim, dropout),
         ]
         self.middle = nn.ModuleList(middle)
 
+        temporal_upsample = cfg.temporal_downsample[::-1]
         self.upsamples = nn.ModuleList()
-        for i, (in_dim, out_dim) in enumerate(zip(dims[:-1], dims[1:])):
-            if version == "2.1":
+        for i, multiplier in enumerate(cfg.dim_mult[::-1]):
+            out_dim = cfg.decode_dim * multiplier
+
+            if cfg.version == "2.1":
                 # in Wan2.1, upsample reduces dim by 2
                 if i > 0:
                     in_dim = in_dim // 2
-                for _ in range(num_res_blocks + 1):
+                for _ in range(cfg.num_res_blocks + 1):
                     self.upsamples.append(ResidualBlock(in_dim, out_dim, dropout))
                     in_dim = out_dim
 
                 # upsample block
-                if i != len(dim_mult) - 1:
+                if i != len(cfg.dim_mult) - 1:
                     mode = "upsample3d" if temporal_upsample[i] else "upsample2d"
                     self.upsamples.append(Resample(out_dim, out_dim // 2, mode))
 
-            elif version == "2.2":
+            elif cfg.version == "2.2":
                 up_t = temporal_upsample[i] if i < len(temporal_upsample) else False
-                up_s = i != len(dim_mult) - 1
-                self.upsamples.append(UpResidualBlock(in_dim, out_dim, dropout, num_res_blocks + 1, up_t, up_s))
+                up_s = i != len(cfg.dim_mult) - 1
+                self.upsamples.append(UpResidualBlock(in_dim, out_dim, dropout, cfg.num_res_blocks + 1, up_t, up_s))
 
             else:
-                raise ValueError(f"Unsupported {version=}")
+                raise ValueError(f"Unsupported {cfg.version=}")
 
         head = [
             RMSNorm(out_dim, images=False),
             nn.SiLU(),
-            CausalConv3d(out_dim, img_dim, 3, padding=1),
+            CausalConv3d(out_dim, 3 * cfg.patch_size * cfg.patch_size, 3, padding=1),
         ]
         self.head = nn.ModuleList(head)
 
@@ -496,42 +499,22 @@ def unpatchify(x: Tensor, patch_size: int) -> Tensor:
 
 
 class WanVAE(nn.Module):
-    def __init__(
-        self,
-        encode_dim: int = 96,
-        decode_dim: int = 96,
-        z_dim: int = 16,
-        dim_mult: list[int] = [1, 2, 4, 4],
-        num_res_blocks: int = 2,
-        temporal_downsample: list[bool] = [False, True, True],
-        dropout: float = 0.0,
-        patch_size: int = 1,
-        version: str = "2.1",
-    ) -> None:
+    def __init__(self, cfg: WanVAEConfig, dropout: float = 0.0) -> None:
         super().__init__()
-        self.patch_size = patch_size
-        img_dim = 3 * patch_size * patch_size
+        self.cfg = cfg
+        self.encoder = Encoder3d(cfg, dropout)
+        self.conv1 = CausalConv3d(cfg.z_dim * 2, cfg.z_dim * 2, 1)
+        self.conv2 = CausalConv3d(cfg.z_dim, cfg.z_dim, 1)
+        self.decoder = Decoder3d(cfg, dropout)
+        self.register_buffer("mean", torch.zeros(cfg.z_dim).view(-1, 1, 1, 1), persistent=False)
+        self.register_buffer("scale", torch.ones(cfg.z_dim).view(-1, 1, 1, 1), persistent=False)
 
-        self.encoder = Encoder3d(
-            img_dim, encode_dim, z_dim * 2, dim_mult, num_res_blocks, temporal_downsample, dropout, version
-        )
-        self.conv1 = CausalConv3d(z_dim * 2, z_dim * 2, 1)
-        self.conv2 = CausalConv3d(z_dim, z_dim, 1)
-        self.decoder = Decoder3d(
-            img_dim, decode_dim, z_dim, dim_mult, num_res_blocks, temporal_downsample[::-1], dropout, version
-        )
-        self.register_buffer("mean", torch.zeros(z_dim), persistent=False)
-        self.register_buffer("scale", torch.ones(z_dim), persistent=False)
+    def forward(self, x: Tensor, sample: bool = False) -> Tensor:
+        return self.decode(self.encode(x, sample))
 
-    def forward(self, x: Tensor) -> Tensor:
-        mu, log_var = self.encode(x)
-        z = self.reparameterize(mu, log_var)
-        x_recon = self.decode(z)
-        return x_recon, mu, log_var
-
-    def encode(self, x: Tensor) -> Tensor:
+    def encode(self, x: Tensor, sample: bool = False) -> Tensor:
         self.clear_cache()
-        x = patchify(x, self.patch_size)
+        x = patchify(x, self.cfg.patch_size)
 
         # first frame is processed separately. no downsampling.
         self._enc_conv_idx = [0]
@@ -543,17 +526,22 @@ class WanVAE(nn.Module):
             out_ = self.encoder(x[:, :, 1 + 4 * i : 1 + 4 * (i + 1)], self._enc_feat_map, self._enc_conv_idx)
             out = torch.cat([out, out_], 2)
 
-        mu, log_var = self.conv1(out).chunk(2, dim=1)
-        mu = (mu - self.mean[:, None, None, None]) * self.scale[:, None, None, None]
+        mu, log_var = self.conv1(out).float().chunk(2, dim=1)
+        if sample:
+            std = (0.5 * log_var.clamp(-30.0, 20.0)).exp()
+            z = mu + std * torch.randn_like(log_var)
+        else:
+            z = mu
 
+        z = (z - self.mean) * self.scale
         self.clear_cache()
-        return mu
+        return z
 
     def decode(self, z: Tensor) -> Tensor:
         self.clear_cache()
 
-        z = z / self.scale[:, None, None, None] + self.mean[:, None, None, None]
-        x = self.conv2(z)
+        z = z.float() / self.scale + self.mean
+        x = self.conv2(z.to(self.conv2.weight.dtype))
 
         # process 1st frame, no upsampling
         self._conv_idx = [0]
@@ -565,21 +553,9 @@ class WanVAE(nn.Module):
             out_ = self.decoder(x[:, :, i : i + 1, :, :], self._feat_map, self._conv_idx)
             out = torch.cat([out, out_], 2)
 
-        out = unpatchify(out, self.patch_size)
+        out = unpatchify(out, self.cfg.patch_size)
         self.clear_cache()
         return out
-
-    def reparameterize(self, mu: Tensor, log_var: Tensor):
-        std = torch.exp(0.5 * log_var)
-        eps = torch.randn_like(std)
-        return eps * std + mu
-
-    def sample(self, imgs: Tensor, deterministic=False):
-        mu, log_var = self.encode(imgs)
-        if deterministic:
-            return mu
-        std = torch.exp(0.5 * log_var.clamp(-30.0, 20.0))
-        return mu + std * torch.randn_like(std)
 
     def clear_cache(self):
         self._conv_num = count_conv3d(self.decoder)
@@ -593,7 +569,7 @@ class WanVAE(nn.Module):
 
 def load_wan_vae(version: str = "2.1") -> WanVAE:
     if version == "2.1":
-        cfg = dict(encode_dim=96, decode_dim=96, z_dim=16, patch_size=1)
+        cfg = WanVAEConfig(encode_dim=96, decode_dim=96, z_dim=16, patch_size=1, version=version)
         repo_id = "Wan-AI/Wan2.1-T2V-14B"
         filename = "Wan2.1_VAE.pth"
 
@@ -609,7 +585,7 @@ def load_wan_vae(version: str = "2.1") -> WanVAE:
         # fmt: on
 
     elif version == "2.2":
-        cfg = dict(encode_dim=160, decode_dim=256, z_dim=48, patch_size=2)
+        cfg = WanVAEConfig(encode_dim=160, decode_dim=256, z_dim=48, patch_size=2, version=version)
         repo_id = "Wan-AI/Wan2.2-TI2V-5B"
         filename = "Wan2.2_VAE.pth"
 
@@ -635,11 +611,11 @@ def load_wan_vae(version: str = "2.1") -> WanVAE:
     else:
         raise ValueError(f"Unsupported {version=}")
 
-    mean = torch.tensor(mean, dtype=torch.float)
-    scale = 1.0 / torch.tensor(std, dtype=torch.float)
+    mean = torch.tensor(mean, dtype=torch.float).view(-1, 1, 1, 1)
+    scale = 1.0 / torch.tensor(std, dtype=torch.float).view(-1, 1, 1, 1)
 
     with torch.device("meta"):
-        model = WanVAE(**cfg, version=version)
+        model = WanVAE(cfg)
     model.register_buffer("mean", mean, persistent=False)
     model.register_buffer("scale", scale, persistent=False)
 
