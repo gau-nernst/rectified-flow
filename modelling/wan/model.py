@@ -5,30 +5,31 @@ import math
 from dataclasses import dataclass
 
 import torch
-from torch import Tensor, nn
 import torch.nn.functional as F
+from torch import Tensor, nn
 
 from ..utils import load_hf_state_dict
 from .attention import flash_attention
 
 
-def sinusoidal_embedding_1d(dim: int, position: Tensor):
-    # preprocess
+def sinusoidal_embedding_1d(dim: int, position: Tensor, theta: float = 10_000.0) -> Tensor:
     assert dim % 2 == 0
     half = dim // 2
     position = position.type(torch.float64)
 
-    # calculation
-    sinusoid = torch.outer(position, torch.pow(10000, -torch.arange(half).to(position).div(half)))
-    x = torch.cat([torch.cos(sinusoid), torch.sin(sinusoid)], dim=1)
-    return x
+    freqs = torch.outer(
+        position,
+        theta ** (-torch.arange(half, dtype=position.dtype, device=position.device).div(half)),
+    )
+    x = torch.cat([freqs.cos(), freqs.sin()], dim=1)
+    return x.float()
 
 
-def rope_params(max_seq_len: int, dim: int, theta: float = 10000.0):
+def rope_params(max_seq_len: int, dim: int, theta: float = 10_000.0, device: torch.types.Device = None) -> Tensor:
     assert dim % 2 == 0
     freqs = torch.outer(
-        torch.arange(max_seq_len, dtype=torch.float),
-        1.0 / torch.pow(theta, torch.arange(0, dim, 2).to(torch.float64).div(dim)),
+        torch.arange(max_seq_len, dtype=torch.float, device=device),
+        1.0 / theta ** torch.arange(0, dim, 2, dtype=torch.float64, device=device).div(dim),
     )
     freqs = torch.polar(torch.ones_like(freqs), freqs)
     return freqs
@@ -199,6 +200,8 @@ class Head(nn.Module):
 
 
 class FP32Linear(nn.Linear):
+    """Mimic torch.autocast(dtype=torch.float32) behavior"""
+
     def forward(self, input: Tensor):
         bias = self.bias.float() if self.bias is not None else None
         return F.linear(input.float(), self.weight.float(), bias)
@@ -249,16 +252,14 @@ class WanModel(nn.Module):
 
         # head
         self.head = Head(cfg.dim, cfg.out_dim, cfg.patch_size, cfg.eps)
-        self.init_freqs()
 
-    def init_freqs(self):
-        # buffers (don't use register_buffer otherwise dtype will be changed in to())
+    def get_freqs(self, device: torch.types.Device = None):
         d = self.cfg.head_dim
-        self.freqs = torch.cat(
+        return torch.cat(
             [
-                rope_params(1024, d - 4 * (d // 6)),
-                rope_params(1024, 2 * (d // 6)),
-                rope_params(1024, 2 * (d // 6)),
+                rope_params(1024, d - 4 * (d // 6), device=device),
+                rope_params(1024, 2 * (d // 6), device=device),
+                rope_params(1024, 2 * (d // 6), device=device),
             ],
             dim=1,
         )
@@ -271,8 +272,6 @@ class WanModel(nn.Module):
         seq_len: int,
         y: list[Tensor] | None = None,  # same shape as x
     ) -> list[Tensor]:
-        self.freqs = self.freqs.to(self.patch_embedding.weight.device)
-
         if y is not None:
             x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
 
@@ -286,14 +285,13 @@ class WanModel(nn.Module):
         assert seq_lens.max() <= seq_len  # NOTE: this will graph-break?
 
         # pad and stack. transpose to (B, seq_len, dim)
-        x = torch.stack([F.pad(u, (seq_len - u.shape[1], 0)).T for u in x], dim=0)
+        x = torch.stack([F.pad(u, (0, seq_len - u.shape[1])).T for u in x], dim=0)
 
         # time embeddings
-        if t.ndim == 1:
+        if t.ndim == 1:  # this is a bit strange
             t = t.expand(t.shape[0], seq_len)
-        e = self.time_embedding(
-            sinusoidal_embedding_1d(self.cfg.freq_dim, t.flatten()).unflatten(0, (t.shape[0], seq_len))
-        )
+        time_embeds = sinusoidal_embedding_1d(self.cfg.freq_dim, t.flatten()).unflatten(0, (t.shape[0], seq_len))
+        e = self.time_embedding(time_embeds)
         e0 = self.time_projection(e).unflatten(2, (6, -1))
         assert e.dtype == torch.float32 and e0.dtype == torch.float32
 
@@ -302,13 +300,14 @@ class WanModel(nn.Module):
         context = torch.stack([F.pad(u, (0, 0, self.cfg.text_len - u.shape[0], 0)) for u in context], dim=0)
         context = self.text_embedding(context.to(self.text_embedding[0].weight.dtype))
 
+        freqs = self.get_freqs(x.device)
         for block in self.blocks:
             x = block(
                 x,
                 e=e0,
                 seq_lens=seq_lens,
                 grid_sizes=grid_sizes,
-                freqs=self.freqs,
+                freqs=freqs,
                 context=context,
                 context_lens=context_lens,
             )
@@ -351,7 +350,6 @@ def load_wan(name: str):
 
     with torch.device("meta"):
         model = WanModel(cfg)
-    model.init_freqs()
 
     state_dict = load_hf_state_dict(repo_id, filename)
     model.load_state_dict(state_dict, assign=True)
