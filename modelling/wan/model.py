@@ -5,64 +5,54 @@ import math
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..utils import load_hf_state_dict
-from .attention import flash_attention
 
 
-def sinusoidal_embedding_1d(dim, position):
-    # preprocess
+def sinusoidal_embedding_1d(dim: int, position: Tensor, theta: float = 1e4) -> Tensor:
     assert dim % 2 == 0
     half = dim // 2
     position = position.type(torch.float64)
 
-    # calculation
-    sinusoid = torch.outer(position, torch.pow(10000, -torch.arange(half).to(position).div(half)))
-    x = torch.cat([torch.cos(sinusoid), torch.sin(sinusoid)], dim=1)
-    return x
+    freqs = torch.outer(
+        position,
+        theta ** (-torch.arange(half, dtype=position.dtype, device=position.device).div(half)),
+    )
+    x = torch.cat([freqs.cos(), freqs.sin()], dim=1)
+    return x.float()
 
 
-@torch.amp.autocast("cuda", enabled=False)
-def rope_params(max_seq_len, dim, theta=10000):
+def rope_params(seqlen: int, dim: int, theta: float = 1e4, device: torch.types.Device = None) -> Tensor:
     assert dim % 2 == 0
     freqs = torch.outer(
-        torch.arange(max_seq_len), 1.0 / torch.pow(theta, torch.arange(0, dim, 2).to(torch.float64).div(dim))
+        torch.arange(seqlen, dtype=torch.float64, device=device),
+        1.0 / theta ** torch.arange(0, dim, 2, dtype=torch.float64, device=device).div(dim),
     )
-    freqs = torch.polar(torch.ones_like(freqs), freqs)
-    return freqs
+    return torch.polar(torch.ones_like(freqs), freqs)
 
 
-@torch.amp.autocast("cuda", enabled=False)
-def rope_apply(x: Tensor, grid_sizes: Tensor, freqs: Tensor) -> Tensor:
-    n, c = x.size(2), x.size(3) // 2
+def apply_rope(x: Tensor, rope_embeds: tuple[Tensor, Tensor, Tensor]) -> Tensor:
+    # x: [B, L, num_heads, head_dim]
+    # rope_embeds: [1024, head_dim / 2] (complex number)
+    rope_F, rope_H, rope_W = rope_embeds
+    F = rope_F.shape[0]
+    H = rope_H.shape[0]
+    W = rope_W.shape[0]
 
-    # split freqs
-    freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+    rope_F = rope_F.view(F, 1, 1, -1).expand(F, H, W, -1)
+    rope_H = rope_H.view(1, H, 1, -1).expand(F, H, W, -1)
+    rope_W = rope_W.view(1, 1, W, -1).expand(F, H, W, -1)
+    rope = torch.cat([rope_F, rope_H, rope_W], dim=-1).reshape(F * H * W, 1, -1)
 
-    # loop over samples
-    output = []
-    for i, (f, h, w) in enumerate(grid_sizes.tolist()):
-        seq_len = f * h * w
+    x_f64 = torch.view_as_complex(x.to(torch.float64).unflatten(-1, (-1, 2)))
+    return torch.view_as_real(x_f64 * rope).flatten(3).to(x.dtype)
 
-        # precompute multipliers
-        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(seq_len, n, -1, 2))
-        freqs_i = torch.cat(
-            [
-                freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
-                freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-                freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1),
-            ],
-            dim=-1,
-        ).reshape(seq_len, 1, -1)
 
-        # apply rotary embedding
-        x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
-        x_i = torch.cat([x_i, x[i, seq_len:]])
-
-        # append to collection
-        output.append(x_i)
-    return torch.stack(output).float()
+def sdpa(q: Tensor, k: Tensor, v: Tensor):
+    # q, k, v: [B, L, num_heads, head_dim]
+    return F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)).transpose(1, 2)
 
 
 class RMSNorm(nn.Module):
@@ -80,6 +70,34 @@ class RMSNorm(nn.Module):
         return self._norm(x) * self.weight
 
 
+class LayerNorm(nn.LayerNorm):
+    """nn.LayerNorm doesn't work if x is FP32 and weight/bias is BF16"""
+
+    def forward(self, x: Tensor):
+        if self.elementwise_affine:
+            weight = self.weight.float()
+            bias = self.bias.float()
+        else:
+            weight = None
+            bias = None
+        return F.layer_norm(x.float(), self.normalized_shape, weight, bias, self.eps).to(x.dtype)
+
+
+class Linear(nn.Linear):
+    """Mimic autocast logic (kinda)"""
+
+    def forward(self, x: Tensor) -> Tensor:
+        return F.linear(x.to(self.weight.dtype), self.weight, self.bias)
+
+
+class FP32Linear(nn.Linear):
+    """Mimic torch.autocast(dtype=torch.float32) behavior"""
+
+    def forward(self, x: Tensor) -> Tensor:
+        bias = self.bias.float() if self.bias is not None else None
+        return F.linear(x.float(), self.weight.float(), bias)
+
+
 class WanSelfAttention(nn.Module):
     def __init__(self, dim: int, head_dim: int = 128, eps=1e-6) -> None:
         assert dim % head_dim == 0
@@ -87,119 +105,83 @@ class WanSelfAttention(nn.Module):
         self.num_heads = dim // head_dim
         self.head_dim = head_dim
 
-        self.q = nn.Linear(dim, dim)
-        self.k = nn.Linear(dim, dim)
-        self.v = nn.Linear(dim, dim)
-        self.o = nn.Linear(dim, dim)
+        self.q = Linear(dim, dim)
+        self.k = Linear(dim, dim)
+        self.v = Linear(dim, dim)
+        self.o = Linear(dim, dim)
         self.norm_q = RMSNorm(dim, eps=eps)
         self.norm_k = RMSNorm(dim, eps=eps)
 
-    def forward(self, x: Tensor, seq_lens: Tensor, grid_sizes: Tensor, freqs: Tensor) -> Tensor:
-        # x: [B, L, num_heads, C / num_heads]
-        # seq_lens: [B]
-        # grid_sizes: [B, 3]
-        # freqs: [1024, C / num_heads / 2]
-        B, S, N, D = *x.shape[:2], self.num_heads, self.head_dim
-
-        q = self.norm_q(self.q(x)).view(B, S, N, D)
-        k = self.norm_k(self.k(x)).view(B, S, N, D)
-        v = self.v(x).view(B, S, N, D)
-
-        x = flash_attention(
-            q=rope_apply(q, grid_sizes, freqs),
-            k=rope_apply(k, grid_sizes, freqs),
-            v=v,
-            k_lens=seq_lens,
-        )
-
-        x = x.flatten(2)
-        x = self.o(x)
-        return x
+    def forward(self, x: Tensor, rope_embeds: tuple[Tensor, Tensor, Tensor]) -> Tensor:
+        # x: [B, L, D]
+        shape = (x.shape[0], -1, self.num_heads, self.head_dim)
+        q = apply_rope(self.norm_q(self.q(x)).view(shape), rope_embeds)
+        k = apply_rope(self.norm_k(self.k(x)).view(shape), rope_embeds)
+        v = self.v(x).view(shape)
+        return self.o(sdpa(q, k, v).flatten(2))
 
 
 class WanCrossAttention(WanSelfAttention):
-    def forward(self, x: Tensor, context: Tensor, context_lens: Tensor) -> Tensor:
+    def forward(self, x: Tensor, context: Tensor) -> Tensor:
         # x: [B, L1, C]
         # context: [B, L2, C]
-        # context_lens: [B]
-        B, N, D = x.size(0), self.num_heads, self.head_dim
+        shape = (x.shape[0], -1, self.num_heads, self.head_dim)
+        q = self.norm_q(self.q(x)).view(shape)
+        k = self.norm_k(self.k(context)).view(shape)
+        v = self.v(context).view(shape)
+        return self.o(sdpa(q, k, v).flatten(2))
 
-        q = self.norm_q(self.q(x)).view(B, -1, N, D)
-        k = self.norm_k(self.k(context)).view(B, -1, N, D)
-        v = self.v(context).view(B, -1, N, D)
 
-        x = flash_attention(q, k, v, k_lens=context_lens)
-
-        x = x.flatten(2)
-        x = self.o(x)
-        return x
+def modulate(x: Tensor, scale: Tensor, bias: Tensor) -> Tensor:
+    """NOTE: this always returns FP32"""
+    return x.float() * (1.0 + scale.float()) + bias.float()
 
 
 class WanAttentionBlock(nn.Module):
     def __init__(self, dim: int, ffn_dim: int, head_dim: int = 128, eps: float = 1e-6) -> None:
         super().__init__()
-        self.norm1 = nn.LayerNorm(dim, eps, elementwise_affine=False)
+        self.norm1 = LayerNorm(dim, eps, elementwise_affine=False)
         self.self_attn = WanSelfAttention(dim, head_dim, eps)
 
-        self.norm3 = nn.LayerNorm(dim, eps, elementwise_affine=True)
+        self.norm3 = LayerNorm(dim, eps, elementwise_affine=True)
         self.cross_attn = WanCrossAttention(dim, head_dim, eps)
 
-        self.norm2 = nn.LayerNorm(dim, eps, elementwise_affine=False)
+        self.norm2 = LayerNorm(dim, eps, elementwise_affine=False)
         self.ffn = nn.Sequential(
-            nn.Linear(dim, ffn_dim),
+            Linear(dim, ffn_dim),
             nn.GELU(approximate="tanh"),
-            nn.Linear(ffn_dim, dim),
+            Linear(ffn_dim, dim),
         )
 
         self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
 
-    def forward(
-        self,
-        x: Tensor,  # [B, L, C]
-        e: Tensor,  # [B, L1, 6, C]
-        seq_lens: Tensor,  # [B]
-        grid_sizes: Tensor,  # [B, 3]
-        freqs: Tensor,  # [1024, C/num_heads/2]
-        context: Tensor,
-        context_lens: Tensor,
-    ) -> Tensor:
+    def forward(self, x: Tensor, e: Tensor, rope_embeds: tuple[Tensor, Tensor, Tensor], context: Tensor) -> Tensor:
+        # x: [B, L, C]
+        # e: [B, L, 6, C]
         assert e.dtype == torch.float32
-        with torch.amp.autocast("cuda", dtype=torch.float32):
-            e = self.modulation.unsqueeze(0) + e
-        assert e.dtype == torch.float32
+        b0, s0, s1, b2, s2, s3 = (self.modulation.unsqueeze(0) + e).unbind(2)
 
-        # self-attention
-        # NOTE: once we remove autocast, we don't need .to(x.dtype) anymore
-        y = self.self_attn(self.norm1(x).to(x.dtype) * (1 + e[:, :, 1]) + e[:, :, 0], seq_lens, grid_sizes, freqs)
-        with torch.amp.autocast("cuda", dtype=torch.float32):
-            x = x + y * e[:, :, 2]
-
-        # cross-attention & ffn function
-        def cross_attn_ffn(x, context, context_lens, e):
-            x = x + self.cross_attn(self.norm3(x).to(x.dtype), context, context_lens)
-            y = self.ffn(self.norm2(x).to(x.dtype) * (1 + e[:, :, 4]) + e[:, :, 3])
-            with torch.amp.autocast("cuda", dtype=torch.float32):
-                x = x + y * e[:, :, 5]
-            return x
-
-        x = cross_attn_ffn(x, context, context_lens, e)
+        # x will become FP32 since e is FP32
+        x = x + self.self_attn(modulate(self.norm1(x), s0, b0), rope_embeds) * s1
+        x = x + self.cross_attn(self.norm3(x), context)
+        x = x + self.ffn(modulate(self.norm2(x), s2, b2)) * s3
         return x
 
 
 class Head(nn.Module):
-    def __init__(self, dim: int, out_dim: int, patch_size, eps: float = 1e-6) -> None:
+    def __init__(self, dim: int, out_dim: int, patch_size: tuple[int, int, int], eps: float = 1e-6) -> None:
         super().__init__()
         out_dim = math.prod(patch_size) * out_dim
-        self.norm = nn.LayerNorm(dim, eps, elementwise_affine=False)
-        self.head = nn.Linear(dim, out_dim)
+        self.norm = LayerNorm(dim, eps, elementwise_affine=False)
+        self.head = FP32Linear(dim, out_dim)
         self.modulation = nn.Parameter(torch.randn(1, 2, dim) / dim**0.5)
 
     def forward(self, x: Tensor, e: Tensor) -> Tensor:
+        # x: [B, L, C]
+        # e: [B, L, C]
         assert e.dtype == torch.float32
-        with torch.amp.autocast("cuda", dtype=torch.float32):
-            e = (self.modulation.unsqueeze(0) + e.unsqueeze(2)).chunk(2, dim=2)
-            x = self.head(self.norm(x).to(x.dtype) * (1 + e[1].squeeze(2)) + e[0].squeeze(2))
-        return x
+        bias, scale = (self.modulation + e.unsqueeze(2)).unbind(2)
+        return self.head(modulate(self.norm(x.float()), scale, bias))
 
 
 @dataclass
@@ -209,7 +191,7 @@ class WanConfig:
     num_layers: int
     in_dim: int = 16
     out_dim: int = 16
-    patch_size: tuple[int, int, int] = (1, 2, 2)  # t, h, w
+    patch_size: tuple[int, int, int] = (1, 2, 2)  # nF, nH, nW
     text_len: int = 512
     freq_dim: int = 256
     text_dim: int = 4096
@@ -221,113 +203,68 @@ class WanModel(nn.Module):
     def __init__(self, cfg: WanConfig) -> None:
         super().__init__()
         self.cfg = cfg
-
-        # embeddings
         self.patch_embedding = nn.Conv3d(cfg.in_dim, cfg.dim, kernel_size=cfg.patch_size, stride=cfg.patch_size)
         self.text_embedding = nn.Sequential(
-            nn.Linear(cfg.text_dim, cfg.dim),
+            Linear(cfg.text_dim, cfg.dim),
             nn.GELU(approximate="tanh"),
-            nn.Linear(cfg.dim, cfg.dim),
+            Linear(cfg.dim, cfg.dim),
         )
-
         self.time_embedding = nn.Sequential(
-            nn.Linear(cfg.freq_dim, cfg.dim),
+            FP32Linear(cfg.freq_dim, cfg.dim),
             nn.SiLU(),
-            nn.Linear(cfg.dim, cfg.dim),
+            FP32Linear(cfg.dim, cfg.dim),
         )
         self.time_projection = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(cfg.dim, cfg.dim * 6),
+            FP32Linear(cfg.dim, cfg.dim * 6),
         )
-
-        # blocks
         self.blocks = nn.ModuleList(
             [WanAttentionBlock(cfg.dim, cfg.ffn_dim, cfg.head_dim, eps=cfg.eps) for _ in range(cfg.num_layers)]
         )
-
-        # head
         self.head = Head(cfg.dim, cfg.out_dim, cfg.patch_size, cfg.eps)
-        self.init_freqs()
 
-    def init_freqs(self):
-        # buffers (don't use register_buffer otherwise dtype will be changed in to())
+    def get_rope(self, F: int, H: int, W: int, device: torch.types.Device = None) -> tuple[Tensor, Tensor, Tensor]:
         d = self.cfg.head_dim
-        self.freqs = torch.cat(
-            [
-                rope_params(1024, d - 4 * (d // 6)),
-                rope_params(1024, 2 * (d // 6)),
-                rope_params(1024, 2 * (d // 6)),
-            ],
-            dim=1,
+        return (
+            rope_params(F, d - 4 * (d // 6), device=device),
+            rope_params(H, 2 * (d // 6), device=device),
+            rope_params(W, 2 * (d // 6), device=device),
         )
 
-    def forward(
-        self,
-        x: list[Tensor],  # each is [Cin, F, H, W]
-        t: Tensor,  # [B]
-        context: list[Tensor],  # each is [L, C]
-        seq_len: int,
-        y: list[Tensor] | None = None,  # same shape as x
-    ) -> list[Tensor]:
-        # params
-        self.freqs = self.freqs.to(self.patch_embedding.weight.device)
-
+    def forward(self, x: Tensor, t: Tensor, context: Tensor, y: Tensor | None = None) -> Tensor:
+        # x: [B, C, F, H, W]
+        # t: [B]
+        # context: [B, L, C]
+        # y: [B, C, F, H, W]
         if y is not None:
-            x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
+            x = torch.cat([x, y], dim=0)
 
-        # embeddings
-        x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
-        grid_sizes = torch.stack([torch.tensor(u.shape[2:], dtype=torch.long) for u in x])
-        x = [u.flatten(2).transpose(1, 2) for u in x]
-        seq_lens = torch.tensor([u.shape[1] for u in x], dtype=torch.long)
-        assert seq_lens.max() <= seq_len  # NOTE: this will graph-break?
-        x = torch.cat([torch.cat([u, u.new_zeros(1, seq_len - u.shape[1], u.shape[2])], dim=1) for u in x])
+        x = self.patch_embedding(x.to(self.patch_embedding.weight.dtype))
+        F, H, W = x.shape[2:]
+        seqlen = F * H * W
+        x = x.flatten(2).transpose(1, 2)  # (B, F*H*W, C)
 
-        # time embeddings
-        if t.dim() == 1:
-            t = t.expand(t.size(0), seq_len)
-        with torch.amp.autocast("cuda", dtype=torch.float32):
-            bt = t.size(0)
-            t = t.flatten()
-            e = self.time_embedding(sinusoidal_embedding_1d(self.cfg.freq_dim, t).unflatten(0, (bt, seq_len)).float())
-            e0 = self.time_projection(e).unflatten(2, (6, self.cfg.dim))
-            assert e.dtype == torch.float32 and e0.dtype == torch.float32
+        # time embeddings -> modulation
+        if t.ndim == 1:  # this is a bit strange
+            t = t.expand(t.shape[0], seqlen)
+        time_embeds = sinusoidal_embedding_1d(self.cfg.freq_dim, t.flatten()).unflatten(0, (t.shape[0], seqlen))
+        e = self.time_embedding(time_embeds)
+        e0 = self.time_projection(e).unflatten(2, (6, -1))
+        assert e.dtype == torch.float32 and e0.dtype == torch.float32
 
-        # context
-        context_lens = None
-        context = self.text_embedding(
-            torch.stack([torch.cat([u, u.new_zeros(self.cfg.text_len - u.shape[0], u.shape[1])]) for u in context])
-        )
-
+        rope_embeds = self.get_rope(F, H, W, device=x.device)
+        context = self.text_embedding(context)
         for block in self.blocks:
-            x = block(
-                x,
-                e=e0,
-                seq_lens=seq_lens,
-                grid_sizes=grid_sizes,
-                freqs=self.freqs,
-                context=context,
-                context_lens=context_lens,
-            )
+            x = block(x, e0, rope_embeds, context)
 
-        # head
         x = self.head(x, e)
 
-        # unpatchify
-        x = self.unpatchify(x, grid_sizes)
-        return [u.float() for u in x]
-
-    def unpatchify(self, x: list[Tensor], grid_sizes: Tensor):
-        # x: each is [L, Cout, prod(patch_size)]
-        # grid_sizes: shape [B, 3] - F/H/W patches
-        c = self.cfg.out_dim
-        out = []
-        for u, v in zip(x, grid_sizes.tolist()):
-            u = u[: math.prod(v)].view(*v, *self.cfg.patch_size, c)
-            u = torch.einsum("fhwpqrc->cfphqwr", u)
-            u = u.reshape(c, *[i * j for i, j in zip(v, self.cfg.patch_size)])
-            out.append(u)
-        return out
+        nF, nH, nW = self.cfg.patch_size
+        out_dim = self.cfg.out_dim
+        x = x.reshape(x.shape[0], F, H, W, nF, nH, nW, out_dim)
+        x = x.permute(0, 7, 1, 4, 2, 5, 3, 6)
+        x = x.reshape(x.shape[0], out_dim, F * nF, H * nH, W * nW)
+        return x
 
 
 def load_wan(name: str):
@@ -351,7 +288,6 @@ def load_wan(name: str):
 
     with torch.device("meta"):
         model = WanModel(cfg)
-    model.init_freqs()
 
     state_dict = load_hf_state_dict(repo_id, filename)
     model.load_state_dict(state_dict, assign=True)
