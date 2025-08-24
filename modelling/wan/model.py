@@ -101,18 +101,13 @@ class WanSelfAttention(nn.Module):
         grid_sizes: Tensor,  # [B, 3]
         rope_embeds: Tensor,  # [1024, C / num_heads / 2]
     ) -> Tensor:
-        B, S, N, D = *x.shape[:2], self.num_heads, self.head_dim
+        q = self.norm_q(self.q(x)).unflatten(-1, (-1, self.head_dim))
+        k = self.norm_k(self.k(x)).unflatten(-1, (-1, self.head_dim))
+        v = self.v(x).unflatten(-1, (-1, self.head_dim))
 
-        q = self.norm_q(self.q(x)).view(B, S, N, D)
-        k = self.norm_k(self.k(x)).view(B, S, N, D)
-        v = self.v(x).view(B, S, N, D)
-
-        x = flash_attention(
-            rope_apply(q, grid_sizes, rope_embeds),
-            rope_apply(k, grid_sizes, rope_embeds),
-            v,
-            k_lens=seq_lens,
-        )
+        q = rope_apply(q, grid_sizes, rope_embeds)
+        k = rope_apply(k, grid_sizes, rope_embeds)
+        x = flash_attention(q, k, v, k_lens=seq_lens)
 
         x = x.flatten(2)
         x = self.o(x)
@@ -120,17 +115,14 @@ class WanSelfAttention(nn.Module):
 
 
 class WanCrossAttention(WanSelfAttention):
-    def forward(self, x: Tensor, context: Tensor, context_lens: Tensor | None) -> Tensor:
+    def forward(self, x: Tensor, context: Tensor) -> Tensor:
         # x: [B, L1, C]
         # context: [B, L2, C]
-        # context_lens: [B]
-        B, N, D = x.size(0), self.num_heads, self.head_dim
+        q = self.norm_q(self.q(x)).unflatten(-1, (-1, self.head_dim))
+        k = self.norm_k(self.k(context)).unflatten(-1, (-1, self.head_dim))
+        v = self.v(context).unflatten(-1, (-1, self.head_dim))
 
-        q = self.norm_q(self.q(x)).view(B, -1, N, D)
-        k = self.norm_k(self.k(context)).view(B, -1, N, D)
-        v = self.v(context).view(B, -1, N, D)
-
-        x = flash_attention(q, k, v, k_lens=context_lens)
+        x = flash_attention(q, k, v)
 
         x = x.flatten(2)
         x = self.o(x)
@@ -168,14 +160,13 @@ class WanAttentionBlock(nn.Module):
         grid_sizes: Tensor,  # [B, 3]
         rope_embeds: Tensor,  # [1024, C/num_heads/2]
         context: Tensor,
-        context_lens: Tensor | None,
     ) -> Tensor:
         e = self.modulation.unsqueeze(0) + e
 
         y = self.self_attn(modulate(self.norm1(x), e[:, :, :2]), seq_lens, grid_sizes, rope_embeds)
         x = (x + y * e[:, :, 2]).to(x.dtype)
 
-        x = x + self.cross_attn(self.norm3(x), context, context_lens)
+        x = x + self.cross_attn(self.norm3(x), context)
 
         y = self.ffn(modulate(self.norm2(x), e[:, :, 3:5]))
         x = (x + y * e[:, :, 5]).to(x.dtype)
@@ -295,8 +286,7 @@ class WanModel(nn.Module):
         assert e.dtype == torch.float32 and e0.dtype == torch.float32
 
         # context
-        context_lens = None
-        context = torch.stack([F.pad(u, (0, 0, self.cfg.text_len - u.shape[0], 0)) for u in context], dim=0)
+        context = torch.stack([F.pad(u, (0, 0, 0, self.cfg.text_len - u.shape[0])) for u in context], dim=0)
         context = self.text_embedding(context.to(self.text_embedding[0].weight.dtype))
 
         rope_embeds = self.get_rope(x.device)
@@ -308,7 +298,6 @@ class WanModel(nn.Module):
                 grid_sizes=grid_sizes,
                 rope_embeds=rope_embeds,
                 context=context,
-                context_lens=context_lens,
             )
 
         x = self.head(x, e)
