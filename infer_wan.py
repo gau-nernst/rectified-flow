@@ -75,7 +75,7 @@ class Wan5BGenerator:
         negative_prompt: str | list[str] = NEGATIVE_PROMPT,
         img_size: tuple[int, int] = (1280, 704),
         num_frames: int = 1,
-        cfg_scale: float = 1.0,
+        cfg_scale: float = 5.0,
         num_steps: int = 50,
         seed: int | None = None,
         pbar: bool = False,
@@ -122,7 +122,7 @@ def wan_generate(
     timesteps: list[int],
     context: Tensor,
     neg_context: Tensor | None = None,
-    cfg_scale: float = 1.0,
+    cfg_scale: float = 5.0,
     solver: str = "unipc",
     pbar: bool = False,
 ) -> Tensor:

@@ -340,6 +340,8 @@ class Encoder3d(nn.Module):
             else:
                 raise ValueError(f"Unsupported {cfg.version=}")
 
+            in_dim = out_dim
+
         middle = [
             ResidualBlock(out_dim, out_dim, dropout),
             AttentionBlock(out_dim),
@@ -412,6 +414,8 @@ class Decoder3d(nn.Module):
 
             else:
                 raise ValueError(f"Unsupported {cfg.version=}")
+
+            in_dim = out_dim
 
         head = [
             RMSNorm(out_dim, images=False),
