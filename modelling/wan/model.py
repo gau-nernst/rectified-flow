@@ -233,7 +233,7 @@ class WanModel(nn.Module):
 
     def forward(self, x: Tensor, t: Tensor, context: Tensor, y: Tensor | None = None) -> Tensor:
         # x: [B, C, F, H, W]
-        # t: [B]
+        # t: [B] or [B, F*H*W]
         # context: [B, L, C]
         # y: [B, C, F, H, W]
         if y is not None:
@@ -245,8 +245,8 @@ class WanModel(nn.Module):
         x = x.flatten(2).transpose(1, 2)  # (B, F*H*W, C)
 
         # time embeddings -> modulation
-        if t.ndim == 1:  # this is a bit strange
-            t = t.expand(t.shape[0], seqlen)
+        if t.ndim == 1:
+            t = t.view(-1, 1).expand(t.shape[0], seqlen)
         time_embeds = sinusoidal_embedding_1d(self.cfg.freq_dim, t.flatten()).unflatten(0, (t.shape[0], seqlen))
         e = self.time_embedding(time_embeds)
         e0 = self.time_projection(e).unflatten(2, (6, -1))
