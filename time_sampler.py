@@ -1,9 +1,9 @@
-import dataclasses
+from dataclasses import dataclass
 
 import torch
 
 
-@dataclasses.dataclass
+@dataclass
 class TimeSampler:
     def __call__(self, n: int, device: torch.types.Device) -> torch.Tensor: ...
 

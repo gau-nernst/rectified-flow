@@ -1,4 +1,3 @@
-import math
 from typing import NamedTuple
 
 import torch
@@ -9,6 +8,7 @@ from tqdm import tqdm
 from infer_flux import prepare_inputs
 from modelling import SD3, load_clip_l, load_openclip_bigg, load_sd3_5, load_sd3_autoencoder, load_t5
 from offload import PerLayerOffloadCUDAStream
+from solvers import get_solver
 
 
 class SD3TextEmbedder:
@@ -83,8 +83,8 @@ class SD3Generator:
         cfg_scale: int = 5.0,
         slg_config: SkipLayerConfig = SkipLayerConfig(),
         seed: int | None = None,
-        pbar: bool = False,
         solver: str = "dpm++2m",
+        pbar: bool = False,
     ) -> Tensor:
         # NOTE: right now this is broken...
         latents, embeds, vecs, neg_embeds, neg_vecs = prepare_inputs(
@@ -128,6 +128,7 @@ def sd3_generate(
     pbar: bool = False,
 ) -> Tensor:
     num_steps = len(timesteps) - 1
+    solver_ = get_solver(solver)
 
     for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
         t = torch.tensor([timesteps[i]], device="cuda")
@@ -147,31 +148,6 @@ def sd3_generate(
             skip_layer_v = sd3(latents, t, context, vec, slg_config.layers).float()
             v = v.add(pos_v - skip_layer_v, alpha=slg_config.scale)
 
-        # TODO: refactor solver...
-        if solver == "euler":
-            # move from t_curr to t_next
-            latents = latents.add(v, alpha=timesteps[i + 1] - timesteps[i])
-
-        elif solver == "dpm++2m":
-            # DPM-Solver++(2M) https://arxiv.org/abs/2211.01095
-            # the implementation below has been simplified for flow matching / rectified flow
-            # with sigma(t) = t and alpha(t) = 1-t
-            # coincidentally (or not?), this results in identical calculations as k-diffusion implementation
-            # https://github.com/crowsonkb/k-diffusion/blob/21d12c91ad4550e8fcf3308ff9fe7116b3f19a08/k_diffusion/sampling.py#L585-L607
-            data_pred = latents.add(v, alpha=-timesteps[i])  # data prediction model
-
-            if i == 0:
-                latents = data_pred.lerp(latents, timesteps[i + 1] / timesteps[i])
-            elif timesteps[i + 1] == 0.0:  # avoid log(0). note that lim x.log(x) when x->0 is 0.
-                latents = data_pred
-            else:
-                lambda_prev = -math.log(timesteps[i - 1])
-                lambda_curr = -math.log(timesteps[i])
-                lambda_next = -math.log(timesteps[i + 1])
-                r = (lambda_curr - lambda_prev) / (lambda_next - lambda_curr)
-                D = data_pred.lerp(prev_data_pred, -1 / (2 * r))
-                latents = D.lerp(latents, timesteps[i + 1] / timesteps[i])
-
-            prev_data_pred = data_pred
+        latents = solver_.step(latents, v, timesteps, i)
 
     return latents

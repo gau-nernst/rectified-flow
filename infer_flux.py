@@ -6,6 +6,7 @@ from tqdm import tqdm
 
 from modelling import AutoEncoder, Flux, load_clip_l, load_flux, load_flux_autoencoder, load_t5
 from offload import PerLayerOffloadCUDAStream
+from solvers import get_solver
 
 
 class FluxTextEmbedder:
@@ -103,6 +104,7 @@ class FluxGenerator:
         cfg_scale: float = 1.0,
         num_steps: int = 50,
         seed: int | None = None,
+        solver: str = "euler",
         pbar: bool = False,
     ) -> Tensor:
         latents, embeds, vecs, neg_embeds, neg_vecs = prepare_inputs(
@@ -126,7 +128,7 @@ class FluxGenerator:
         height, width = latents.shape[-2:]
         timesteps = flux_timesteps(denoise, 0.0, num_steps, height * width // 4)
 
-        latents = flux_euler_generate(
+        latents = flux_generate(
             flux=self.flux,
             latents=latents,
             timesteps=timesteps,
@@ -136,6 +138,7 @@ class FluxGenerator:
             neg_vec=neg_vecs,
             guidance=guidance,
             cfg_scale=cfg_scale,
+            solver=solver,
             pbar=pbar,
         )
         return self.ae.decode(latents, uint8=True)
@@ -161,7 +164,7 @@ def flux_time_shift(timesteps: Tensor | float, img_seq_len: int, base_shift: flo
 
 
 @torch.no_grad()
-def flux_euler_generate(
+def flux_generate(
     flux: Flux,
     latents: Tensor,
     timesteps: list[float],
@@ -171,12 +174,14 @@ def flux_euler_generate(
     neg_vec: Tensor | None = None,
     guidance: Tensor | float | None = 3.5,
     cfg_scale: float = 1.0,
+    solver: str = "euler",
     pbar: bool = False,
 ) -> Tensor:
     if isinstance(guidance, (int, float)):
         guidance = torch.full(latents.shape[:1], guidance, device=latents.device)
 
     num_steps = len(timesteps) - 1
+    solver_ = get_solver(solver)
 
     for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
         t = torch.tensor([timesteps[i]], device="cuda")
@@ -188,7 +193,6 @@ def flux_euler_generate(
             neg_v = flux(latents, t, neg_txt, neg_vec, guidance).float()
             v = neg_v.lerp(v, cfg_scale)
 
-        # Euler's method. move from t_curr to t_next
-        latents = latents.add(v, alpha=timesteps[i + 1] - timesteps[i])
+        latents = solver_.step(latents, v, timesteps, i)
 
     return latents
