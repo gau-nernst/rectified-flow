@@ -9,7 +9,7 @@ from offload import PerLayerOffloadCUDAStream
 
 
 class FluxTextEmbedder:
-    def __init__(self, offload_t5: bool = False):
+    def __init__(self, offload_t5: bool = False) -> None:
         self.t5 = load_t5()  #  9.5 GB in BF16
         self.clip = load_clip_l().bfloat16()  # 246 MB in BF16
         self.t5_offloader = PerLayerOffloadCUDAStream(self.t5, enable=offload_t5)
@@ -104,8 +104,7 @@ class FluxGenerator:
         num_steps: int = 50,
         seed: int | None = None,
         pbar: bool = False,
-        compile: bool = False,
-    ):
+    ) -> Tensor:
         latents, embeds, vecs, neg_embeds, neg_vecs = prepare_inputs(
             self.ae,
             self.text_embedder,
@@ -138,7 +137,6 @@ class FluxGenerator:
             guidance=guidance,
             cfg_scale=cfg_scale,
             pbar=pbar,
-            compile=compile,
         )
         return self.ae.decode(latents, uint8=True)
 
@@ -162,43 +160,6 @@ def flux_time_shift(timesteps: Tensor | float, img_seq_len: int, base_shift: flo
     return exp_mu / (exp_mu + 1 / timesteps - 1)
 
 
-def flux_forward(
-    flux: Flux,
-    latents: Tensor,
-    t: Tensor,
-    txt: Tensor,
-    vec: Tensor,
-    neg_txt: Tensor | None,
-    neg_vec: Tensor | None,
-    guidance: Tensor | None,
-    cfg_scale: float,
-) -> Tensor:
-    # t_curr and t_next must be Tensor (cpu is fine) to avoid recompilation
-    t_vec = t.view(1).cuda()
-
-    if cfg_scale != 1.0:
-        assert neg_txt is not None and neg_vec is not None
-        # classifier-free guidance
-        v, neg_v = (
-            flux(
-                latents.repeat(2, 1, 1, 1),
-                t_vec,
-                torch.cat([txt, neg_txt], dim=0),
-                torch.cat([vec, neg_vec], dim=0),
-                guidance.repeat(2) if guidance is not None else None,
-            )
-            .float()
-            .chunk(2, dim=0)
-        )
-        v = neg_v.lerp(v, cfg_scale)
-
-    else:
-        # built-in distilled guidance
-        v = flux(latents, t_vec, txt, vec, guidance).float()
-
-    return v
-
-
 @torch.no_grad()
 def flux_euler_generate(
     flux: Flux,
@@ -211,19 +172,23 @@ def flux_euler_generate(
     guidance: Tensor | float | None = 3.5,
     cfg_scale: float = 1.0,
     pbar: bool = False,
-    compile: bool = False,
-):
-    latents = latents.clone()
+) -> Tensor:
     if isinstance(guidance, (int, float)):
         guidance = torch.full(latents.shape[:1], guidance, device=latents.device)
 
     num_steps = len(timesteps) - 1
-    forward = torch.compile(flux_forward, disable=not compile)
+
     for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
-        t = torch.tensor(timesteps[i])
-        v = forward(flux, latents, t, txt, vec, neg_txt, neg_vec, guidance, cfg_scale)
+        t = torch.tensor([timesteps[i]], device="cuda")
+        v = flux(latents, t, txt, vec, guidance).float()
+
+        # classifier-free guidance
+        if cfg_scale != 1.0:
+            assert neg_txt is not None and neg_vec is not None
+            neg_v = flux(latents, t, neg_txt, neg_vec, guidance).float()
+            v = neg_v.lerp(v, cfg_scale)
 
         # Euler's method. move from t_curr to t_next
-        latents.add_(v.float(), alpha=timesteps[i + 1] - timesteps[i])
+        latents = latents.add(v, alpha=timesteps[i + 1] - timesteps[i])
 
     return latents

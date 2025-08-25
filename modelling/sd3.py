@@ -40,7 +40,8 @@ class TimestepEmbedder(nn.Module):
 
     def forward(self, t: Tensor) -> Tensor:
         t_freq = timestep_embedding(t, self.in_dim)
-        return self.mlp(t_freq.to(self.mlp[0].weight.dtype))
+        t_freq = t_freq.to(self.mlp[0].weight.dtype)
+        return self.mlp(t_freq)
 
 
 class VectorEmbedder(nn.Sequential):
@@ -243,6 +244,7 @@ class SD3(nn.Module):
     def forward(self, x: Tensor, t: Tensor, context: Tensor, y: Tensor, skip_layers: tuple[int, ...] = ()) -> Tensor:
         # NOTE: t should be [0,1] i.e. w/o x1000 scaling
         N, _, H, W = x.shape
+        x = x.to(self.x_embedder.proj.weight.dtype)
         x = self.x_embedder(x) + self.crop_pos_embed(H, W)
         c = self.t_embedder(t) + self.y_embedder(y)  # (N, D)
         context = self.context_embedder(context)
@@ -259,11 +261,11 @@ class SD3(nn.Module):
 
 
 def load_sd3_5(size: str = "medium"):
-    if size == "large":  # 8.06 M params
+    if size == "large":  # 8.06B params
         depth = 38
         pos_embed_size = 192
         num_x_self_attn_layers = 0
-    elif size == "medium":  # 2.24 M params
+    elif size == "medium":  # 2.24B params
         depth = 24
         pos_embed_size = 384
         num_x_self_attn_layers = 13
@@ -273,10 +275,11 @@ def load_sd3_5(size: str = "medium"):
     with torch.device("meta"):
         model = SD3(depth=depth, pos_embed_size=pos_embed_size, num_x_self_attn_layers=num_x_self_attn_layers)
 
-    state_dict = load_hf_state_dict(f"stabilityai/stable-diffusion-3.5-{size}", f"sd3.5_{size}.safetensors")
-    prefix = "model.diffusion_model."
-    state_dict = {k.removeprefix(prefix): v for k, v in state_dict.items() if k.startswith(prefix)}
-
     # FP16
+    state_dict = load_hf_state_dict(
+        f"stabilityai/stable-diffusion-3.5-{size}",
+        f"sd3.5_{size}.safetensors",
+        prefix="model.diffusion_model.",
+    )
     model.load_state_dict(state_dict, assign=True)
     return model

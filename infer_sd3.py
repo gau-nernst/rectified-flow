@@ -12,7 +12,7 @@ from offload import PerLayerOffloadCUDAStream
 
 
 class SD3TextEmbedder:
-    def __init__(self, offload_t5: bool = False, dtype: torch.dtype = torch.bfloat16):
+    def __init__(self, offload_t5: bool = False, dtype: torch.dtype = torch.bfloat16) -> None:
         self.t5 = load_t5(max_length=256).to(dtype)  # 9.5 GB in BF16
         self.clip_l = load_clip_l(output_key=["pooler_output", -2]).to(dtype)  # 246 MB in BF16
         self.clip_g = load_openclip_bigg().to(dtype)  # 1.4 GB in BF16
@@ -84,19 +84,14 @@ class SD3Generator:
         slg_config: SkipLayerConfig = SkipLayerConfig(),
         seed: int | None = None,
         pbar: bool = False,
-        compile: bool = False,
         solver: str = "dpm++2m",
-    ):
+    ) -> Tensor:
+        # NOTE: right now this is broken...
         latents, embeds, vecs, neg_embeds, neg_vecs = prepare_inputs(
             self.ae, self.text_embedder, prompt, negative_prompt, img_size, latents, denoise, cfg_scale, seed
         )
         timesteps = sd3_timesteps(denoise, 0.0, num_steps)  # denoise from t=1 (noise) to t=0 (latents)
-
-        solver_fn = {
-            "euler": sd3_euler_generate,
-            "dpm++2m": sd3_dpmpp2m_generate,
-        }[solver]
-        latents = solver_fn(
+        latents = sd3_generate(
             self.sd3,
             latents,
             timesteps,
@@ -106,57 +101,20 @@ class SD3Generator:
             neg_vec=neg_vecs,
             cfg_scale=cfg_scale,
             slg_config=slg_config,
+            solver=solver,
             pbar=pbar,
-            compile=compile,
         )
         return self.ae.decode(latents, uint8=True)
 
 
-def sd3_timesteps(start: float = 1.0, end: float = 0.0, num_steps: int = 50):
+def sd3_timesteps(start: float = 1.0, end: float = 0.0, num_steps: int = 50, shift: float = 3.0):
     timesteps = torch.linspace(start, end, num_steps + 1)
-    timesteps = 3.0 / (3.0 + 1 / timesteps - 1)  # static shift
+    timesteps = shift / (shift + 1 / timesteps - 1)  # static shift
     return timesteps.tolist()
 
 
-def sd3_forward(
-    sd3: SD3,
-    latents: Tensor,
-    t: Tensor,
-    context: Tensor,
-    vec: Tensor,
-    neg_context: Tensor | None,
-    neg_vec: Tensor | None,
-    cfg_scale: float,
-    slg_scale: float = 0.0,
-    skip_layers: tuple[int, ...] = (),
-):
-    # t must be Tensor (cpu is fine) to avoid recompilation
-    t_vec = t.view(1).cuda()
-
-    if cfg_scale != 1.0:
-        assert neg_context is not None and neg_vec is not None
-        pos_v, neg_v = sd3(
-            latents.repeat(2, 1, 1, 1),
-            t_vec,
-            torch.cat([context, neg_context], dim=0),
-            torch.cat([vec, neg_vec], dim=0),
-        ).chunk(2, dim=0)
-        v = neg_v.lerp(pos_v, cfg_scale)  # classifier-free guidance
-
-    else:
-        pos_v = sd3(latents, t_vec, context, vec)
-        v = pos_v
-
-    # https://github.com/Stability-AI/sd3.5/blob/fbf8f483f992d8d6ad4eaaeb23b1dc5f523c3b3a/sd3_impls.py#L219
-    if slg_scale > 0.0:
-        skip_layer_v = sd3(latents, t_vec, context, vec, skip_layers)
-        v.add_(pos_v.float() - skip_layer_v.float(), alpha=slg_scale)
-
-    return v
-
-
 @torch.no_grad()
-def sd3_euler_generate(
+def sd3_generate(
     sd3: SD3,
     latents: Tensor,
     timesteps: list[float],
@@ -166,60 +124,54 @@ def sd3_euler_generate(
     neg_vec: Tensor | None = None,
     cfg_scale: float = 5.0,
     slg_config: SkipLayerConfig = SkipLayerConfig(),
+    solver: str = "euler",
     pbar: bool = False,
-    compile: bool = False,
-):
+) -> Tensor:
     num_steps = len(timesteps) - 1
-    forward = torch.compile(sd3_forward, disable=not compile)
-    latents = latents.clone()
+
     for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
-        t = torch.tensor(timesteps[i])
-        slg_scale = slg_config.scale if slg_config.start < i / num_steps < slg_config.end else 0.0
-        v = forward(sd3, latents, t, context, vec, neg_context, neg_vec, cfg_scale, slg_scale, slg_config.layers)
-        latents.add_(v, alpha=timesteps[i + 1] - timesteps[i])  # Euler's method. move from t_curr to t_next
-    return latents
+        t = torch.tensor([timesteps[i]], device="cuda")
+        pos_v = sd3(latents, t, context, vec).float()
 
-
-@torch.no_grad()
-def sd3_dpmpp2m_generate(
-    sd3: SD3,
-    latents: Tensor,
-    timesteps: list[float],
-    context: Tensor,
-    vec: Tensor,
-    neg_context: Tensor | None = None,
-    neg_vec: Tensor | None = None,
-    cfg_scale: float = 5.0,
-    slg_config: SkipLayerConfig = SkipLayerConfig(),
-    pbar: bool = False,
-    compile: bool = False,
-):
-    # DPM-Solver++(2M) https://arxiv.org/abs/2211.01095
-    # the implementation below has been simplified for flow matching / rectified flow
-    # with sigma(t) = t and alpha(t) = 1-t
-    # coincidentally (or not?), this results in identical calculations as k-diffusion implementation
-    # https://github.com/crowsonkb/k-diffusion/blob/21d12c91ad4550e8fcf3308ff9fe7116b3f19a08/k_diffusion/sampling.py#L585-L607
-
-    num_steps = len(timesteps) - 1
-    forward = torch.compile(sd3_forward, disable=not compile)
-    for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
-        t = torch.tensor(timesteps[i])
-        slg_scale = slg_config.scale if slg_config.start < i / num_steps < slg_config.end else 0.0
-        v = forward(sd3, latents, t, context, vec, neg_context, neg_vec, cfg_scale, slg_scale, slg_config.layers)
-        data_pred = latents.add(v, alpha=-timesteps[i])  # data prediction model
-
-        if i == 0:
-            latents = data_pred.lerp(latents, timesteps[i + 1] / timesteps[i])
-        elif timesteps[i + 1] == 0.0:  # avoid log(0). note that lim x.log(x) when x->0 is 0.
-            latents = data_pred
+        # classifier-free guidance
+        if cfg_scale != 1.0:
+            assert neg_context is not None and neg_vec is not None
+            neg_v = sd3(latents, t, neg_context, neg_vec).float()
+            v = neg_v.lerp(pos_v, cfg_scale)
         else:
-            lambda_prev = -math.log(timesteps[i - 1])
-            lambda_curr = -math.log(timesteps[i])
-            lambda_next = -math.log(timesteps[i + 1])
-            r = (lambda_curr - lambda_prev) / (lambda_next - lambda_curr)
-            D = data_pred.lerp(prev_data_pred, -1 / (2 * r))
-            latents = D.lerp(latents, timesteps[i + 1] / timesteps[i])
+            v = pos_v
 
-        prev_data_pred = data_pred
+        # skip-layer guidance
+        # https://github.com/Stability-AI/sd3.5/blob/fbf8f483f992d8d6ad4eaaeb23b1dc5f523c3b3a/sd3_impls.py#L219
+        if slg_config.start < i / num_steps < slg_config.end:
+            skip_layer_v = sd3(latents, t, context, vec, slg_config.layers).float()
+            v = v.add(pos_v - skip_layer_v, alpha=slg_config.scale)
+
+        # TODO: refactor solver...
+        if solver == "euler":
+            # move from t_curr to t_next
+            latents = latents.add(v, alpha=timesteps[i + 1] - timesteps[i])
+
+        elif solver == "dpm++2m":
+            # DPM-Solver++(2M) https://arxiv.org/abs/2211.01095
+            # the implementation below has been simplified for flow matching / rectified flow
+            # with sigma(t) = t and alpha(t) = 1-t
+            # coincidentally (or not?), this results in identical calculations as k-diffusion implementation
+            # https://github.com/crowsonkb/k-diffusion/blob/21d12c91ad4550e8fcf3308ff9fe7116b3f19a08/k_diffusion/sampling.py#L585-L607
+            data_pred = latents.add(v, alpha=-timesteps[i])  # data prediction model
+
+            if i == 0:
+                latents = data_pred.lerp(latents, timesteps[i + 1] / timesteps[i])
+            elif timesteps[i + 1] == 0.0:  # avoid log(0). note that lim x.log(x) when x->0 is 0.
+                latents = data_pred
+            else:
+                lambda_prev = -math.log(timesteps[i - 1])
+                lambda_curr = -math.log(timesteps[i])
+                lambda_next = -math.log(timesteps[i + 1])
+                r = (lambda_curr - lambda_prev) / (lambda_next - lambda_curr)
+                D = data_pred.lerp(prev_data_pred, -1 / (2 * r))
+                latents = D.lerp(latents, timesteps[i + 1] / timesteps[i])
+
+            prev_data_pred = data_pred
 
     return latents
