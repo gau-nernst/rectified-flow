@@ -4,20 +4,22 @@ Supported models:
 
 - [FLUX.1-dev](https://huggingface.co/black-forest-labs/FLUX.1-dev) and its derivatives: [Flex.1-alpha](https://huggingface.co/ostris/Flex.1-alpha)
 - [FLUX.1-Redux-dev](https://huggingface.co/black-forest-labs/FLUX.1-Redux-dev)
-- SD3.5 [medium](https://huggingface.co/stabilityai/stable-diffusion-3.5-medium) and [large](https://huggingface.co/stabilityai/stable-diffusion-3.5-large)
-- UNet-based models [SDXL](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0) (ongoing)
+- SD3.5 [medium](https://huggingface.co/stabilityai/stable-diffusion-3.5-medium) and [large](https://huggingface.co/stabilityai/stable-diffusion-3.5-large) (looks like it's broken at the moment)
+- Wan2.2 (WIP)
+- UNet-based models [SDXL](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0) (ongoing - like abandon)
 
 Supported features:
 
 - Training: LoRA fine-tuning with CPU offload, logit-normal sampler, and multi-resolution/multi-aspect-ratio training.
+  - TODO: Multi-resolution via varlen attention?
 - [RF-inversion](https://arxiv.org/abs/2410.10792) (FLUX-Redux is simpler and superior).
 - INT8 matmul (2x inference speedup for consumer cards).
 - Single-GPU model offloading for inference and training.
-- [DPM-Solver++(2M)](https://arxiv.org/abs/2211.01095) for SD3.5 (TODO: support FLUX?).
+- Solvers: Euler, [DPM-Solver++(2M)](https://arxiv.org/abs/2211.01095)
 - Skip-layer guidance for SD3.5 medium.
 
 ```bash
-uv venv --seed --python=3.11
+uv venv --seed --python=3.12
 source .venv/bin/activate
 uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 uv pip install -r requirements.txt
