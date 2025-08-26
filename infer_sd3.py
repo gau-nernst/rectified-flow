@@ -88,7 +88,14 @@ class SD3Generator:
     ) -> Tensor:
         # NOTE: right now this is broken...
         latents, embeds, vecs, neg_embeds, neg_vecs = prepare_inputs(
-            self.ae, self.text_embedder, prompt, negative_prompt, img_size, latents, denoise, cfg_scale, seed
+            self.ae,
+            self.text_embedder,
+            prompt,
+            negative_prompt if cfg_scale != 1.0 else None,
+            img_size,
+            latents,
+            denoise,
+            seed,
         )
         timesteps = sd3_timesteps(denoise, 0.0, num_steps)  # denoise from t=1 (noise) to t=0 (latents)
         latents = sd3_generate(

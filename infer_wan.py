@@ -78,7 +78,7 @@ class Wan5BGenerator:
             self.vae.cfg,
             self.umt5,
             prompt,
-            negative_prompt,
+            negative_prompt if cfg_scale != 1.0 else None,
             img_size,
             num_frames,
             device,

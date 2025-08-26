@@ -33,32 +33,20 @@ def prepare_inputs(
     ae: AutoEncoder,
     text_embedder: FluxTextEmbedder,
     prompt: str | list[str],
-    negative_prompt: str | list[str] = "",
+    negative_prompt: str | list[str] | None = None,
     img_size: int | tuple[int, int] = 512,
     latents: Tensor | None = None,
     denoise: float = 1.0,
-    cfg_scale: float = 1.0,
     seed: int | None = None,
 ):
-    if isinstance(prompt, str):
-        prompt = [prompt]
-    bsize = len(prompt)
+    embeds, vecs = text_embedder(prompt)
+    neg_embeds, neg_vecs = text_embedder(negative_prompt) if negative_prompt is not None else (None, None)
 
+    bsize = embeds.shape[0]
     if isinstance(img_size, int):
         height = width = img_size
     else:
         height, width = img_size
-
-    embeds, vecs = text_embedder(prompt)
-
-    if cfg_scale != 1.0:
-        neg_embeds, neg_vecs = text_embedder(negative_prompt)
-        if neg_embeds.shape[0] == 1:
-            neg_embeds = neg_embeds.expand(bsize, -1, -1)
-            neg_vecs = neg_vecs.expand(bsize, -1)
-    else:
-        neg_embeds = neg_vecs = None
-
     shape = (bsize, ae.z_dim, height // 8, width // 8)
     device = ae.encoder.conv_in.weight.device
 
@@ -111,11 +99,10 @@ class FluxGenerator:
             self.ae,
             self.text_embedder,
             prompt,
-            negative_prompt,
+            negative_prompt if cfg_scale != 1.0 else None,
             img_size,
             latents,
             denoise,
-            cfg_scale,
             seed,
         )
 
