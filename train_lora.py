@@ -21,8 +21,8 @@ from PIL import Image, ImageOps
 from torch.utils.data import DataLoader, IterableDataset, default_collate, get_worker_info
 from tqdm import tqdm
 
-from infer_flux import FluxTextEmbedder, flux_euler_generate, flux_timesteps
-from infer_sd3 import SD3TextEmbedder, sd3_euler_generate, sd3_timesteps
+from infer_flux import FluxTextEmbedder, flux_generate, flux_timesteps
+from infer_sd3 import SD3TextEmbedder, sd3_generate, sd3_timesteps
 from modelling import SD3, AutoEncoder, Flux
 from time_sampler import LogitNormal, Uniform
 from train_utils import EMA, compute_loss, parse_img_size, random_resize, setup_model
@@ -135,7 +135,7 @@ def save_images(
                 raise ValueError
 
             for guidance, cfg_scale in guidance_list:
-                latents = flux_euler_generate(
+                latents = flux_generate(
                     model,
                     noise,
                     timesteps,
@@ -153,7 +153,7 @@ def save_images(
 
         elif isinstance(model, SD3):
             timesteps = sd3_timesteps()
-            latents = sd3_euler_generate(
+            latents = sd3_generate(
                 model,
                 noise,
                 timesteps,
