@@ -240,8 +240,8 @@ class WanModel(nn.Module):
             x = torch.cat([x, y], dim=0)
 
         x = self.patch_embedding(x.to(self.patch_embedding.weight.dtype))
-        F, H, W = x.shape[2:]
-        seqlen = F * H * W
+        F_, H, W = x.shape[2:]
+        seqlen = F_ * H * W
         x = x.flatten(2).transpose(1, 2)  # (B, F*H*W, C)
 
         # time embeddings -> modulation
@@ -252,8 +252,13 @@ class WanModel(nn.Module):
         e0 = self.time_projection(e).unflatten(2, (6, -1))
         assert e.dtype == torch.float32 and e0.dtype == torch.float32
 
-        rope_embeds = self.get_rope(F, H, W, device=x.device)
+        if context.shape[1] < 512:
+            context = F.pad(context, (0, 0, 0, 512 - context.shape[1]))
+        elif context.shape[1] > 512:
+            context = context[:, :512]
         context = self.text_embedding(context)
+
+        rope_embeds = self.get_rope(F_, H, W, device=x.device)
         for block in self.blocks:
             x = block(x, e0, rope_embeds, context)
 
@@ -261,9 +266,9 @@ class WanModel(nn.Module):
 
         nF, nH, nW = self.cfg.patch_size
         out_dim = self.cfg.out_dim
-        x = x.reshape(x.shape[0], F, H, W, nF, nH, nW, out_dim)
+        x = x.reshape(x.shape[0], F_, H, W, nF, nH, nW, out_dim)
         x = x.permute(0, 7, 1, 4, 2, 5, 3, 6)
-        x = x.reshape(x.shape[0], out_dim, F * nF, H * nH, W * nW)
+        x = x.reshape(x.shape[0], out_dim, F_ * nF, H * nH, W * nW)
         return x
 
 

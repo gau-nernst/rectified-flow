@@ -21,18 +21,10 @@ def prepare_inputs(
 ):
     # https://github.com/Wan-Video/Wan2.2/blob/031a9be5/wan/modules/tokenizers.py
     # Wan2.2 does some text cleaning. try ignore for now
-    if isinstance(prompt, str):
-        prompt = [prompt]
-    txt_embeds, _ = umt5(prompt)
+    txt_embeds = umt5(prompt)
+    neg_txt_embeds = umt5(negative_prompt) if negative_prompt is not None else None
 
-    if negative_prompt is not None:
-        if isinstance(negative_prompt, str):
-            negative_prompt = [negative_prompt]
-        neg_txt_embeds, _ = umt5(negative_prompt)
-    else:
-        neg_txt_embeds = None
-
-    bs = len(prompt)
+    bs = txt_embeds.shape[0]
     height, width = img_size
     sT, sH, sW = vae_config.get_stride()
     assert num_frames % 4 == 1
@@ -51,7 +43,7 @@ def prepare_inputs(
 
 class Wan5BGenerator:
     def __init__(self, offload_wan: bool = False, offload_umt5: bool = False) -> None:
-        self.wan = load_wan("wan2.2-ti2v-5b")
+        self.wan = load_wan("wan2.2-ti2v-5b").bfloat16()
         self.vae = load_wan_vae("2.2")
         self.umt5 = load_umt5_xxl()
 
@@ -73,7 +65,7 @@ class Wan5BGenerator:
         self,
         prompt: str | list[str],
         negative_prompt: str | list[str] = NEGATIVE_PROMPT,
-        img_size: tuple[int, int] = (1280, 704),
+        img_size: tuple[int, int] = (704, 1280),
         num_frames: int = 1,
         cfg_scale: float = 5.0,
         num_steps: int = 50,
@@ -112,7 +104,9 @@ class Wan5BGenerator:
 def wan_timesteps(num_steps: int = 50, shift: float = 5.0, num_train_steps: int = 1000):
     sigmas = torch.linspace(1 - 1 / num_train_steps, 0, num_steps + 1)
     sigmas = shift / (shift + 1 / sigmas - 1)
-    return sigmas.mul(num_train_steps).round().div(num_train_steps).tolist()
+    sigmas = sigmas.mul(num_train_steps).to(torch.int64)  # discretize. this will truncate
+    sigmas = sigmas.float().div(num_train_steps).tolist()
+    return sigmas
 
 
 @torch.no_grad()

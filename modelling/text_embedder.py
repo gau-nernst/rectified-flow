@@ -14,14 +14,14 @@ class TextEmbedder(nn.Module):
         tokenizer: PreTrainedTokenizer,
         max_length: int,
         output_key: str | int | list[str | int],
-        padding: bool = True,
+        use_attn_mask: bool = False,
     ) -> None:
         super().__init__()
         self.model = model.eval().requires_grad_(False)
         self.tokenizer = tokenizer
         self.max_length = max_length  # allow overrides
         self.output_key = output_key
-        self.padding = padding
+        self.use_attn_mask = use_attn_mask
 
     @staticmethod
     def unwrap_output(out, key: str | int | list[str | int]):
@@ -32,27 +32,36 @@ class TextEmbedder(nn.Module):
         else:
             return [TextEmbedder.unwrap_output(out, k) for k in key]
 
+    @staticmethod
+    def apply_mask(inputs: Tensor | list[Tensor], mask: Tensor):
+        if isinstance(inputs, Tensor):
+            # add trailing dims for broadcasting
+            mask = mask.view(mask.shape + (1,) * (inputs.ndim - mask.ndim))
+            return inputs * mask
+        return [TextEmbedder.apply_mask(x, mask) for x in inputs]
+
     @torch.no_grad()
-    def forward(self, texts: list[str]) -> Tensor:
-        kwargs = dict(max_length=self.max_length, truncation=True, return_tensors="pt")
-
-        # Flux always pad to max_length and ignore attention mask
-        # Wan uses attention mask i.e. don't attend to padding tokens
+    def forward(self, texts: str | list[str]) -> Tensor:
+        # - Flux always pad to max_length and ignore attention mask
+        # - Wan uses attention mask i.e. don't attend to padding tokens
+        #   and zero-out outputs
         # TODO: sequence packing
-        if self.padding:
-            kwargs.update(padding="max_length", return_attention_mask=False)
-        else:
-            kwargs.update(padding="longest", return_attention_mask=True)
-
-        inputs = self.tokenizer(texts, **kwargs)
+        inputs = self.tokenizer(
+            texts,
+            padding="max_length",
+            max_length=self.max_length,
+            truncation=True,
+            return_tensors="pt",
+            return_attention_mask=self.use_attn_mask,
+        )
         inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
         out = self.model(**inputs, output_hidden_states=True)
-        out = self.unwrap_output(out, self.output_key)
 
-        if self.padding:
-            return out
-        else:
-            return out, inputs["attention_mask"]
+        out = self.unwrap_output(out, self.output_key)
+        if self.use_attn_mask:
+            out = self.apply_mask(out, inputs["attention_mask"])
+
+        return out
 
 
 def load_t5(max_length: int = 512) -> TextEmbedder:
@@ -98,4 +107,4 @@ def load_umt5_xxl() -> TextEmbedder:
         subfolder="text_encoder",
     )
     tokenizer = AutoTokenizer.from_pretrained("google/umt5-xxl")
-    return TextEmbedder(model, tokenizer, 512, "last_hidden_state", padding=False)
+    return TextEmbedder(model, tokenizer, 512, "last_hidden_state", use_attn_mask=True)
