@@ -25,16 +25,11 @@ def rope(pos: Tensor, dim: int, theta: float = 1e4) -> Tensor:
 
 def apply_rope(x: Tensor, freqs_cis: Tensor) -> Tensor:
     # x: (B, L, nH, D)
-    # freqs_cis: (L, dim/2, 2, 2)
-    x_ = x.float().reshape(*x.shape[:-1], -1, 1, 2)
-    freqs_cis = freqs_cis.unsqueeze(-4)
+    # freqs_cis: (L, D/2, 2, 2)
+    x_ = x.float().unflatten(-1, (-1, 1, 2))  # [B, L, nH, D/2, 1, 2]
+    freqs_cis = freqs_cis.unsqueeze(-4)  # [L, 1, D/2, 2, 2]
     out = freqs_cis[..., 0] * x_[..., 0] + freqs_cis[..., 1] * x_[..., 1]
     return out.reshape(x.shape).type_as(x)
-
-
-def rope_nd(ids: Tensor, rope_dims: tuple[int, ...], theta: float = 1e4):
-    rope_list = [rope(ids[..., i], dim, theta) for i, dim in enumerate(rope_dims)]
-    return torch.cat(rope_list, dim=-3)
 
 
 def timestep_embedding(t: Tensor, dim: int, max_period: float = 10000.0, time_factor: float = 1000.0):
@@ -279,9 +274,24 @@ class Flux(nn.Module):
         )
         self.final_layer = LastLayer(cfg.hidden_size, 1, cfg.out_channels)
 
+    def build_rope(self, H: int, W: int, device: torch.types.Device = None):
+        rope_d0, rope_dh, rope_dw = self.cfg.rope_dims
+        theta = self.cfg.theta
+
+        rope_0 = rope(torch.arange(1, device=device), rope_d0, theta)  # [1, 8, 2, 2]
+        rope_h = rope(torch.arange(H, device=device), rope_dh, theta)  # [H, 28, 2, 2]
+        rope_w = rope(torch.arange(W, device=device), rope_dw, theta)  # [W, 28, 2, 2]
+
+        rope_0 = rope_0.unflatten(0, (1, 1)).expand(H, W, -1, -1, -1)
+        rope_h = rope_h.unflatten(0, (H, 1)).expand(H, W, -1, -1, -1)
+        rope_w = rope_w.unflatten(0, (1, W)).expand(H, W, -1, -1, -1)
+
+        return torch.cat([rope_0, rope_h, rope_w], dim=2).flatten(0, 1)  # [H*W, 64, 2, 2]
+
     def forward(self, img: Tensor, timesteps: Tensor, txt: Tensor, y: Tensor, guidance: Tensor | None = None) -> Tensor:
         # we integrate patchify and unpatchify into model's forward pass
         B, _, H, W = img.shape
+        txt_len = txt.shape[1]
         img = img.to(self.img_in.weight.dtype)
         img = img.view(B, -1, H // 2, 2, W // 2, 2).permute(0, 2, 4, 1, 3, 5).reshape(B, H * W // 4, -1)
 
@@ -292,25 +302,17 @@ class Flux(nn.Module):
         if guidance is not None:  # allow no guidance_embed
             vec = vec + self.guidance_in(timestep_embedding(guidance, 256).to(img.dtype))
 
-        img_ids = torch.stack(
-            [
-                torch.zeros(H // 2, W // 2, device=img.device),
-                torch.arange(H // 2, device=img.device).view(-1, 1).expand(H // 2, W // 2),
-                torch.arange(W // 2, device=img.device).view(1, -1).expand(H // 2, W // 2),
-            ],
-            dim=-1,
-        ).flatten(0, 1)
-        txt_ids = torch.zeros(txt.shape[1], 3, device=txt.device)
-        ids = torch.cat((txt_ids, img_ids), dim=0)
-        pe = rope_nd(ids, self.cfg.rope_dims, self.cfg.theta)
+        rope_img = self.build_rope(H // 2, W // 2, img.device)
+        rope_txt = self.build_rope(1, 1, img.device).expand(txt_len, -1, -1, -1)
+        pe = torch.cat([rope_txt, rope_img], dim=0)
 
         for block in self.double_blocks:
             img, txt = block(img, txt, vec, pe)
 
-        img = torch.cat((txt, img), 1)
+        img = torch.cat([txt, img], dim=1)
         for block in self.single_blocks:
             img = block(img, vec, pe)
-        img = img[:, txt.shape[1] :, ...]
+        img = img[:, txt_len:]
 
         img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
         img = img.view(B, H // 2, W // 2, -1, 2, 2).permute(0, 3, 1, 4, 2, 5).reshape(B, -1, H, W)
