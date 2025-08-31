@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..attn import dispatch_attn
 from ..utils import load_hf_state_dict
 
 
@@ -48,11 +49,6 @@ def apply_rope(x: Tensor, rope_embeds: tuple[Tensor, Tensor, Tensor]) -> Tensor:
 
     x_f64 = torch.view_as_complex(x.to(torch.float64).unflatten(-1, (-1, 2)))
     return torch.view_as_real(x_f64 * rope).flatten(3).to(x.dtype)
-
-
-def sdpa(q: Tensor, k: Tensor, v: Tensor):
-    # q, k, v: [B, L, num_heads, head_dim]
-    return F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)).transpose(1, 2)
 
 
 class RMSNorm(nn.Module):
@@ -118,7 +114,7 @@ class WanSelfAttention(nn.Module):
         q = apply_rope(self.norm_q(self.q(x)).view(shape), rope_embeds)
         k = apply_rope(self.norm_k(self.k(x)).view(shape), rope_embeds)
         v = self.v(x).view(shape)
-        return self.o(sdpa(q, k, v).flatten(2))
+        return self.o(dispatch_attn(q, k, v).flatten(2))
 
 
 class WanCrossAttention(WanSelfAttention):
@@ -129,7 +125,7 @@ class WanCrossAttention(WanSelfAttention):
         q = self.norm_q(self.q(x)).view(shape)
         k = self.norm_k(self.k(context)).view(shape)
         v = self.v(context).view(shape)
-        return self.o(sdpa(q, k, v).flatten(2))
+        return self.o(dispatch_attn(q, k, v).flatten(2))
 
 
 def modulate(x: Tensor, scale: Tensor, bias: Tensor) -> Tensor:

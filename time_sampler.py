@@ -1,18 +1,20 @@
-from dataclasses import dataclass
+import dataclasses
 
 import torch
 
 
-@dataclass
+@dataclasses.dataclass
 class TimeSampler:
     def __call__(self, n: int, device: torch.types.Device) -> torch.Tensor: ...
 
 
+@dataclasses.dataclass
 class Uniform(TimeSampler):
     def __call__(self, n: int, device: torch.device):
         return torch.rand(n, device=device)
 
 
+@dataclasses.dataclass
 class LogitNormal(TimeSampler):
     """Section 3.1 in https://arxiv.org/abs/2403.03206"""
 

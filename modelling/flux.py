@@ -1,6 +1,6 @@
-# https://github.com/black-forest-labs/flux/blob/7e14a05ed7280f7a34ece612f7324fcc2ec9efbb/src/flux/math.py
-# https://github.com/black-forest-labs/flux/blob/7e14a05ed7280f7a34ece612f7324fcc2ec9efbb/src/flux/modules/layers.py
-# https://github.com/black-forest-labs/flux/blob/7e14a05ed7280f7a34ece612f7324fcc2ec9efbb/src/flux/model.py
+# https://github.com/black-forest-labs/flux/blob/7e14a05e/src/flux/math.py
+# https://github.com/black-forest-labs/flux/blob/7e14a05e/src/flux/modules/layers.py
+# https://github.com/black-forest-labs/flux/blob/7e14a05e/src/flux/model.py
 
 import math
 from dataclasses import dataclass
@@ -349,7 +349,7 @@ def load_flux(name: str = "flux-dev"):
     return _load_flux(repo_id, filename, prefix=prefix)
 
 
-# https://github.com/black-forest-labs/flux/blob/805da8571a0b49b6d4043950bd266a65328c243b/src/flux/modules/image_embedders.py#L66
+# https://github.com/black-forest-labs/flux/blob/805da857/src/flux/modules/image_embedders.py#L66
 def load_flux_redux(dtype: torch.dtype = torch.bfloat16):
     import timm
 

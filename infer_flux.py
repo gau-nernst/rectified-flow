@@ -168,7 +168,7 @@ def flux_generate(
         guidance = torch.full(latents.shape[:1], guidance, device=latents.device)
 
     num_steps = len(timesteps) - 1
-    solver_ = get_solver(solver)
+    solver_ = get_solver(solver, timesteps)
 
     for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
         t = torch.tensor([timesteps[i]], device="cuda")
@@ -180,6 +180,6 @@ def flux_generate(
             neg_v = flux(latents, t, neg_txt, neg_vec, guidance).float()
             v = neg_v.lerp(v, cfg_scale)
 
-        latents = solver_.step(latents, v, timesteps, i)
+        latents = solver_.step(latents, v, i)
 
     return latents

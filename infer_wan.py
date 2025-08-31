@@ -99,14 +99,11 @@ class Wan5BGenerator:
 
 
 # https://github.com/Wan-Video/Wan2.2/blob/031a9be5/wan/utils/fm_solvers_unipc.py
-# not sure why they use discrete timesteps
-# NOTE: we keep continuous timestep (but discretized to 1/1000) and keep the last t=0
+# NOTE: we keep the last t=0
 def wan_timesteps(num_steps: int = 50, shift: float = 5.0, num_train_steps: int = 1000):
     sigmas = torch.linspace(1 - 1 / num_train_steps, 0, num_steps + 1)
     sigmas = shift / (shift + 1 / sigmas - 1)
-    sigmas = sigmas.mul(num_train_steps).to(torch.int64)  # discretize. this will truncate
-    sigmas = sigmas.float().div(num_train_steps).tolist()
-    return sigmas
+    return sigmas.tolist()
 
 
 @torch.no_grad()
@@ -121,11 +118,12 @@ def wan_generate(
     pbar: bool = False,
 ) -> Tensor:
     num_steps = len(timesteps) - 1
-    solver_ = get_solver(solver)
+    solver_ = get_solver(solver, timesteps)
 
     for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
+        # Wan2.2 uses discrete timestep. this is truncated, not rounded.
         # TODO: fold 1000 into modelling code
-        t = torch.tensor([timesteps[i] * 1000], device="cuda")
+        t = torch.tensor([int(timesteps[i] * 1000)], dtype=torch.float, device="cuda")
         v = wan(latents, t, context)
 
         # classifier-free guidance
@@ -133,6 +131,6 @@ def wan_generate(
             neg_v = wan(latents, t, neg_context)
             v = neg_v.lerp(v, cfg_scale)
 
-        latents = solver_.step(latents, v, timesteps, i)
+        latents = solver_.step(latents, v, i)
 
     return latents

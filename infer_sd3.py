@@ -135,7 +135,7 @@ def sd3_generate(
     pbar: bool = False,
 ) -> Tensor:
     num_steps = len(timesteps) - 1
-    solver_ = get_solver(solver)
+    solver_ = get_solver(solver, timesteps)
 
     for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
         t = torch.tensor([timesteps[i]], device="cuda")
@@ -155,6 +155,6 @@ def sd3_generate(
             skip_layer_v = sd3(latents, t, context, vec, slg_config.layers).float()
             v = v.add(pos_v - skip_layer_v, alpha=slg_config.scale)
 
-        latents = solver_.step(latents, v, timesteps, i)
+        latents = solver_.step(latents, v, i)
 
     return latents
