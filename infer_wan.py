@@ -134,3 +134,50 @@ def wan_generate(
         latents = solver_.step(latents, v, i)
 
     return latents
+
+
+if __name__ == "__main__":
+    import argparse
+
+    import av
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--prompt", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--duration", type=float, default=5.0)
+    parser.add_argument("--num_steps", type=int, default=50)
+    parser.add_argument("--seed", type=int)
+    args = parser.parse_args()
+
+    fps = 24  # Wan2.2-5B is 24. Wan2.2-14B is 16
+    num_frames = int(args.duration * fps) // 4 * 4 + 1
+
+    gen = Wan5BGenerator(offload_wan=True, offload_umt5=True)
+    gen.cuda()
+
+    # [3, T, H, W]
+    video = gen.generate(
+        args.prompt,
+        num_frames=num_frames,
+        num_steps=args.num_steps,
+        seed=args.seed,
+        pbar=True,
+    ).squeeze(0)
+
+    # TODO: merge uint8 conversion to VAE
+    video_np = video.add(1).mul(127.5).round().clip(0, 255).to(torch.uint8).permute(1, 2, 3, 0).cpu().numpy()
+
+    container = av.open(args.output, mode="w")
+    stream = container.add_stream("libx264", rate=fps)
+    stream.width = 1280
+    stream.height = 704
+
+    for frame_id in range(video_np.shape[0]):
+        frame = av.VideoFrame.from_ndarray(video_np[frame_id])
+        for packet in stream.encode(frame):
+            container.mux(packet)
+
+    for packet in stream.encode():
+        container.mux(packet)
+
+    container.close()

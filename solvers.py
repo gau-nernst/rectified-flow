@@ -1,6 +1,6 @@
+import dataclasses
 import math
 import typing
-import dataclasses
 
 import torch
 from torch import Tensor
