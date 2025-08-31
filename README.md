@@ -6,7 +6,9 @@ Supported models:
 - [FLUX.1-Redux-dev](https://huggingface.co/black-forest-labs/FLUX.1-Redux-dev)
 - SD3.5 [medium](https://huggingface.co/stabilityai/stable-diffusion-3.5-medium) and [large](https://huggingface.co/stabilityai/stable-diffusion-3.5-large) (looks like it's broken at the moment)
 - Wan2.2 (WIP)
-- UNet-based models [SDXL](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0) (ongoing - like abandon)
+  - Wan2.2-TI2V-5B: T2V (done), I2V (WIP)
+  - Wan2.2-T2V-A14B and Wan2.2-I2V-A14B: WIP
+- Qwen-Image (WIP)
 
 Supported features:
 
@@ -15,13 +17,15 @@ Supported features:
 - [RF-inversion](https://arxiv.org/abs/2410.10792) (FLUX-Redux is simpler and superior).
 - INT8 matmul (2x inference speedup for consumer cards).
 - Single-GPU model offloading for inference and training.
-- Solvers: Euler, [DPM-Solver++(2M)](https://arxiv.org/abs/2211.01095)
+- Solvers: Euler, [DPM-Solver++(2M)](https://arxiv.org/abs/2211.01095), [UniPC](https://arxiv.org/abs/2302.04867)
 - Skip-layer guidance for SD3.5 medium.
 
 ```bash
-uv venv --seed --python=3.12
+uv venv --python=3.12 --managed-python
 source .venv/bin/activate
-uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+
+# install torch and torchvision following https://pytorch.org/get-started/locally/
+uv pip install torch torchvision
 uv pip install -r requirements.txt
 ```
 
