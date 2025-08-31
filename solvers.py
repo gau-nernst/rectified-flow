@@ -81,11 +81,12 @@ class UniPCSolver(Solver):
 
     def get_lambda(self, i: int):
         # avoid log(0)
-        return math.log(1.0 - self.timesteps[i]) - math.log(max(self.timesteps[i], 1e-8))
+        return math.log(max(1.0 - self.timesteps[i], 1e-8)) - math.log(max(self.timesteps[i], 1e-8))
 
     def get_order(self, i: int):
         "Order warmup from 1 and cooldown to 1"
-        return min(self.order, i + 1, len(self.timesteps) - i)
+        # NOTE: len(self.timesteps) == num_steps + 1
+        return min(self.order, i + 1, len(self.timesteps) - 1 - i)
 
     def c_step(self, i: int):
         order = self.get_order(i - 1)  # c-step uses previous step's order
@@ -190,9 +191,9 @@ class UniPCSolver(Solver):
         x_t = (sigma_next / sigma_curr) * latents - alpha_next * h_phi_1 * data_pred_curr
 
         if D1s is not None:
-            rhos_p = torch.tensor([0.5], device=device) if order == 1 else torch.linalg.solve(R[:-1, :-1], b[:-1])
+            rhos_p = torch.tensor([0.5], device=device) if order == 2 else torch.linalg.solve(R[:-1, :-1], b[:-1])
             pred_res = torch.einsum("k,bkc...->bc...", rhos_p, D1s)
-            x_t = x_t - sigma_next * B_h * pred_res
+            x_t = x_t - alpha_next * B_h * pred_res
 
         return x_t
 
@@ -204,3 +205,29 @@ def get_solver(solver: str, timesteps: typing.Sequence[float]) -> Solver:
         "unipc": UniPCSolver,
     }
     return lookup[solver](tuple(timesteps))  # shallow copy
+
+
+if __name__ == "__main__":
+    from diffusers import UniPCMultistepScheduler
+
+    num_steps = 50
+    shift = 5.0
+
+    # set up our solver
+    timesteps = torch.linspace(1 - 1 / 1000, 0, num_steps + 1)
+    timesteps = shift / (shift + 1 / timesteps - 1)
+    timesteps = timesteps.tolist()
+    scheduler = UniPCSolver(timesteps)
+
+    # set up diffusers solver
+    scheduler_ref = UniPCMultistepScheduler.from_pretrained("Wan-AI/Wan2.2-TI2V-5B-Diffusers", subfolder="scheduler")
+    scheduler_ref.set_timesteps(num_steps)
+
+    latents = torch.randn(1, 4)
+    latents_ref = latents
+    for i in range(num_steps):
+        v = torch.randn_like(latents)
+
+        latents = scheduler.step(latents, v, i)
+        latents_ref = scheduler_ref.step(v, scheduler_ref.timesteps[i], latents_ref).prev_sample
+        torch.testing.assert_close(latents, latents_ref, msg=lambda x: f"step {i}: {x}")
