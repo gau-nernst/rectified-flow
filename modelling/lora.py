@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from .kernels import scaled_int8_mm
+from gn_kernels import triton_mm
 
 
 def quantize_row_wise(x: Tensor):
@@ -11,6 +11,20 @@ def quantize_row_wise(x: Tensor):
     scales = abs_max / 127
     x_i8 = (x / scales.clip(1e-5)).clip(-128, 127).round().to(torch.int8)
     return x_i8, scales.to(x.dtype)  # check if FP32 scales is much better?
+
+
+@torch.no_grad()
+def w8a8_dynamic(a: Tensor, b: Tensor, bias: Tensor | None):
+    a_i8, a_scales = quantize_row_wise(a)
+    bt_i8, bt_scales = quantize_row_wise(b.T)
+    return triton_mm(
+        a_i8,
+        bt_i8.contiguous().T,
+        bias,
+        scale_A=a_scales,
+        scale_B=bt_scales.T,
+        out_dtype=a.dtype,
+    )
 
 
 class LoRALinear(nn.Linear):
@@ -55,10 +69,17 @@ class LoRALinear(nn.Linear):
 
     def forward(self, x: Tensor):
         if self.quantization == "int8_training":
-            out = W8A8Dynamic.apply(x, self.weight, self.bias)
+            out = LinearW8A8Dynamic.apply(x, self.weight, self.bias)
         elif self.quantization == "int8_inference":
             x_i8, x_scales = quantize_row_wise(x.flatten(0, -2))
-            out = scaled_int8_mm(x_i8, self.weight.T, x_scales, self.weight_scales.T, self.bias)
+            out = triton_mm(
+                x_i8,
+                self.weight.T,
+                self.bias,
+                scale_A=x_scales,
+                scale_B=self.weight_scales.T,
+                out_dtype=x.dtype,
+            )
             out = out.unflatten(0, x.shape[:-1])
         else:
             out = F.linear(x, self.weight, self.bias)
@@ -75,7 +96,7 @@ class LoRALinear(nn.Linear):
         dtype: torch.dtype = torch.float32,
         device: torch.types.Device = None,
     ):
-        if type(model) == nn.Linear:  # exact match, no subclass
+        if type(model) is nn.Linear:  # exact match, no subclass
             model.__class__ = LoRALinear
             model.init_lora(rank=rank, quantization=quantization, dtype=dtype, device=device)
         else:
@@ -84,7 +105,7 @@ class LoRALinear(nn.Linear):
         return model
 
     def merge_lora(model: nn.Module):
-        if type(model) == LoRALinear:
+        if type(model) is LoRALinear:
             d_weight = model.lora_b.detach() @ model.lora_a.detach() * model.scale
             weight = model.weight.detach() + d_weight
             model.__class__ = nn.Linear
@@ -99,7 +120,7 @@ class LoRALinear(nn.Linear):
     def set_scale(model: nn.Module, scale: float):
         """This method can be used both as instance method and static method
         E.g. `linear.set_scale(1.0)` and `LoRALinear.set_scale(model, 1.0)`"""
-        if type(model) == LoRALinear:
+        if type(model) is LoRALinear:
             model.scale.copy_(scale)
         else:
             for child in model.children():
@@ -107,14 +128,7 @@ class LoRALinear(nn.Linear):
         return model
 
 
-@torch.no_grad()
-def w8a8_dynamic(a: Tensor, b: Tensor, bias: Tensor | None):
-    a_i8, a_scales = quantize_row_wise(a)
-    b_i8, b_scales = quantize_row_wise(b.T)
-    return scaled_int8_mm(a_i8, b_i8.contiguous().T, a_scales, b_scales.T, bias)
-
-
-class W8A8Dynamic(torch.autograd.Function):
+class LinearW8A8Dynamic(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: Tensor, weight: Tensor, bias: Tensor | None):
         ctx.save_for_backward(weight)

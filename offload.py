@@ -38,7 +38,7 @@ class PerLayerOffload:
             if (
                 isinstance(module, (nn.ModuleList, nn.Sequential))
                 and len(module) > 1
-                and all(type(layer) == type(module[0]) for layer in module)
+                and all(type(layer) is type(module[0]) for layer in module)
             ):
                 for child in module:
                     child.register_forward_pre_hook(pre_hook)
@@ -126,7 +126,7 @@ class PerLayerOffloadCUDAStream:
             if (
                 isinstance(module, (nn.ModuleList, nn.Sequential))
                 and len(module) > 1
-                and all(type(layer) == type(module[0]) for layer in module)
+                and all(type(layer) is type(module[0]) for layer in module)
             ):
                 # manually move 1st layer params
                 manual_params.update(module[0].parameters())
@@ -209,7 +209,7 @@ class PerLayerOffloadWithBackward:
             if (
                 isinstance(module, (nn.ModuleList, nn.Sequential))
                 and len(module) > 1
-                and all(type(layer) == type(module[0]) for layer in module)
+                and all(type(layer) is type(module[0]) for layer in module)
             ):
                 self._register_sequential(module, key)
 
@@ -357,7 +357,7 @@ class PerLayerOffloadWithBackwardGradient:
             if (
                 isinstance(module, (nn.ModuleList, nn.Sequential))
                 and len(module) > 1
-                and all(type(layer) == type(module[0]) for layer in module)
+                and all(type(layer) is type(module[0]) for layer in module)
             ):
                 self._register_sequential(module, key)
 

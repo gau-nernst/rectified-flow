@@ -91,11 +91,10 @@ class UniPCSolver(Solver):
     def c_step(self, i: int):
         order = self.get_order(i - 1)  # c-step uses previous step's order
 
-        data_pred_curr = self.data_pred_history[i]
         data_pred_prev = self.data_pred_history[i - 1]
         lambda_curr = self.get_lambda(i)
         lambda_prev = self.get_lambda(i - 1)
-        device = data_pred_curr.device
+        device = data_pred_prev.device
 
         # iterate from [i-2] to [i-order]
         h = lambda_curr - lambda_prev
@@ -129,15 +128,17 @@ class UniPCSolver(Solver):
 
         R = torch.stack(R)
         b = torch.tensor(b, device=device)
-        rhos_c = torch.tensor([0.5], device=device) if order == 1 else torch.linalg.solve(R, b)
 
         sigma_curr = self.timesteps[i]
         sigma_prev = self.timesteps[i - 1]
         alpha_curr = 1.0 - sigma_curr
         x_t_ = (sigma_curr / sigma_prev) * self.prev_corrected_latents - alpha_curr * h_phi_1 * data_pred_prev
+        # NOTE: everything here is recomputed from the previous p-step
+        # technically we can cache these stuff
 
         # TODO: looks like D1_t can be combined with D1s?
-        D1_t = data_pred_curr - data_pred_prev
+        D1_t = self.data_pred_history[i] - data_pred_prev
+        rhos_c = torch.tensor([0.5], device=device) if order == 1 else torch.linalg.solve(R, b)
         corr_res = torch.einsum("k,bkc...->bc...", rhos_c[:-1], D1s) if D1s is not None else 0
         x_t = x_t_ - alpha_curr * B_h * (corr_res + rhos_c[-1] * D1_t)
 
