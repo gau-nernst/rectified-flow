@@ -6,7 +6,7 @@ Supported models:
 - [FLUX.1-Redux-dev](https://huggingface.co/black-forest-labs/FLUX.1-Redux-dev)
 - SD3.5 [medium](https://huggingface.co/stabilityai/stable-diffusion-3.5-medium) and [large](https://huggingface.co/stabilityai/stable-diffusion-3.5-large) (looks like it's broken at the moment)
 - Wan2.2 (WIP)
-  - Wan2.2-TI2V-5B: T2V (done), I2V (WIP)
+  - Wan2.2-TI2V-5B: T2V and I2V
   - Wan2.2-T2V-A14B and Wan2.2-I2V-A14B: WIP
 - Qwen-Image (WIP)
 

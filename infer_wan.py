@@ -65,6 +65,7 @@ class Wan5BGenerator:
         self,
         prompt: str | list[str],
         negative_prompt: str | list[str] = NEGATIVE_PROMPT,
+        img: Tensor | None = None,
         img_size: tuple[int, int] = (704, 1280),
         num_frames: int = 1,
         cfg_scale: float = 5.0,
@@ -84,6 +85,9 @@ class Wan5BGenerator:
             device,
             seed,
         )
+        if img is not None:
+            img = self.vae.encode(img.unsqueeze(-3).to(device))  # add time dim
+
         timesteps = wan_timesteps(num_steps)
         latents = wan_generate(
             self.wan,
@@ -92,6 +96,7 @@ class Wan5BGenerator:
             context,
             neg_context,
             cfg_scale=cfg_scale,
+            first_frame=img,
             solver=solver,
             pbar=pbar,
         )
@@ -114,16 +119,29 @@ def wan_generate(
     context: Tensor,
     neg_context: Tensor | None = None,
     cfg_scale: float = 5.0,
+    first_frame: Tensor | None = None,
     solver: str = "unipc",
     pbar: bool = False,
 ) -> Tensor:
     num_steps = len(timesteps) - 1
     solver_ = get_solver(solver, timesteps)
 
+    F = latents.shape[2] // wan.cfg.patch_size[0]
+    H = latents.shape[3] // wan.cfg.patch_size[1]
+    W = latents.shape[4] // wan.cfg.patch_size[2]
+
+    if first_frame is not None:
+        latents[:, :, :1] = first_frame  # fill the first frame
+
     for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
         # Wan2.2 uses discrete timestep. this is truncated, not rounded.
         # TODO: fold 1000 into modelling code
-        t = torch.tensor([int(timesteps[i] * 1000)], dtype=torch.float, device="cuda")
+        t_discrete = int(timesteps[i] * 1000)
+        if first_frame is not None:  # set time of 1st frame to zeros
+            t = torch.tensor([[0] * (H * W) + [t_discrete] * ((F - 1) * H * W)], dtype=torch.float, device="cuda")
+        else:
+            t = torch.tensor([t_discrete], dtype=torch.float, device="cuda")
+
         v = wan(latents, t, context)
 
         # classifier-free guidance
@@ -133,6 +151,9 @@ def wan_generate(
 
         latents = solver_.step(latents, v, i)
 
+        if first_frame is not None:
+            latents[:, :, :1] = first_frame
+
     return latents
 
 
@@ -140,10 +161,12 @@ if __name__ == "__main__":
     import argparse
 
     import av
+    from PIL import Image
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--input_img")
     parser.add_argument("--duration", type=float, default=5.0)
     parser.add_argument("--num_steps", type=int, default=50)
     parser.add_argument("--seed", type=int)
@@ -155,9 +178,20 @@ if __name__ == "__main__":
     gen = Wan5BGenerator(offload_wan=True, offload_umt5=True)
     gen.cuda()
 
+    if args.input_img is not None:
+        img_pil = Image.open(args.input_img)
+        img_pil = img_pil.resize((1280, 704), resample=Image.Resampling.LANCZOS)
+        img_pil = img_pil.convert("RGB")
+        img_pt = torch.frombuffer(img_pil.tobytes(), dtype=torch.uint8).view(704, 1280, 3)
+        img_pt = img_pt.permute(2, 0, 1).unsqueeze(0)
+        img_pt = img_pt.float().sub(127.5).div(127.5)
+    else:
+        img_pt = None
+
     # [3, T, H, W]
     video = gen.generate(
         args.prompt,
+        img=img_pt,
         num_frames=num_frames,
         num_steps=args.num_steps,
         seed=args.seed,

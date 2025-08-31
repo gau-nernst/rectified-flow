@@ -199,7 +199,7 @@ class WanModel(nn.Module):
     def __init__(self, cfg: WanConfig) -> None:
         super().__init__()
         self.cfg = cfg
-        self.patch_embedding = nn.Conv3d(cfg.in_dim, cfg.dim, kernel_size=cfg.patch_size, stride=cfg.patch_size)
+        self.patch_embedding = nn.Conv3d(cfg.in_dim, cfg.dim, cfg.patch_size, cfg.patch_size)
         self.text_embedding = nn.Sequential(
             Linear(cfg.text_dim, cfg.dim),
             nn.GELU(approximate="tanh"),
