@@ -81,12 +81,10 @@ class QKNorm(nn.Module):
 
 
 class SelfAttention(nn.Module):
-    def __init__(self, dim: int, num_heads: int = 8, qkv_bias: bool = False) -> None:
+    def __init__(self, dim: int) -> None:
         super().__init__()
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.norm = QKNorm(head_dim)
+        self.qkv = nn.Linear(dim, dim * 3)
+        self.norm = QKNorm(128)
         self.proj = nn.Linear(dim, dim)
 
 
@@ -117,34 +115,27 @@ class Modulation(nn.Module):
 
 
 class DoubleStreamBlock(nn.Module):
-    def __init__(
-        self, hidden_size: int, num_heads: int, mlp_ratio: float, qkv_bias: bool = False, attn_impl: str = "pt"
-    ) -> None:
+    def __init__(self, dim: int, mlp_ratio: float, attn_impl: str = "pt") -> None:
         super().__init__()
-        mlp_hidden_dim = int(hidden_size * mlp_ratio)
-        self.num_heads = num_heads
+        self.head_dim = 128
+        mlp_dim = int(dim * mlp_ratio)
+        self.norm = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.attn_impl = attn_impl
 
-        self.img_mod = Modulation(hidden_size, double=True)
-        self.img_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.img_attn = SelfAttention(dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias)
-
-        self.img_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.img_mod = Modulation(dim, double=True)
+        self.img_attn = SelfAttention(dim)
         self.img_mlp = nn.Sequential(
-            nn.Linear(hidden_size, mlp_hidden_dim),
+            nn.Linear(dim, mlp_dim),
             nn.GELU(approximate="tanh"),
-            nn.Linear(mlp_hidden_dim, hidden_size),
+            nn.Linear(mlp_dim, dim),
         )
 
-        self.txt_mod = Modulation(hidden_size, double=True)
-        self.txt_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.txt_attn = SelfAttention(dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias)
-
-        self.txt_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.txt_mod = Modulation(dim, double=True)
+        self.txt_attn = SelfAttention(dim)
         self.txt_mlp = nn.Sequential(
-            nn.Linear(hidden_size, mlp_hidden_dim),
+            nn.Linear(dim, mlp_dim),
             nn.GELU(approximate="tanh"),
-            nn.Linear(mlp_hidden_dim, hidden_size),
+            nn.Linear(mlp_dim, dim),
         )
 
     def forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor) -> tuple[Tensor, Tensor]:
@@ -152,13 +143,13 @@ class DoubleStreamBlock(nn.Module):
         txt_mod1, txt_mod2 = self.txt_mod(vec)
 
         # prepare image for attention
-        img_qkv = self.img_attn.qkv(modulate(self.img_norm1(img), img_mod1))
-        img_q, img_k, img_v = img_qkv.unflatten(2, (3 * self.num_heads, -1)).chunk(3, dim=2)
+        img_qkv = self.img_attn.qkv(modulate(self.norm(img), img_mod1))
+        img_q, img_k, img_v = img_qkv.unflatten(2, (-1, self.head_dim)).chunk(3, dim=2)
         img_q, img_k = self.img_attn.norm(img_q, img_k)
 
         # prepare txt for attention
-        txt_qkv = self.txt_attn.qkv(modulate(self.txt_norm1(txt), txt_mod1))
-        txt_q, txt_k, txt_v = txt_qkv.unflatten(2, (3 * self.num_heads, -1)).chunk(3, dim=2)
+        txt_qkv = self.txt_attn.qkv(modulate(self.norm(txt), txt_mod1))
+        txt_q, txt_k, txt_v = txt_qkv.unflatten(2, (-1, self.head_dim)).chunk(3, dim=2)
         txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k)
 
         # run actual attention
@@ -171,11 +162,11 @@ class DoubleStreamBlock(nn.Module):
 
         # calculate the img blocks
         img = img + img_mod1.gate * self.img_attn.proj(img_attn)
-        img = img + img_mod2.gate * self.img_mlp(modulate(self.img_norm2(img), img_mod2))
+        img = img + img_mod2.gate * self.img_mlp(modulate(self.norm(img), img_mod2))
 
         # calculate the txt blocks
         txt = txt + txt_mod1.gate * self.txt_attn.proj(txt_attn)
-        txt = txt + txt_mod2.gate * self.txt_mlp(modulate(self.txt_norm2(txt), txt_mod2))
+        txt = txt + txt_mod2.gate * self.txt_mlp(modulate(self.norm(txt), txt_mod2))
         return img, txt
 
 
@@ -185,29 +176,28 @@ class SingleStreamBlock(nn.Module):
     https://arxiv.org/abs/2302.05442 and adapted modulation interface.
     """
 
-    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float = 4.0, attn_impl: str = "pt") -> None:
+    def __init__(self, dim: int, mlp_ratio: float = 4.0, attn_impl: str = "pt") -> None:
         super().__init__()
-        self.hidden_size = hidden_size
-        self.num_heads = num_heads
+        self.dim = dim
         self.attn_impl = attn_impl
-        head_dim = hidden_size // num_heads
+        self.head_dim = 128
+        self.mlp_dim = int(dim * mlp_ratio)
 
-        self.mlp_hidden_dim = int(hidden_size * mlp_ratio)
-        self.linear1 = nn.Linear(hidden_size, hidden_size * 3 + self.mlp_hidden_dim)  # qkv and mlp_in
-        self.linear2 = nn.Linear(hidden_size + self.mlp_hidden_dim, hidden_size)  # proj and mlp_out
+        self.linear1 = nn.Linear(dim, dim * 3 + self.mlp_dim)  # qkv and mlp_in
+        self.linear2 = nn.Linear(dim + self.mlp_dim, dim)  # proj and mlp_out
 
-        self.norm = QKNorm(head_dim)
-        self.pre_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.norm = QKNorm(self.head_dim)
+        self.pre_norm = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
 
         self.mlp_act = nn.GELU(approximate="tanh")
-        self.modulation = Modulation(hidden_size, double=False)
+        self.modulation = Modulation(dim, double=False)
 
     def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
         mod, _ = self.modulation(vec)
         x_mod = modulate(self.pre_norm(x), mod)
-        qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1)
+        qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.dim, self.mlp_dim], dim=-1)
 
-        q, k, v = qkv.unflatten(2, (3 * self.num_heads, -1)).chunk(3, dim=2)
+        q, k, v = qkv.unflatten(2, (-1, self.head_dim)).chunk(3, dim=2)
         q, k = self.norm(q, k)
         q = apply_rope(q, pe)
         k = apply_rope(k, pe)
@@ -219,11 +209,11 @@ class SingleStreamBlock(nn.Module):
 
 
 class LastLayer(nn.Module):
-    def __init__(self, hidden_size: int, patch_size: int, out_channels: int) -> None:
+    def __init__(self, dim: int, patch_size: int, out_channels: int) -> None:
         super().__init__()
-        self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels)
-        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size))
+        self.norm_final = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
+        self.linear = nn.Linear(dim, patch_size * patch_size * out_channels)
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(dim, 2 * dim))
 
     def forward(self, x: Tensor, vec: Tensor) -> Tensor:
         shift, scale = self.adaLN_modulation(vec).chunk(2, dim=1)
@@ -240,12 +230,10 @@ class FluxConfig:
     context_in_dim: int = 4096
     hidden_size: int = 3072
     mlp_ratio: float = 4.0
-    num_heads: int = 24
     depth: int = 19
     depth_single_blocks: int = 38
     rope_dims: tuple[int, int, int] = (16, 56, 56)
     theta: float = 1e4
-    qkv_bias: bool = True
     guidance_embed: bool = True  # False for schnell
 
 
@@ -254,12 +242,6 @@ class Flux(nn.Module):
         super().__init__()
         cfg = cfg or FluxConfig()
         self.cfg = cfg
-        if cfg.hidden_size % cfg.num_heads != 0:
-            raise ValueError(f"Hidden size {cfg.hidden_size} must be divisible by num_heads {cfg.num_heads}")
-        pe_dim = cfg.hidden_size // cfg.num_heads
-        if sum(cfg.rope_dims) != pe_dim:
-            raise ValueError(f"Got {cfg.rope_dims} but expected positional dim {pe_dim}")
-
         self.img_in = nn.Linear(cfg.in_channels, cfg.hidden_size)
         self.time_in = MLPEmbedder(256, cfg.hidden_size)
         self.vector_in = MLPEmbedder(cfg.vec_in_dim, cfg.hidden_size)
@@ -267,10 +249,10 @@ class Flux(nn.Module):
         self.txt_in = nn.Linear(cfg.context_in_dim, cfg.hidden_size)
 
         self.double_blocks = nn.ModuleList(
-            [DoubleStreamBlock(cfg.hidden_size, cfg.num_heads, cfg.mlp_ratio, cfg.qkv_bias) for _ in range(cfg.depth)]
+            [DoubleStreamBlock(cfg.hidden_size, cfg.mlp_ratio) for _ in range(cfg.depth)]
         )
         self.single_blocks = nn.ModuleList(
-            [SingleStreamBlock(cfg.hidden_size, cfg.num_heads, cfg.mlp_ratio) for _ in range(cfg.depth_single_blocks)]
+            [SingleStreamBlock(cfg.hidden_size, cfg.mlp_ratio) for _ in range(cfg.depth_single_blocks)]
         )
         self.final_layer = LastLayer(cfg.hidden_size, 1, cfg.out_channels)
 
