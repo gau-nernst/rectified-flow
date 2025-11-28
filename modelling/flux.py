@@ -4,9 +4,9 @@
 
 import math
 from dataclasses import dataclass
-from typing import NamedTuple
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from .attn import dispatch_attn
@@ -58,60 +58,38 @@ class MLPEmbedder(nn.Sequential):
         self.out_layer = nn.Linear(hidden_dim, hidden_dim)
 
 
-class RMSNorm(nn.Module):
-    def __init__(self, dim: int) -> None:
-        super().__init__()
-        self.scale = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x: Tensor):
-        dtype = x.dtype
-        x = x.float()
-        x = x * torch.rsqrt(x.square().mean(-1, keepdim=True) + 1e-6)
-        return x.to(dtype) * self.scale
-
-
-class QKNorm(nn.Module):
-    def __init__(self, dim: int) -> None:
-        super().__init__()
-        self.query_norm = RMSNorm(dim)
-        self.key_norm = RMSNorm(dim)
-
-    def forward(self, q: Tensor, k: Tensor) -> tuple[Tensor, Tensor]:
-        return self.query_norm(q), self.key_norm(k)
+def fix_qk_norm_hook(module, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+    for k in list(state_dict.keys()):
+        if k.endswith(".norm.query_norm.scale"):
+            state_dict[k.replace(".norm.query_norm.scale", ".q_norm.weight")] = state_dict.pop(k)
+        elif k.endswith(".norm.key_norm.scale"):
+            state_dict[k.replace(".norm.key_norm.scale", ".k_norm.weight")] = state_dict.pop(k)
 
 
 class SelfAttention(nn.Module):
     def __init__(self, dim: int) -> None:
         super().__init__()
         self.qkv = nn.Linear(dim, dim * 3)
-        self.norm = QKNorm(128)
+        self.q_norm = nn.RMSNorm(128, eps=1e-6)
+        self.k_norm = nn.RMSNorm(128, eps=1e-6)
         self.proj = nn.Linear(dim, dim)
+        self.register_load_state_dict_pre_hook(fix_qk_norm_hook)
 
 
-class ModulationOut(NamedTuple):
-    shift: Tensor
-    scale: Tensor
-    gate: Tensor
-
-
-def modulate(x: Tensor, mod: ModulationOut) -> Tensor:
-    return (1.0 + mod.scale) * x + mod.shift
+def modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
+    x = F.layer_norm(x, x.shape[-1:], eps=1e-6)
+    return (1.0 + scale) * x + shift
 
 
 class Modulation(nn.Module):
     def __init__(self, dim: int, double: bool) -> None:
         super().__init__()
-        self.is_double = double
         self.multiplier = 6 if double else 3
         self.silu = nn.SiLU()
         self.lin = nn.Linear(dim, self.multiplier * dim)
 
-    def forward(self, vec: Tensor) -> tuple[ModulationOut, ModulationOut | None]:
-        out = self.lin(self.silu(vec))[:, None, :].chunk(self.multiplier, dim=-1)
-        return (
-            ModulationOut(*out[:3]),
-            ModulationOut(*out[3:]) if self.is_double else None,
-        )
+    def forward(self, vec: Tensor) -> tuple[Tensor, ...]:
+        return self.lin(self.silu(vec))[:, None, :].chunk(self.multiplier, dim=-1)
 
 
 class DoubleStreamBlock(nn.Module):
@@ -139,34 +117,32 @@ class DoubleStreamBlock(nn.Module):
         )
 
     def forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor) -> tuple[Tensor, Tensor]:
-        img_mod1, img_mod2 = self.img_mod(vec)
-        txt_mod1, txt_mod2 = self.txt_mod(vec)
+        img_shift1, img_scale1, img_gate1, img_shift2, img_scale2, img_gate2 = self.img_mod(vec)
+        txt_shift1, txt_scale1, txt_gate1, txt_shift2, txt_scale2, txt_gate2 = self.txt_mod(vec)
 
         # prepare image for attention
-        img_qkv = self.img_attn.qkv(modulate(self.norm(img), img_mod1))
+        img_qkv = self.img_attn.qkv(modulate(img, img_shift1, img_scale1))
         img_q, img_k, img_v = img_qkv.unflatten(2, (-1, self.head_dim)).chunk(3, dim=2)
-        img_q, img_k = self.img_attn.norm(img_q, img_k)
 
         # prepare txt for attention
-        txt_qkv = self.txt_attn.qkv(modulate(self.norm(txt), txt_mod1))
+        txt_qkv = self.txt_attn.qkv(modulate(txt, txt_shift1, txt_scale1))
         txt_q, txt_k, txt_v = txt_qkv.unflatten(2, (-1, self.head_dim)).chunk(3, dim=2)
-        txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k)
 
         # run actual attention
-        q = apply_rope(torch.cat((txt_q, img_q), dim=1), pe)
-        k = apply_rope(torch.cat((txt_k, img_k), dim=1), pe)
+        q = apply_rope(torch.cat((self.txt_attn.q_norm(txt_q), self.img_attn.q_norm(img_q)), dim=1), pe)
+        k = apply_rope(torch.cat((self.txt_attn.k_norm(txt_k), self.img_attn.k_norm(img_k)), dim=1), pe)
         v = torch.cat((txt_v, img_v), dim=1)
 
         attn = dispatch_attn(q, k, v, impl=self.attn_impl).flatten(2)
         txt_attn, img_attn = attn.split([txt.shape[1], img.shape[1]], dim=1)
 
         # calculate the img blocks
-        img = img + img_mod1.gate * self.img_attn.proj(img_attn)
-        img = img + img_mod2.gate * self.img_mlp(modulate(self.norm(img), img_mod2))
+        img = img + img_gate1 * self.img_attn.proj(img_attn)
+        img = img + img_gate2 * self.img_mlp(modulate(img, img_shift2, img_scale2))
 
         # calculate the txt blocks
-        txt = txt + txt_mod1.gate * self.txt_attn.proj(txt_attn)
-        txt = txt + txt_mod2.gate * self.txt_mlp(modulate(self.norm(txt), txt_mod2))
+        txt = txt + txt_gate1 * self.txt_attn.proj(txt_attn)
+        txt = txt + txt_gate2 * self.txt_mlp(modulate(txt, txt_shift2, txt_scale2))
         return img, txt
 
 
@@ -186,40 +162,37 @@ class SingleStreamBlock(nn.Module):
         self.linear1 = nn.Linear(dim, dim * 3 + self.mlp_dim)  # qkv and mlp_in
         self.linear2 = nn.Linear(dim + self.mlp_dim, dim)  # proj and mlp_out
 
-        self.norm = QKNorm(self.head_dim)
-        self.pre_norm = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
+        self.q_norm = nn.RMSNorm(self.head_dim, eps=1e-6)
+        self.k_norm = nn.RMSNorm(self.head_dim, eps=1e-6)
+        self.register_load_state_dict_pre_hook(fix_qk_norm_hook)
 
         self.mlp_act = nn.GELU(approximate="tanh")
         self.modulation = Modulation(dim, double=False)
 
     def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
-        mod, _ = self.modulation(vec)
-        x_mod = modulate(self.pre_norm(x), mod)
+        shift, scale, gate = self.modulation(vec)
+        x_mod = modulate(x, shift, scale)
         qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.dim, self.mlp_dim], dim=-1)
 
         q, k, v = qkv.unflatten(2, (-1, self.head_dim)).chunk(3, dim=2)
-        q, k = self.norm(q, k)
-        q = apply_rope(q, pe)
-        k = apply_rope(k, pe)
+        q = apply_rope(self.q_norm(q), pe)
+        k = apply_rope(self.k_norm(k), pe)
         attn = dispatch_attn(q, k, v, impl=self.attn_impl).flatten(2)
 
         # compute activation in mlp stream, cat again and run second linear layer
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
-        return x + mod.gate * output
+        return x + gate * output
 
 
 class LastLayer(nn.Module):
     def __init__(self, dim: int, patch_size: int, out_channels: int) -> None:
         super().__init__()
-        self.norm_final = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.linear = nn.Linear(dim, patch_size * patch_size * out_channels)
         self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(dim, 2 * dim))
 
     def forward(self, x: Tensor, vec: Tensor) -> Tensor:
-        shift, scale = self.adaLN_modulation(vec).chunk(2, dim=1)
-        x = (1 + scale[:, None, :]) * self.norm_final(x) + shift[:, None, :]
-        x = self.linear(x)
-        return x
+        shift, scale = self.adaLN_modulation(vec)[:, None, :].chunk(2, dim=-1)
+        return self.linear(modulate(x, shift, scale))
 
 
 @dataclass
