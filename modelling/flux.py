@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from .attn import dispatch_attn
-from .utils import load_hf_state_dict
+from .utils import create_name_map_hook, load_hf_state_dict
 
 
 def rope(pos: Tensor, dim: int, theta: float = 1e4) -> Tensor:
@@ -32,7 +32,7 @@ def apply_rope(x: Tensor, freqs_cis: Tensor) -> Tensor:
     return out.reshape(x.shape).type_as(x)
 
 
-def timestep_embedding(t: Tensor, dim: int, max_period: float = 10000.0, time_factor: float = 1000.0):
+def timestep_embedding(t: Tensor, dim: int, max_period: float = 10_000.0, time_factor: float = 1000.0):
     """
     Create sinusoidal timestep embeddings.
     :param t: a 1-D Tensor of N indices, one per batch element. These may be fractional.
@@ -42,7 +42,7 @@ def timestep_embedding(t: Tensor, dim: int, max_period: float = 10000.0, time_fa
     """
     t = time_factor * t.float()
     half = dim // 2
-    freqs = torch.exp(-(math.log(max_period) / half) * torch.arange(0, half, dtype=torch.float32, device=t.device))
+    freqs = torch.exp(-math.log(max_period) / half * torch.arange(half, dtype=torch.float32, device=t.device))
     args = t[:, None].float() * freqs[None]
     embedding = torch.cat([args.cos(), args.sin()], dim=-1)
     if dim % 2:
@@ -58,14 +58,6 @@ class MLPEmbedder(nn.Sequential):
         self.out_layer = nn.Linear(hidden_dim, hidden_dim)
 
 
-def fix_qk_norm_hook(module, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
-    for k in list(state_dict.keys()):
-        if k.endswith(".norm.query_norm.scale"):
-            state_dict[k.replace(".norm.query_norm.scale", ".q_norm.weight")] = state_dict.pop(k)
-        elif k.endswith(".norm.key_norm.scale"):
-            state_dict[k.replace(".norm.key_norm.scale", ".k_norm.weight")] = state_dict.pop(k)
-
-
 class SelfAttention(nn.Module):
     def __init__(self, dim: int) -> None:
         super().__init__()
@@ -73,7 +65,11 @@ class SelfAttention(nn.Module):
         self.q_norm = nn.RMSNorm(128, eps=1e-6)
         self.k_norm = nn.RMSNorm(128, eps=1e-6)
         self.proj = nn.Linear(dim, dim)
-        self.register_load_state_dict_pre_hook(fix_qk_norm_hook)
+        remap_pairs = [
+            ("norm.query_norm.scale", "q_norm.weight"),
+            ("norm.key_norm.scale", "k_norm.weight"),
+        ]
+        self.register_load_state_dict_pre_hook(create_name_map_hook(remap_pairs))
 
 
 def modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
@@ -164,10 +160,15 @@ class SingleStreamBlock(nn.Module):
 
         self.q_norm = nn.RMSNorm(self.head_dim, eps=1e-6)
         self.k_norm = nn.RMSNorm(self.head_dim, eps=1e-6)
-        self.register_load_state_dict_pre_hook(fix_qk_norm_hook)
 
         self.mlp_act = nn.GELU(approximate="tanh")
         self.modulation = Modulation(dim, double=False)
+
+        remap_pairs = [
+            ("norm.query_norm.scale", "q_norm.weight"),
+            ("norm.key_norm.scale", "k_norm.weight"),
+        ]
+        self.register_load_state_dict_pre_hook(create_name_map_hook(remap_pairs))
 
     def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
         shift, scale, gate = self.modulation(vec)

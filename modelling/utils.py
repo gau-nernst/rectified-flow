@@ -29,3 +29,12 @@ def load_hf_state_dict(repo_id: str, filename: str, prefix: str | None = None):
     if prefix is not None:
         state_dict = {k.removeprefix(prefix): v for k, v in state_dict.items() if k.startswith(prefix)}
     return state_dict
+
+
+def create_name_map_hook(pairs: list[tuple[str, str]]):
+    def hook(module, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        for old, new in pairs:
+            if f"{prefix}{old}" in state_dict:
+                state_dict[f"{prefix}{new}"] = state_dict.pop(f"{prefix}{old}")
+
+    return hook
