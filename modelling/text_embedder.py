@@ -2,7 +2,7 @@
 
 import torch
 from torch import Tensor, nn
-from transformers import AutoTokenizer, CLIPTextModel, CLIPTextModelWithProjection, T5EncoderModel, UMT5EncoderModel
+from transformers import AutoTokenizer, CLIPTextModel, T5EncoderModel, UMT5EncoderModel
 from transformers.modeling_utils import PreTrainedModel
 from transformers.tokenization_utils import PreTrainedTokenizer
 
@@ -74,7 +74,7 @@ def load_t5(max_length: int = 512) -> TextEmbedder:
 def load_clip_l(output_key: str | int | list[str | int] = "pooler_output") -> TextEmbedder:
     # NOTE: OpenAI CLIP weights use FP16 for Linear, and FP32 for the rest (Embeddings, LayerNorm, pos_embed, ...)
     # but Flux loads it in BF16. TODO: investigate FP16 vs BF16
-    # NOTE: FLUX only uses pooler_output. SD3/3.5 use pooler_output and hidden_states[-2]
+    # NOTE: FLUX only uses pooler_output
     # NOTE: use weights from Stability AI to reduce download time, since it is FP16 and doesn't include ViT's weights.
     model = CLIPTextModel.from_pretrained(
         "stabilityai/stable-diffusion-3.5-large",
@@ -83,19 +83,6 @@ def load_clip_l(output_key: str | int | list[str | int] = "pooler_output") -> Te
     )
     tokenizer = AutoTokenizer.from_pretrained("openai/clip-vit-large-patch14")
     return TextEmbedder(model, tokenizer, 77, output_key)
-
-
-def load_openclip_bigg() -> TextEmbedder:
-    # not sure which dtype was used for training
-    # NOTE: use weights from Stability AI to reduce download time, since it is FP16 and doesn't include ViT's weights.
-    # NOTE: SD3 uses this model with the projection layer
-    model = CLIPTextModelWithProjection.from_pretrained(
-        "stabilityai/stable-diffusion-3.5-large",
-        torch_dtype=torch.float16,
-        subfolder="text_encoder_2",
-    )
-    tokenizer = AutoTokenizer.from_pretrained("laion/CLIP-ViT-bigG-14-laion2B-39B-b160k")
-    return TextEmbedder(model, tokenizer, 77, ["text_embeds", -2])
 
 
 def load_umt5_xxl() -> TextEmbedder:

@@ -4,7 +4,7 @@ import torch
 from torch import Tensor
 from tqdm import tqdm
 
-from modelling import AutoEncoder, Flux, load_clip_l, load_flux, load_flux_autoencoder, load_t5
+from modelling import AutoEncoder, Flux, load_autoencoder, load_clip_l, load_flux, load_t5
 from offload import PerLayerOffloadCUDAStream
 from solvers import get_solver
 
@@ -63,7 +63,7 @@ def prepare_inputs(
 class FluxGenerator:
     def __init__(self, flux: Flux | None = None, offload_flux: bool = False, offload_t5: bool = False) -> None:
         self.flux = flux or load_flux()  # 23.8 GB in BF16
-        self.ae = load_flux_autoencoder()  # 168 MB in BF16
+        self.ae = load_autoencoder("flux").bfloat16()  # 168 MB in BF16
         self.text_embedder = FluxTextEmbedder(offload_t5)
 
         # autoencoder and clip are small, don't need to offload

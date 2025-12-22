@@ -3,12 +3,10 @@
 Supported models:
 
 - [FLUX.1-dev](https://huggingface.co/black-forest-labs/FLUX.1-dev) and its derivatives: [Flex.1-alpha](https://huggingface.co/ostris/Flex.1-alpha)
-- [FLUX.1-Redux-dev](https://huggingface.co/black-forest-labs/FLUX.1-Redux-dev)
-- SD3.5 [medium](https://huggingface.co/stabilityai/stable-diffusion-3.5-medium) and [large](https://huggingface.co/stabilityai/stable-diffusion-3.5-large) (looks like it's broken at the moment)
 - Wan2.2 (WIP)
   - Wan2.2-TI2V-5B: T2V and I2V
   - Wan2.2-T2V-A14B and Wan2.2-I2V-A14B: WIP
-- Qwen-Image (WIP)
+- Z-Image (WIP)
 
 Supported features:
 
@@ -18,7 +16,6 @@ Supported features:
 - INT8 matmul (2x inference speedup for consumer cards).
 - Single-GPU model offloading for inference and training.
 - Solvers: Euler, [DPM-Solver++(2M)](https://arxiv.org/abs/2211.01095), [UniPC](https://arxiv.org/abs/2302.04867)
-- Skip-layer guidance for SD3.5 medium.
 
 ```bash
 uv venv --python=3.12 --managed-python

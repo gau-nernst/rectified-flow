@@ -8,7 +8,6 @@ from PIL import Image
 from tqdm import tqdm
 
 from infer_flux import FluxGenerator
-from infer_sd3 import SD3Generator, SkipLayerConfig
 
 if __name__ == "__main__":
 
@@ -32,9 +31,6 @@ if __name__ == "__main__":
     if args.model == "flux-dev":
         gen = FluxGenerator(offload_flux=True, offload_t5=True)
         extra_kwargs = dict()
-    elif args.model == "sd3.5-medium":
-        gen = SD3Generator(offload_t5=True)
-        extra_kwargs = dict(slg_config=SkipLayerConfig(scale=0.2))  # default for sd3.5-medium
     else:
         raise ValueError(f"{args.model=}")
     gen.cuda()

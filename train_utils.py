@@ -9,15 +9,11 @@ from torch.utils.checkpoint import checkpoint
 from torchvision.transforms import v2
 
 from infer_flux import FluxTextEmbedder
-from infer_sd3 import SD3TextEmbedder
 from modelling import (
-    SD3,
     Flux,
     LoRALinear,
+    load_autoencoder,
     load_flux,
-    load_flux_autoencoder,
-    load_sd3_5,
-    load_sd3_autoencoder,
 )
 from offload import PerLayerOffloadWithBackward
 from time_sampler import TimeSampler
@@ -28,15 +24,8 @@ def setup_model(model_name: str, offload: bool, lora: int, use_compile: bool, in
         model = load_flux(model_name)
         layers = list(model.double_blocks) + list(model.single_blocks)
 
-        ae = load_flux_autoencoder()
+        ae = load_autoencoder("flux")
         text_embedder = FluxTextEmbedder(offload_t5=True)
-
-    elif model_name in ("sd3.5-medium", "sd3.5-large"):
-        model = load_sd3_5(model_name.removeprefix("sd3.5-"))
-        layers = list(model.joint_blocks)
-
-        ae = load_sd3_autoencoder()
-        text_embedder = SD3TextEmbedder(offload_t5=True)
 
     else:
         raise ValueError(f"Unsupported {model_name=}")
@@ -60,7 +49,7 @@ def setup_model(model_name: str, offload: bool, lora: int, use_compile: bool, in
 
 
 def compute_loss(
-    model: Flux | SD3,
+    model: Flux,
     latents: Tensor,
     embeds: Tensor,
     vecs: Tensor,

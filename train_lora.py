@@ -22,8 +22,7 @@ from torch.utils.data import DataLoader, IterableDataset, default_collate, get_w
 from tqdm import tqdm
 
 from infer_flux import FluxTextEmbedder, flux_generate, flux_timesteps
-from infer_sd3 import SD3TextEmbedder, sd3_generate, sd3_timesteps
-from modelling import SD3, AutoEncoder, Flux
+from modelling import AutoEncoder, Flux
 from time_sampler import LogitNormal, Uniform
 from train_utils import EMA, compute_loss, parse_img_size, random_resize, setup_model
 
@@ -103,9 +102,9 @@ class ImageDataset(IterableDataset):
 
 @torch.no_grad()
 def save_images(
-    model: Flux | SD3,
+    model: Flux,
     ae: AutoEncoder,
-    text_embedder: FluxTextEmbedder | SD3TextEmbedder,
+    text_embedder: FluxTextEmbedder,
     prompt_path: str,
     save_dir: Path,
     img_size: tuple[int, int],
@@ -151,21 +150,8 @@ def save_images(
                     save_path = save_dir / f"{offset + img_idx:04d}_{guidance}-{cfg_scale}.webp"
                     Image.fromarray(imgs[img_idx].numpy()).save(save_path, lossless=True)
 
-        elif isinstance(model, SD3):
-            timesteps = sd3_timesteps()
-            latents = sd3_generate(
-                model,
-                noise,
-                timesteps,
-                embeds,
-                vecs,
-                neg_embeds.expand_as(embeds),
-                neg_vecs.expand_as(vecs),
-            )
-            imgs = ae.decode(latents, uint8=True).permute(0, 2, 3, 1).cpu()
-            for img_idx in range(imgs.shape[0]):
-                save_path = save_dir / f"{offset + img_idx:04d}.webp"
-                Image.fromarray(imgs[img_idx].numpy()).save(save_path, lossless=True)
+        else:
+            raise ValueError
 
 
 if __name__ == "__main__":

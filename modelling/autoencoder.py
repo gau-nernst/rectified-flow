@@ -273,7 +273,7 @@ class AutoEncoder(nn.Module):
         return self.decode(self.encode(x, sample), x.dtype == torch.uint8)
 
 
-def load_autoencoder(
+def _load_autoencoder(
     repo_id: str,
     filename: str,
     scale_factor: float,
@@ -293,34 +293,16 @@ def load_autoencoder(
     return ae
 
 
-def load_flux_autoencoder():
-    # original weight is FP32
-    return load_autoencoder(
-        "black-forest-labs/FLUX.1-dev",
-        "ae.safetensors",
-        scale_factor=0.3611,
-        shift_factor=0.1159,
-    ).bfloat16()
+def load_autoencoder(name: str):
+    repo_id, filename, scale_factor, shift_factor, prefix = dict(
+        # original weight is FP32
+        flux=(
+            "black-forest-labs/FLUX.1-dev",
+            "ae.safetensors",
+            0.3611,
+            0.1159,
+            None,
+        ),
+    )[name]
 
-
-def load_sd3_autoencoder():
-    # official SD3.5 inference code uses FP16 VAE, even though the provided weights are in BF16
-    # https://github.com/Stability-AI/sd3.5/blob/fbf8f483f992d8d6ad4eaaeb23b1dc5f523c3b3a/sd3_infer.py#L195-L202
-    return load_autoencoder(
-        "stabilityai/stable-diffusion-3.5-medium",
-        "sd3.5_medium.safetensors",
-        # https://github.com/Stability-AI/sd3.5/blob/fbf8f483f992d8d6ad4eaaeb23b1dc5f523c3b3a/sd3_impls.py#L275-L276
-        scale_factor=1.5305,
-        shift_factor=0.0609,
-        prefix="first_stage_model.",
-    )
-
-
-def load_sdxl_autoencoder():
-    return load_autoencoder(
-        "stabilityai/stable-diffusion-xl-base-1.0",
-        "sd_xl_base_1.0_0.9vae.safetensors",
-        scale_factor=0.13025,
-        shift_factor=0.0,
-        prefix="first_stage_model.",
-    )
+    return _load_autoencoder(repo_id, filename, scale_factor, shift_factor, prefix)
