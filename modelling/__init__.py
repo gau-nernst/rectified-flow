@@ -12,3 +12,4 @@ from .sd3 import SD3, load_sd3_5
 from .text_embedder import TextEmbedder, load_clip_l, load_openclip_bigg, load_t5, load_umt5_xxl
 from .utils import load_hf_state_dict
 from .wan import WanConfig, WanModel, WanVAE, WanVAEConfig, load_wan, load_wan_vae
+from .z_image import ZImage, ZImageConfig, load_zimage
