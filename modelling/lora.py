@@ -2,7 +2,10 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from gn_kernels import triton_mm
+try:
+    from gn_kernels import triton_mm
+except ImportError:
+    pass
 
 
 def quantize_row_wise(x: Tensor):

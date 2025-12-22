@@ -2,7 +2,11 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from gn_kernels import attn_int8_qk, attn_mxfp8_qk, quantize_mx, triton_attn
+try:
+    from gn_kernels import attn_int8_qk, attn_mxfp8_qk, quantize_mx, triton_attn
+
+except ImportError:
+    pass
 
 
 def dispatch_attn(q: Tensor, k: Tensor, v: Tensor, impl: str = "pt") -> Tensor:
