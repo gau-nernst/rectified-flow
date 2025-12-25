@@ -21,8 +21,8 @@ from PIL import Image, ImageOps
 from torch.utils.data import DataLoader, IterableDataset, default_collate, get_worker_info
 from tqdm import tqdm
 
-from infer_flux import FluxTextEmbedder, flux_generate, flux_timesteps
 from modelling import AutoEncoder, Flux
+from modelling.flux.pipeline import FluxTextEmbedder, flux_generate, flux_timesteps
 from time_sampler import LogitNormal, Uniform
 from train_utils import EMA, compute_loss, parse_img_size, random_resize, setup_model
 

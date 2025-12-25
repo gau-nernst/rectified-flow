@@ -2,9 +2,11 @@ import torch
 from torch import Tensor
 from tqdm import tqdm
 
-from modelling import TextEmbedder, WanModel, WanVAEConfig, load_umt5_xxl, load_wan, load_wan_vae
-from offload import PerLayerOffloadCUDAStream
-from solvers import get_solver
+from ..offload import PerLayerOffloadCUDAStream
+from ..solvers import get_solver
+from ..text_embedder import TextEmbedder, load_umt5_xxl
+from .model import WanModel, load_wan
+from .vae import WanVAEConfig, load_wan_vae
 
 NEGATIVE_PROMPT = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
 

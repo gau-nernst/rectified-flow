@@ -4,9 +4,11 @@ import torch
 from torch import Tensor
 from tqdm import tqdm
 
-from modelling import AutoEncoder, Flux, load_autoencoder, load_clip_l, load_flux, load_t5
-from offload import PerLayerOffloadCUDAStream
-from solvers import get_solver
+from ..autoencoder import AutoEncoder, load_autoencoder
+from ..offload import PerLayerOffloadCUDAStream
+from ..solvers import get_solver
+from ..text_embedder import load_clip_l, load_t5
+from .model import Flux, load_flux
 
 
 class FluxTextEmbedder:

@@ -6,9 +6,9 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from .attn import dispatch_attn
-from .flux import timestep_embedding
-from .utils import Linear, load_hf_state_dict, make_merge_hook
+from ..attn import dispatch_attn
+from ..flux.model import timestep_embedding
+from ..utils import Linear, load_hf_state_dict, make_merge_hook
 
 
 class FinalLayer(nn.Module):

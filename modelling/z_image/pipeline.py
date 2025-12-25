@@ -5,8 +5,9 @@ from torch import Tensor, nn
 from tqdm import tqdm
 from transformers import AutoTokenizer, PreTrainedTokenizer, Qwen3Model
 
-from modelling import ZImage, load_autoencoder, load_zimage
-from solvers import get_solver
+from ..autoencoder import load_autoencoder
+from ..solvers import get_solver
+from .model import ZImage, load_zimage
 
 
 class ZImagePipeline:

@@ -9,8 +9,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from .attn import dispatch_attn
-from .utils import create_name_map_hook, load_hf_state_dict
+from ..attn import dispatch_attn
+from ..utils import create_name_map_hook, load_hf_state_dict
 
 
 def rope(pos: Tensor, dim: int, theta: float = 1e4) -> Tensor:
