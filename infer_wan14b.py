@@ -3,12 +3,12 @@ from torch import Tensor
 from tqdm import tqdm
 
 from infer_wan5b import NEGATIVE_PROMPT, prepare_inputs, wan_timesteps
-from modelling import TextEmbedder, WanModel, WanVAEConfig, load_umt5_xxl, load_wan, load_wan_vae
+from modelling import WanModel, load_umt5_xxl, load_wan, load_wan_vae
 from offload import PerLayerOffloadCUDAStream
 from solvers import get_solver
 
 
-class Wan14BGenerator:
+class Wan14BPipeline:
     def __init__(self, offload_wan: bool = False, offload_umt5: bool = False) -> None:
         self.wan_high = load_wan("wan2.2-t2v-a14b-high")
         self.wan_low = load_wan("wan2.2-t2v-a14b-low")
@@ -122,7 +122,7 @@ if __name__ == "__main__":
     fps = 16  # Wan2.2-5B is 24. Wan2.2-14B is 16
     num_frames = int(args.duration * fps) // 4 * 4 + 1
 
-    gen = Wan14BGenerator(offload_wan=True, offload_umt5=True)
+    gen = Wan14BPipeline(offload_wan=True, offload_umt5=True)
     gen.cuda()
 
     # [3, T, H, W]

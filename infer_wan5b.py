@@ -41,7 +41,7 @@ def prepare_inputs(
     return noise, txt_embeds, neg_txt_embeds
 
 
-class Wan5BGenerator:
+class Wan5BPipeline:
     def __init__(self, offload_wan: bool = False, offload_umt5: bool = False) -> None:
         self.wan = load_wan("wan2.2-ti2v-5b").bfloat16()
         self.vae = load_wan_vae("2.2")
@@ -175,7 +175,7 @@ if __name__ == "__main__":
     fps = 24  # Wan2.2-5B is 24. Wan2.2-14B is 16
     num_frames = int(args.duration * fps) // 4 * 4 + 1
 
-    gen = Wan5BGenerator(offload_wan=True, offload_umt5=True)
+    gen = Wan5BPipeline(offload_wan=True, offload_umt5=True)
     gen.cuda()
 
     if args.input_img is not None:

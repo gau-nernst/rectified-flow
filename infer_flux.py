@@ -47,7 +47,7 @@ def prepare_inputs(
         height = width = img_size
     else:
         height, width = img_size
-    shape = (bsize, ae.z_dim, height // 8, width // 8)
+    shape = (bsize, ae.z_dim, height // ae.downsample, width // ae.downsample)
     device = ae.encoder.conv_in.weight.device
 
     # keep latents in FP32 for accurate .lerp()
@@ -60,7 +60,7 @@ def prepare_inputs(
     return latents, embeds, vecs, neg_embeds, neg_vecs
 
 
-class FluxGenerator:
+class FluxPipeline:
     def __init__(self, flux: Flux | None = None, offload_flux: bool = False, offload_t5: bool = False) -> None:
         self.flux = flux or load_flux()  # 23.8 GB in BF16
         self.ae = load_autoencoder("flux").bfloat16()  # 168 MB in BF16
@@ -86,7 +86,6 @@ class FluxGenerator:
         negative_prompt: str | list[str] = "",
         img_size: int | tuple[int, int] = 512,
         latents: Tensor | None = None,
-        extra_embeds: Tensor | None = None,
         denoise: float = 1.0,
         guidance: Tensor | float | None = 3.5,
         cfg_scale: float = 1.0,
@@ -105,10 +104,6 @@ class FluxGenerator:
             denoise,
             seed,
         )
-
-        if extra_embeds is not None:  # e.g. Flux-Redux
-            embeds = torch.cat([embeds, extra_embeds], dim=1)
-            # NOTE: neg_embeds are not extended
 
         # denoise from t=1 (noise) to t=0 (latents)
         # divide by 4 due to FLUX's input patchification

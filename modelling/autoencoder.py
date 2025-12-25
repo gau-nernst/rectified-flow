@@ -142,6 +142,7 @@ class Encoder(nn.Module):
         h = self.mid.block_1(h)
         h = self.mid.attn_1(h)
         h = self.mid.block_2(h)
+
         # end
         h = self.norm_out(h)
         h = self.swish(h)
@@ -226,30 +227,31 @@ def diagonal_gaussian(z: Tensor, sample: bool) -> Tensor:
 
 
 class AutoEncoder(nn.Module):
-    def __init__(self, config: AutoEncoderConfig | None = None) -> None:
+    def __init__(self, cfg: AutoEncoderConfig | None = None) -> None:
         super().__init__()
-        config = config or AutoEncoderConfig()
+        cfg = cfg or AutoEncoderConfig()
         self.encoder = Encoder(
-            config.in_ch,
-            config.ch,
-            config.ch_mult,
-            config.num_res_blocks,
-            config.z_channels,
+            cfg.in_ch,
+            cfg.ch,
+            cfg.ch_mult,
+            cfg.num_res_blocks,
+            cfg.z_channels,
         )
         self.decoder = Decoder(
-            config.ch,
-            config.out_ch,
-            config.ch_mult,
-            config.num_res_blocks,
-            config.z_channels,
+            cfg.ch,
+            cfg.out_ch,
+            cfg.ch_mult,
+            cfg.num_res_blocks,
+            cfg.z_channels,
         )
 
-        self.z_dim = config.z_channels
-        self.quant_conv = nn.Conv2d(2 * self.z_dim, 2 * self.z_dim, 1) if config.quant_conv else nn.Identity()
-        self.post_quant_conv = nn.Conv2d(self.z_dim, self.z_dim, 1) if config.quant_conv else nn.Identity()
+        self.z_dim = cfg.z_channels
+        self.downsample = int(2 ** (len(cfg.ch_mult) - 1))
+        self.quant_conv = nn.Conv2d(2 * self.z_dim, 2 * self.z_dim, 1) if cfg.quant_conv else nn.Identity()
+        self.post_quant_conv = nn.Conv2d(self.z_dim, self.z_dim, 1) if cfg.quant_conv else nn.Identity()
 
-        self.scale_factor = config.scale_factor
-        self.shift_factor = config.shift_factor
+        self.scale_factor = cfg.scale_factor
+        self.shift_factor = cfg.shift_factor
 
     def encode(self, x: Tensor, sample: bool = False) -> Tensor:
         if x.dtype == torch.uint8:
