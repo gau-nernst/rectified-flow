@@ -2,7 +2,9 @@ import json
 
 import safetensors.torch
 import torch
+import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
+from torch import Tensor, nn
 
 
 def load_hf_state_dict(repo_id: str, filename: str, prefix: str | None = None):
@@ -38,3 +40,28 @@ def create_name_map_hook(pairs: list[tuple[str, str]]):
                 state_dict[f"{prefix}{new}"] = state_dict.pop(f"{prefix}{old}")
 
     return hook
+
+
+def make_merge_hook(old_keys: list[str], new_key: str):
+    def hook(module, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        if f"{prefix}{old_keys[0]}.weight" not in state_dict:
+            return
+        w_list = [state_dict.pop(f"{prefix}{key}.weight") for key in old_keys]
+        state_dict[f"{prefix}{new_key}.weight"] = torch.cat(w_list, dim=0)
+
+    return hook
+
+
+class Linear(nn.Linear):
+    """Mimic autocast logic (kinda)"""
+
+    def forward(self, x: Tensor) -> Tensor:
+        return F.linear(x.to(self.weight.dtype), self.weight, self.bias)
+
+
+class FP32Linear(nn.Linear):
+    """Mimic torch.autocast(dtype=torch.float32) behavior"""
+
+    def forward(self, x: Tensor) -> Tensor:
+        bias = self.bias.float() if self.bias is not None else None
+        return F.linear(x.float(), self.weight.float(), bias)

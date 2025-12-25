@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..attn import dispatch_attn
-from ..utils import load_hf_state_dict
+from ..utils import FP32Linear, Linear, load_hf_state_dict
 
 
 def sinusoidal_embedding_1d(dim: int, position: Tensor, theta: float = 1e4) -> Tensor:
@@ -77,21 +77,6 @@ class LayerNorm(nn.LayerNorm):
             weight = None
             bias = None
         return F.layer_norm(x.float(), self.normalized_shape, weight, bias, self.eps).to(x.dtype)
-
-
-class Linear(nn.Linear):
-    """Mimic autocast logic (kinda)"""
-
-    def forward(self, x: Tensor) -> Tensor:
-        return F.linear(x.to(self.weight.dtype), self.weight, self.bias)
-
-
-class FP32Linear(nn.Linear):
-    """Mimic torch.autocast(dtype=torch.float32) behavior"""
-
-    def forward(self, x: Tensor) -> Tensor:
-        bias = self.bias.float() if self.bias is not None else None
-        return F.linear(x.float(), self.weight.float(), bias)
 
 
 class WanSelfAttention(nn.Module):

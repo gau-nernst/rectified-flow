@@ -6,7 +6,7 @@ Supported models:
 - Wan2.2 (WIP)
   - Wan2.2-TI2V-5B: T2V and I2V
   - Wan2.2-T2V-A14B and Wan2.2-I2V-A14B: WIP
-- Z-Image (WIP)
+- [Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo)
 
 Supported features:
 
