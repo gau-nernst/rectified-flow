@@ -7,7 +7,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # improve me
 from PIL import Image
 from tqdm import tqdm
 
-from infer_flux import FluxPipeline
+from modelling import FluxPipeline
 
 if __name__ == "__main__":
 
