@@ -10,7 +10,7 @@ from torch import Tensor, nn
 
 from ..attn import dispatch_attn
 from ..rope import RopeND, apply_rope
-from ..utils import FP32Linear, Linear, load_hf_state_dict
+from ..utils import FP32LayerNorm, FP32Linear, Linear, load_hf_state_dict
 
 
 def sinusoidal_embedding_1d(dim: int, position: Tensor, theta: float = 1e4) -> Tensor:
@@ -26,34 +26,6 @@ def sinusoidal_embedding_1d(dim: int, position: Tensor, theta: float = 1e4) -> T
     return x.float()
 
 
-class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-5) -> None:
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim))
-        self.eps = eps
-
-    def _norm(self, x: Tensor) -> Tensor:
-        x_f32 = x.float()
-        out = x_f32 * torch.rsqrt(x_f32.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        return out.to(x.dtype)
-
-    def forward(self, x: Tensor):
-        return self._norm(x) * self.weight
-
-
-class LayerNorm(nn.LayerNorm):
-    """nn.LayerNorm doesn't work if x is FP32 and weight/bias is BF16"""
-
-    def forward(self, x: Tensor):
-        if self.elementwise_affine:
-            weight = self.weight.float()
-            bias = self.bias.float()
-        else:
-            weight = None
-            bias = None
-        return F.layer_norm(x.float(), self.normalized_shape, weight, bias, self.eps).to(x.dtype)
-
-
 class WanSelfAttention(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6) -> None:
         super().__init__()
@@ -62,8 +34,8 @@ class WanSelfAttention(nn.Module):
         self.k = Linear(dim, dim)
         self.v = Linear(dim, dim)
         self.o = Linear(dim, dim)
-        self.norm_q = RMSNorm(dim, eps=eps)
-        self.norm_k = RMSNorm(dim, eps=eps)
+        self.norm_q = nn.RMSNorm(dim, eps=eps)
+        self.norm_k = nn.RMSNorm(dim, eps=eps)
 
     def forward(self, x: Tensor, rope: Tensor) -> Tensor:
         # x: [B, L, D]
@@ -91,26 +63,18 @@ class WanCrossAttention(WanSelfAttention):
 
 def modulate(x: Tensor, scale: Tensor, bias: Tensor) -> Tensor:
     """NOTE: this always returns FP32"""
-    return x.float() * (1.0 + scale.float()) + bias.float()
+    x = F.layer_norm(x.float(), x.shape[-1:], eps=1e-6)
+    return (1.0 + scale.float()) * x + bias.float()
 
 
 class WanAttentionBlock(nn.Module):
     def __init__(self, dim: int, ffn_dim: int, eps: float = 1e-6) -> None:
         super().__init__()
-        self.norm1 = LayerNorm(dim, eps, elementwise_affine=False)
-        self.self_attn = WanSelfAttention(dim, eps)
-
-        self.norm3 = LayerNorm(dim, eps, elementwise_affine=True)
-        self.cross_attn = WanCrossAttention(dim, eps)
-
-        self.norm2 = LayerNorm(dim, eps, elementwise_affine=False)
-        self.ffn = nn.Sequential(
-            Linear(dim, ffn_dim),
-            nn.GELU(approximate="tanh"),
-            Linear(ffn_dim, dim),
-        )
-
         self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
+        self.self_attn = WanSelfAttention(dim, eps=eps)
+        self.norm3 = FP32LayerNorm(dim, eps=eps)
+        self.cross_attn = WanCrossAttention(dim, eps=eps)
+        self.ffn = nn.Sequential(Linear(dim, ffn_dim), nn.GELU(approximate="tanh"), Linear(ffn_dim, dim))
 
     def forward(self, x: Tensor, e: Tensor, rope: Tensor, c: Tensor) -> Tensor:
         # x: [B, L, C]
@@ -119,9 +83,9 @@ class WanAttentionBlock(nn.Module):
         b0, s0, s1, b2, s2, s3 = (self.modulation.unsqueeze(0) + e).unbind(2)
 
         # x will become FP32 since e is FP32
-        x = x + self.self_attn(modulate(self.norm1(x), s0, b0), rope) * s1
+        x = x + self.self_attn(modulate(x, s0, b0), rope) * s1
         x = x + self.cross_attn(self.norm3(x), c)
-        x = x + self.ffn(modulate(self.norm2(x), s2, b2)) * s3
+        x = x + self.ffn(modulate(x, s2, b2)) * s3
         return x
 
 
@@ -129,16 +93,15 @@ class Head(nn.Module):
     def __init__(self, dim: int, out_dim: int, patch_size: tuple[int, int, int], eps: float = 1e-6) -> None:
         super().__init__()
         out_dim = math.prod(patch_size) * out_dim
-        self.norm = LayerNorm(dim, eps, elementwise_affine=False)
-        self.head = FP32Linear(dim, out_dim)
         self.modulation = nn.Parameter(torch.randn(1, 2, dim) / dim**0.5)
+        self.head = FP32Linear(dim, out_dim)
 
     def forward(self, x: Tensor, e: Tensor) -> Tensor:
         # x: [B, L, C]
         # e: [B, L, C]
         assert e.dtype == torch.float32
         bias, scale = (self.modulation + e.unsqueeze(2)).unbind(2)
-        return self.head(modulate(self.norm(x.float()), scale, bias))
+        return self.head(modulate(x, scale, bias))
 
 
 @dataclass
@@ -149,7 +112,7 @@ class WanConfig:
     in_dim: int = 16
     out_dim: int = 16
     rope_dims: tuple[int, int, int] = (44, 42, 42)
-    patch_size: tuple[int, int, int] = (1, 2, 2)  # nF, nH, nW
+    patch_size: tuple[int, int, int] = (1, 2, 2)  # pF, pH, pW
     text_len: int = 512
     freq_dim: int = 256
     text_dim: int = 4096
@@ -167,19 +130,11 @@ class WanModel(nn.Module):
         self.pos_embed = RopeND(cfg.rope_dims, (128, 512, 512), theta=1e4, dtype=torch.float64)
 
         self.text_embedding = nn.Sequential(
-            Linear(cfg.text_dim, cfg.dim),
-            nn.GELU(approximate="tanh"),
-            Linear(cfg.dim, cfg.dim),
+            Linear(cfg.text_dim, cfg.dim), nn.GELU(approximate="tanh"), Linear(cfg.dim, cfg.dim)
         )
-        self.time_embedding = nn.Sequential(
-            FP32Linear(cfg.freq_dim, cfg.dim),
-            nn.SiLU(),
-            FP32Linear(cfg.dim, cfg.dim),
-        )
-        self.time_projection = nn.Sequential(
-            nn.SiLU(),
-            FP32Linear(cfg.dim, cfg.dim * 6),
-        )
+        self.time_embedding = nn.Sequential(FP32Linear(cfg.freq_dim, cfg.dim), nn.SiLU(), FP32Linear(cfg.dim, cfg.dim))
+        self.time_projection = nn.Sequential(nn.SiLU(), FP32Linear(cfg.dim, cfg.dim * 6))
+
         self.blocks = nn.ModuleList(
             [WanAttentionBlock(cfg.dim, cfg.ffn_dim, eps=cfg.eps) for _ in range(cfg.num_layers)]
         )

@@ -65,3 +65,14 @@ class FP32Linear(nn.Linear):
     def forward(self, x: Tensor) -> Tensor:
         bias = self.bias.float() if self.bias is not None else None
         return F.linear(x.float(), self.weight.float(), bias)
+
+
+class FP32LayerNorm(nn.LayerNorm):
+    def forward(self, x: Tensor):
+        if self.elementwise_affine:
+            weight = self.weight.float()
+            bias = self.bias.float()
+        else:
+            weight = None
+            bias = None
+        return F.layer_norm(x.float(), self.normalized_shape, weight, bias, self.eps)
