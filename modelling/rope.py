@@ -22,7 +22,7 @@ def apply_rope(x: Tensor, rope: Tensor) -> Tensor:
     # rope: [L, D/2] in complex
     dtype = rope.dtype.to_real()
     x_ = torch.view_as_complex(x.to(dtype).unflatten(-1, (-1, 2)))  # [B, L, nH, D/2]
-    out = torch.view_as_real(x_ * rope.unsqueeze(1)).flatten(-2)  # [B, L, nH, D]
+    out = torch.view_as_real(x_ * rope.unsqueeze(-2)).flatten(-2)  # [B, L, nH, D]
     return out.type_as(x)
 
 

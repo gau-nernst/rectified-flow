@@ -211,7 +211,15 @@ class Flux(nn.Module):
         )
         self.final_layer = LastLayer(cfg.hidden_size, 1, cfg.out_channels)
 
-    def forward(self, img: Tensor, timesteps: Tensor, txt: Tensor, y: Tensor, guidance: Tensor | None = None) -> Tensor:
+    def forward(
+        self,
+        img: Tensor,
+        t: Tensor,
+        txt: Tensor,
+        y: Tensor,
+        guidance: Tensor | None = None,
+        rope: Tensor | None = None,
+    ) -> Tensor:
         # we integrate patchify and unpatchify into model's forward pass
         B, C, H, W = img.shape
         L = txt.shape[1]
@@ -226,18 +234,19 @@ class Flux(nn.Module):
 
         img = self.img_in(img)
         txt = self.txt_in(txt)
-        vec = self.time_in(timestep_embedding(timesteps, 256).to(img.dtype)) + self.vector_in(y)
+        vec = self.time_in(timestep_embedding(t, 256).to(img.dtype)) + self.vector_in(y)
 
         if guidance is not None:  # allow no guidance_embed
             vec = vec + self.guidance_in(timestep_embedding(guidance, 256).to(img.dtype))
 
         # RoPE embedding has 3 components:
-        # - time: text embeds stay at pos=[0,L), img embeds stay at pos=0
+        # - time: text embeds stay at pos=0, img embeds stay at pos=0
         # - height: all text embeds stay at pos=0
         # - width: all text embeds stay at pos=0
-        img_rope = self.pos_embed.create((0, 0, 0), (1, nH, nW))
-        txt_rope = self.pos_embed.create((0, 0, 0), (L, 1, 1))
-        rope = torch.cat([txt_rope, img_rope], dim=0)
+        if rope is None:
+            img_rope = self.pos_embed.create((0, 0, 0), (1, nH, nW))
+            txt_rope = self.pos_embed.create((0, 0, 0), (1, 1, 1)).expand(L, -1)
+            rope = torch.cat([txt_rope, img_rope], dim=0)
 
         for block in self.double_blocks:
             img, txt = block(img, txt, vec, rope)
