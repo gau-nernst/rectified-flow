@@ -10,26 +10,8 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..attn import dispatch_attn
+from ..rope import RopeND, apply_rope
 from ..utils import create_name_map_hook, load_hf_state_dict
-
-
-def rope(pos: Tensor, dim: int, theta: float = 1e4) -> Tensor:
-    assert dim % 2 == 0
-    scale = torch.arange(0, dim, 2, dtype=torch.float64, device=pos.device) / dim
-    omega = 1.0 / (theta**scale)
-    out = pos.unsqueeze(-1) * omega
-    out = torch.stack([out.cos(), -out.sin(), out.sin(), out.cos()], dim=-1)
-    out = out.unflatten(-1, (2, 2))  # [..., dim/2, 2, 2]
-    return out.float()
-
-
-def apply_rope(x: Tensor, freqs_cis: Tensor) -> Tensor:
-    # x: (B, L, nH, D)
-    # freqs_cis: (L, D/2, 2, 2)
-    x_ = x.float().unflatten(-1, (-1, 1, 2))  # [B, L, nH, D/2, 1, 2]
-    freqs_cis = freqs_cis.unsqueeze(-4)  # [L, 1, D/2, 2, 2]
-    out = freqs_cis[..., 0] * x_[..., 0] + freqs_cis[..., 1] * x_[..., 1]
-    return out.reshape(x.shape).type_as(x)
 
 
 def timestep_embedding(t: Tensor, dim: int, max_period: float = 10_000.0, time_factor: float = 1000.0):
@@ -61,6 +43,7 @@ class MLPEmbedder(nn.Sequential):
 class SelfAttention(nn.Module):
     def __init__(self, dim: int) -> None:
         super().__init__()
+        self.head_dim = 128
         self.qkv = nn.Linear(dim, dim * 3)
         self.q_norm = nn.RMSNorm(128, eps=1e-6)
         self.k_norm = nn.RMSNorm(128, eps=1e-6)
@@ -70,6 +53,10 @@ class SelfAttention(nn.Module):
             ("norm.key_norm.scale", "k_norm.weight"),
         ]
         self.register_load_state_dict_pre_hook(create_name_map_hook(remap_pairs))
+
+    def forward_qkv(self, x: Tensor):
+        q, k, v = self.qkv(x).unflatten(2, (-1, self.head_dim)).chunk(3, dim=2)
+        return self.q_norm(q), self.k_norm(k), v
 
 
 def modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
@@ -116,29 +103,21 @@ class DoubleStreamBlock(nn.Module):
         img_shift1, img_scale1, img_gate1, img_shift2, img_scale2, img_gate2 = self.img_mod(vec)
         txt_shift1, txt_scale1, txt_gate1, txt_shift2, txt_scale2, txt_gate2 = self.txt_mod(vec)
 
-        # prepare image for attention
-        img_qkv = self.img_attn.qkv(modulate(img, img_shift1, img_scale1))
-        img_q, img_k, img_v = img_qkv.unflatten(2, (-1, self.head_dim)).chunk(3, dim=2)
+        img_q, img_k, img_v = self.img_attn.forward_qkv(modulate(img, img_shift1, img_scale1))
+        txt_q, txt_k, txt_v = self.txt_attn.forward_qkv(modulate(txt, txt_shift1, txt_scale1))
 
-        # prepare txt for attention
-        txt_qkv = self.txt_attn.qkv(modulate(txt, txt_shift1, txt_scale1))
-        txt_q, txt_k, txt_v = txt_qkv.unflatten(2, (-1, self.head_dim)).chunk(3, dim=2)
-
-        # run actual attention
-        q = apply_rope(torch.cat((self.txt_attn.q_norm(txt_q), self.img_attn.q_norm(img_q)), dim=1), pe)
-        k = apply_rope(torch.cat((self.txt_attn.k_norm(txt_k), self.img_attn.k_norm(img_k)), dim=1), pe)
+        q = apply_rope(torch.cat((txt_q, img_q), dim=1), pe)
+        k = apply_rope(torch.cat((txt_k, img_k), dim=1), pe)
         v = torch.cat((txt_v, img_v), dim=1)
-
         attn = dispatch_attn(q, k, v, impl=self.attn_impl).flatten(2)
         txt_attn, img_attn = attn.split([txt.shape[1], img.shape[1]], dim=1)
 
-        # calculate the img blocks
         img = img + img_gate1 * self.img_attn.proj(img_attn)
         img = img + img_gate2 * self.img_mlp(modulate(img, img_shift2, img_scale2))
 
-        # calculate the txt blocks
         txt = txt + txt_gate1 * self.txt_attn.proj(txt_attn)
         txt = txt + txt_gate2 * self.txt_mlp(modulate(txt, txt_shift2, txt_scale2))
+
         return img, txt
 
 
@@ -208,6 +187,7 @@ class FluxConfig:
     depth_single_blocks: int = 38
     rope_dims: tuple[int, int, int] = (16, 56, 56)
     theta: float = 1e4
+    patch_size: int = 2
     guidance_embed: bool = True  # False for schnell
 
 
@@ -221,6 +201,7 @@ class Flux(nn.Module):
         self.vector_in = MLPEmbedder(cfg.vec_in_dim, cfg.hidden_size)
         self.guidance_in = MLPEmbedder(256, cfg.hidden_size) if cfg.guidance_embed else nn.Identity()
         self.txt_in = nn.Linear(cfg.context_in_dim, cfg.hidden_size)
+        self.pos_embed = RopeND(cfg.rope_dims, (512, 512, 512), theta=1e4)
 
         self.double_blocks = nn.ModuleList(
             [DoubleStreamBlock(cfg.hidden_size, cfg.mlp_ratio) for _ in range(cfg.depth)]
@@ -230,26 +211,18 @@ class Flux(nn.Module):
         )
         self.final_layer = LastLayer(cfg.hidden_size, 1, cfg.out_channels)
 
-    def build_rope(self, H: int, W: int, device: torch.types.Device = None):
-        rope_d0, rope_dh, rope_dw = self.cfg.rope_dims
-        theta = self.cfg.theta
-
-        rope_0 = rope(torch.arange(1, device=device), rope_d0, theta)  # [1, 8, 2, 2]
-        rope_h = rope(torch.arange(H, device=device), rope_dh, theta)  # [H, 28, 2, 2]
-        rope_w = rope(torch.arange(W, device=device), rope_dw, theta)  # [W, 28, 2, 2]
-
-        rope_0 = rope_0.unflatten(0, (1, 1)).expand(H, W, -1, -1, -1)
-        rope_h = rope_h.unflatten(0, (H, 1)).expand(H, W, -1, -1, -1)
-        rope_w = rope_w.unflatten(0, (1, W)).expand(H, W, -1, -1, -1)
-
-        return torch.cat([rope_0, rope_h, rope_w], dim=2).flatten(0, 1)  # [H*W, 64, 2, 2]
-
     def forward(self, img: Tensor, timesteps: Tensor, txt: Tensor, y: Tensor, guidance: Tensor | None = None) -> Tensor:
         # we integrate patchify and unpatchify into model's forward pass
-        B, _, H, W = img.shape
-        txt_len = txt.shape[1]
+        B, C, H, W = img.shape
+        L = txt.shape[1]
+
+        patch_size = self.cfg.patch_size
+        nH = H // patch_size
+        nW = W // patch_size
         img = img.to(self.img_in.weight.dtype)
-        img = img.view(B, -1, H // 2, 2, W // 2, 2).permute(0, 2, 4, 1, 3, 5).reshape(B, H * W // 4, -1)
+        img = img.view(B, C, nH, patch_size, nW, patch_size)
+        img = img.permute(0, 2, 4, 1, 3, 5)  # (B, nH, nW, C, 2, 2)
+        img = img.reshape(B, nH * nW, C * patch_size * patch_size)
 
         img = self.img_in(img)
         txt = self.txt_in(txt)
@@ -258,20 +231,28 @@ class Flux(nn.Module):
         if guidance is not None:  # allow no guidance_embed
             vec = vec + self.guidance_in(timestep_embedding(guidance, 256).to(img.dtype))
 
-        rope_img = self.build_rope(H // 2, W // 2, img.device)
-        rope_txt = self.build_rope(1, 1, img.device).expand(txt_len, -1, -1, -1)
-        pe = torch.cat([rope_txt, rope_img], dim=0)
+        # RoPE embedding has 3 components:
+        # - time: text embeds stay at pos=[0,L), img embeds stay at pos=0
+        # - height: all text embeds stay at pos=0
+        # - width: all text embeds stay at pos=0
+        img_rope = self.pos_embed.create((0, 0, 0), (1, nH, nW))
+        txt_rope = self.pos_embed.create((0, 0, 0), (L, 1, 1))
+        rope = torch.cat([txt_rope, img_rope], dim=0)
 
         for block in self.double_blocks:
-            img, txt = block(img, txt, vec, pe)
+            img, txt = block(img, txt, vec, rope)
 
         img = torch.cat([txt, img], dim=1)
         for block in self.single_blocks:
-            img = block(img, vec, pe)
-        img = img[:, txt_len:]
+            img = block(img, vec, rope)
+        img = img[:, L:]
 
         img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
-        img = img.view(B, H // 2, W // 2, -1, 2, 2).permute(0, 3, 1, 4, 2, 5).reshape(B, -1, H, W)
+
+        # unpatchify
+        img = img.view(B, nH, nW, C, patch_size, patch_size)
+        img = img.permute(0, 3, 1, 4, 2, 5)  # (B, C, nH, 2, nW, 2)
+        img = img.reshape(B, C, H, W)
         return img
 
 

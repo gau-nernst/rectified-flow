@@ -8,6 +8,7 @@ from torch import Tensor, nn
 
 from ..attn import dispatch_attn
 from ..flux.model import timestep_embedding
+from ..rope import RopeND, apply_rope
 from ..utils import Linear, load_hf_state_dict, make_merge_hook
 
 
@@ -21,55 +22,6 @@ class FinalLayer(nn.Module):
         scale = self.adaLN_modulation(c).unsqueeze(1)
         x = (1.0 + scale) * F.layer_norm(x, x.shape[-1:], eps=1e-6)
         return self.linear(x)
-
-
-class RopeEmbedder:
-    def __init__(
-        self,
-        theta: float = 256.0,
-        axes_dims: tuple[int, ...] = (32, 48, 48),
-        axes_lens: tuple[int, ...] = (1536, 512, 512),
-    ) -> None:
-        self.theta = theta
-        self.axes_dims = axes_dims
-        self.axes_lens = axes_lens
-        assert len(axes_dims) == len(axes_lens), "axes_dims and axes_lens must have the same length"
-        self.freqs_cis = self.precompute_freqs_cis(axes_dims, axes_lens, theta)
-
-    @staticmethod
-    def precompute_freqs_cis(dims: tuple[int, ...], lengths: tuple[int, ...], theta: float = 256.0):
-        freqs_cis = []
-        for dim, length in zip(dims, lengths):
-            freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float64, device="cpu") / dim))
-            timestep = torch.arange(length, device=freqs.device, dtype=torch.float64)
-            freqs = torch.outer(timestep, freqs).float()
-            freqs_cis_i = torch.polar(torch.ones_like(freqs), freqs).to(torch.complex64)  # complex64
-            freqs_cis.append(freqs_cis_i)
-
-        return freqs_cis
-
-    def __call__(self, ids: Tensor) -> Tensor:
-        assert ids.ndim == 2, ids.ndim
-        assert ids.shape[-1] == len(self.axes_dims)
-        device = ids.device
-
-        # Ensure freqs_cis are on the same device as ids
-        if self.freqs_cis[0].device != device:
-            self.freqs_cis = [freqs_cis.to(device) for freqs_cis in self.freqs_cis]
-
-        result = []
-        for i in range(len(self.axes_dims)):
-            index = ids[:, i]
-            result.append(self.freqs_cis[i][index])
-        return torch.cat(result, dim=-1)
-
-
-# TODO: unify with FLUX
-def apply_rope(x: Tensor, freqs_cis: Tensor):
-    x_complex = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
-    freqs_cis = freqs_cis.unsqueeze(2)
-    x_out = torch.view_as_real(x_complex * freqs_cis).flatten(3)
-    return x_out.type_as(x)
 
 
 class Attention(nn.Module):
@@ -149,7 +101,7 @@ class ZImage(nn.Module):
 
         self.t_embedder = nn.Sequential()
         self.t_embedder.mlp = nn.Sequential(Linear(256, 1024), nn.SiLU(), nn.Linear(1024, cfg.mod_dim))
-        self.rope = RopeEmbedder(axes_dims=cfg.rope_dims)
+        self.pos_embed = RopeND(cfg.rope_dims, (1536, 512, 512), theta=256.0)
         self.x_pad_token = nn.Parameter(torch.zeros(1, cfg.dim))
         self.cap_pad_token = nn.Parameter(torch.zeros(1, cfg.dim))
 
@@ -193,11 +145,6 @@ class ZImage(nn.Module):
         B, C, H, W = img.shape
         t_embeds = self.t_embedder(timestep_embedding(timesteps, 256))
 
-        # RoPE embedding has 3 components:
-        # - time: text embeds stay at pos=[1,L+1), img embeds stay at pos=L+1
-        # - height: all text embeds stay at pos=0
-        # - width: all text embeds stay at pos=0
-
         # patchify
         patch_size = self.cfg.patch_size
         nH = H // patch_size
@@ -206,31 +153,36 @@ class ZImage(nn.Module):
         img = img.permute(0, 2, 4, 3, 5, 1)  # (B, nH, nW, 2, 2, C)
         img = img.reshape(B, nH * nW, patch_size * patch_size * C)
 
+        # RoPE embedding has 3 components:
+        # - time: text embeds stay at pos=[1,L+1), img embeds stay at pos=L+1
+        # - height: all text embeds stay at pos=0
+        # - width: all text embeds stay at pos=0
+
         # text-only processing
         txt = self.cap_embedder(txt)
         txt = self._pad_tokens(txt, self.cap_pad_token)
-        txt_pos_ids = self.create_coordinate_grid((1, 0, 0), (txt.shape[1], 1, 1), device=txt.device)
-        txt_rope = self.rope(txt_pos_ids.flatten(0, 2)).unsqueeze(0)
+        txt_rope = self.pos_embed.create((1, 0, 0), (txt.shape[1], 1, 1))
         for layer in self.context_refiner:
             txt = layer(txt, None, txt_rope)
 
         # image-only processing
         img = self.all_x_embedder["2-1"](img)
         img = self._pad_tokens(img, self.x_pad_token)
-        img_pos_ids = self.create_coordinate_grid((txt.shape[1] + 1, 0, 0), (1, nH, nW), device=img.device)
-        img_rope = self.rope(img_pos_ids.flatten(0, 2)).unsqueeze(0)
+        img_rope = self.pos_embed.create((txt.shape[1] + 1, 0, 0), (1, nH, nW))
         for layer in self.noise_refiner:
             img = layer(img, t_embeds, img_rope)
 
         # joint processing
         unified = torch.cat([img, txt], dim=1)
-        unified_rope = torch.cat([img_rope, txt_rope], dim=1)
+        unified_rope = torch.cat([img_rope, txt_rope], dim=0)
         for layer in self.layers:
             unified = layer(unified, t_embeds, unified_rope)
+        unified = unified[:, : nH * nW]
+
+        unified = self.all_final_layer["2-1"](unified, t_embeds)
 
         # unpatchify
-        unified = self.all_final_layer["2-1"](unified, t_embeds)
-        img = unified[:, : nH * nW].view(B, nH, nW, patch_size, patch_size, C)
+        img = unified.view(B, nH, nW, patch_size, patch_size, C)
         img = img.permute(0, 5, 1, 3, 2, 4)  # (B, C, nH, 2, nW, 2)
         img = img.reshape(B, C, H, W)
         return img
