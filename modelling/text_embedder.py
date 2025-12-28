@@ -85,7 +85,7 @@ def load_clip_l(output_key: str | int | list[str | int] = "pooler_output") -> Te
     return TextEmbedder(model, tokenizer, 77, output_key)
 
 
-def load_umt5_xxl() -> TextEmbedder:
+def load_umt5_xxl(max_length: int = 512) -> TextEmbedder:
     # official Wan2.2 uses their own implementation and weight mapping for umt5
     # use umt5 from diffusers version for convenience
     model = UMT5EncoderModel.from_pretrained(
@@ -94,4 +94,4 @@ def load_umt5_xxl() -> TextEmbedder:
         subfolder="text_encoder",
     )
     tokenizer = AutoTokenizer.from_pretrained("google/umt5-xxl")
-    return TextEmbedder(model, tokenizer, 512, "last_hidden_state", use_attn_mask=True)
+    return TextEmbedder(model, tokenizer, max_length, "last_hidden_state", use_attn_mask=True)

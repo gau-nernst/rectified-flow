@@ -1,4 +1,4 @@
-# https://github.com/Wan-Video/Wan2.2/blob/388807310646ed5f318a99f8e8d9ad28c5b65373/wan/modules/model.py
+# https://github.com/Wan-Video/Wan2.2/blob/38880731/wan/modules/model.py
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 
 import math
@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..attn import dispatch_attn
+from ..rope import RopeND, apply_rope
 from ..utils import FP32Linear, Linear, load_hf_state_dict
 
 
@@ -23,32 +24,6 @@ def sinusoidal_embedding_1d(dim: int, position: Tensor, theta: float = 1e4) -> T
     )
     x = torch.cat([freqs.cos(), freqs.sin()], dim=1)
     return x.float()
-
-
-def rope_params(seqlen: int, dim: int, theta: float = 1e4, device: torch.types.Device = None) -> Tensor:
-    assert dim % 2 == 0
-    freqs = torch.outer(
-        torch.arange(seqlen, dtype=torch.float64, device=device),
-        1.0 / theta ** torch.arange(0, dim, 2, dtype=torch.float64, device=device).div(dim),
-    )
-    return torch.polar(torch.ones_like(freqs), freqs)
-
-
-def apply_rope(x: Tensor, rope_embeds: tuple[Tensor, Tensor, Tensor]) -> Tensor:
-    # x: [B, L, num_heads, head_dim]
-    # rope_embeds: [1024, head_dim / 2] (complex number)
-    rope_F, rope_H, rope_W = rope_embeds
-    F = rope_F.shape[0]
-    H = rope_H.shape[0]
-    W = rope_W.shape[0]
-
-    rope_F = rope_F.view(F, 1, 1, -1).expand(F, H, W, -1)
-    rope_H = rope_H.view(1, H, 1, -1).expand(F, H, W, -1)
-    rope_W = rope_W.view(1, 1, W, -1).expand(F, H, W, -1)
-    rope = torch.cat([rope_F, rope_H, rope_W], dim=-1).reshape(F * H * W, 1, -1)
-
-    x_f64 = torch.view_as_complex(x.to(torch.float64).unflatten(-1, (-1, 2)))
-    return torch.view_as_real(x_f64 * rope).flatten(3).to(x.dtype)
 
 
 class RMSNorm(nn.Module):
@@ -80,12 +55,9 @@ class LayerNorm(nn.LayerNorm):
 
 
 class WanSelfAttention(nn.Module):
-    def __init__(self, dim: int, head_dim: int = 128, eps=1e-6) -> None:
-        assert dim % head_dim == 0
+    def __init__(self, dim: int, eps: float = 1e-6) -> None:
         super().__init__()
-        self.num_heads = dim // head_dim
-        self.head_dim = head_dim
-
+        self.head_dim = 128
         self.q = Linear(dim, dim)
         self.k = Linear(dim, dim)
         self.v = Linear(dim, dim)
@@ -93,24 +65,28 @@ class WanSelfAttention(nn.Module):
         self.norm_q = RMSNorm(dim, eps=eps)
         self.norm_k = RMSNorm(dim, eps=eps)
 
-    def forward(self, x: Tensor, rope_embeds: tuple[Tensor, Tensor, Tensor]) -> Tensor:
+    def forward(self, x: Tensor, rope: Tensor) -> Tensor:
         # x: [B, L, D]
-        shape = (x.shape[0], -1, self.num_heads, self.head_dim)
-        q = apply_rope(self.norm_q(self.q(x)).view(shape), rope_embeds)
-        k = apply_rope(self.norm_k(self.k(x)).view(shape), rope_embeds)
-        v = self.v(x).view(shape)
-        return self.o(dispatch_attn(q, k, v).flatten(2))
+        q = self.norm_q(self.q(x)).unflatten(-1, (-1, self.head_dim))
+        k = self.norm_k(self.k(x)).unflatten(-1, (-1, self.head_dim))
+        v = self.v(x).unflatten(-1, (-1, self.head_dim))
+
+        q = apply_rope(q, rope)
+        k = apply_rope(k, rope)
+        out = dispatch_attn(q, k, v).flatten(2)
+        return self.o(out)
 
 
 class WanCrossAttention(WanSelfAttention):
-    def forward(self, x: Tensor, context: Tensor) -> Tensor:
+    def forward(self, x: Tensor, c: Tensor) -> Tensor:
         # x: [B, L1, C]
         # context: [B, L2, C]
-        shape = (x.shape[0], -1, self.num_heads, self.head_dim)
-        q = self.norm_q(self.q(x)).view(shape)
-        k = self.norm_k(self.k(context)).view(shape)
-        v = self.v(context).view(shape)
-        return self.o(dispatch_attn(q, k, v).flatten(2))
+        q = self.norm_q(self.q(x)).unflatten(-1, (-1, self.head_dim))
+        k = self.norm_k(self.k(c)).unflatten(-1, (-1, self.head_dim))
+        v = self.v(c).unflatten(-1, (-1, self.head_dim))
+
+        out = dispatch_attn(q, k, v).flatten(2)
+        return self.o(out)
 
 
 def modulate(x: Tensor, scale: Tensor, bias: Tensor) -> Tensor:
@@ -119,13 +95,13 @@ def modulate(x: Tensor, scale: Tensor, bias: Tensor) -> Tensor:
 
 
 class WanAttentionBlock(nn.Module):
-    def __init__(self, dim: int, ffn_dim: int, head_dim: int = 128, eps: float = 1e-6) -> None:
+    def __init__(self, dim: int, ffn_dim: int, eps: float = 1e-6) -> None:
         super().__init__()
         self.norm1 = LayerNorm(dim, eps, elementwise_affine=False)
-        self.self_attn = WanSelfAttention(dim, head_dim, eps)
+        self.self_attn = WanSelfAttention(dim, eps)
 
         self.norm3 = LayerNorm(dim, eps, elementwise_affine=True)
-        self.cross_attn = WanCrossAttention(dim, head_dim, eps)
+        self.cross_attn = WanCrossAttention(dim, eps)
 
         self.norm2 = LayerNorm(dim, eps, elementwise_affine=False)
         self.ffn = nn.Sequential(
@@ -136,15 +112,15 @@ class WanAttentionBlock(nn.Module):
 
         self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
 
-    def forward(self, x: Tensor, e: Tensor, rope_embeds: tuple[Tensor, Tensor, Tensor], context: Tensor) -> Tensor:
+    def forward(self, x: Tensor, e: Tensor, rope: Tensor, c: Tensor) -> Tensor:
         # x: [B, L, C]
         # e: [B, L, 6, C]
         assert e.dtype == torch.float32
         b0, s0, s1, b2, s2, s3 = (self.modulation.unsqueeze(0) + e).unbind(2)
 
         # x will become FP32 since e is FP32
-        x = x + self.self_attn(modulate(self.norm1(x), s0, b0), rope_embeds) * s1
-        x = x + self.cross_attn(self.norm3(x), context)
+        x = x + self.self_attn(modulate(self.norm1(x), s0, b0), rope) * s1
+        x = x + self.cross_attn(self.norm3(x), c)
         x = x + self.ffn(modulate(self.norm2(x), s2, b2)) * s3
         return x
 
@@ -172,11 +148,11 @@ class WanConfig:
     num_layers: int
     in_dim: int = 16
     out_dim: int = 16
+    rope_dims: tuple[int, int, int] = (44, 42, 42)
     patch_size: tuple[int, int, int] = (1, 2, 2)  # nF, nH, nW
     text_len: int = 512
     freq_dim: int = 256
     text_dim: int = 4096
-    head_dim: int = 128
     eps: float = 1e-6
 
 
@@ -185,6 +161,11 @@ class WanModel(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.patch_embedding = nn.Conv3d(cfg.in_dim, cfg.dim, cfg.patch_size, cfg.patch_size)
+
+        # use fp64 for RoPE. this has an impact on visual quality
+        # TODO: check if maxlens are enough
+        self.pos_embed = RopeND(cfg.rope_dims, (128, 512, 512), theta=1e4, dtype=torch.float64)
+
         self.text_embedding = nn.Sequential(
             Linear(cfg.text_dim, cfg.dim),
             nn.GELU(approximate="tanh"),
@@ -200,32 +181,25 @@ class WanModel(nn.Module):
             FP32Linear(cfg.dim, cfg.dim * 6),
         )
         self.blocks = nn.ModuleList(
-            [WanAttentionBlock(cfg.dim, cfg.ffn_dim, cfg.head_dim, eps=cfg.eps) for _ in range(cfg.num_layers)]
+            [WanAttentionBlock(cfg.dim, cfg.ffn_dim, eps=cfg.eps) for _ in range(cfg.num_layers)]
         )
         self.head = Head(cfg.dim, cfg.out_dim, cfg.patch_size, cfg.eps)
 
-    def get_rope(self, F: int, H: int, W: int, device: torch.types.Device = None) -> tuple[Tensor, Tensor, Tensor]:
-        d = self.cfg.head_dim
-        return (
-            rope_params(F, d - 4 * (d // 6), device=device),
-            rope_params(H, 2 * (d // 6), device=device),
-            rope_params(W, 2 * (d // 6), device=device),
-        )
-
-    def forward(self, x: Tensor, t: Tensor, context: Tensor, y: Tensor | None = None) -> Tensor:
-        # x: [B, C, F, H, W]
+    def forward(self, vid: Tensor, t: Tensor, txt: Tensor, y: Tensor | None = None) -> Tensor:
+        # vid: [B, C, F, H, W]
         # t: [B] or [B, F*H*W]
-        # context: [B, L, C]
-        # y: [B, C, F, H, W]
+        # txt: [B, 512, C]
+        # y: [B, C, F, H, W] - not used?
         if y is not None:
-            x = torch.cat([x, y], dim=0)
+            vid = torch.cat([vid, y], dim=0)
 
-        x = self.patch_embedding(x.to(self.patch_embedding.weight.dtype))
-        F_, H, W = x.shape[2:]
+        vid = self.patch_embedding(vid.to(self.patch_embedding.weight.dtype))
+        B, C, F_, H, W = vid.shape  # shape after patchify
         seqlen = F_ * H * W
-        x = x.flatten(2).transpose(1, 2)  # (B, F*H*W, C)
+        vid = vid.flatten(2).transpose(1, 2)  # (B, F*H*W, C)
 
         # time embeddings -> modulation
+        # TODO: unify sinusoidal_embedding_1d with FLUX
         if t.ndim == 1:
             t = t.view(-1, 1).expand(t.shape[0], seqlen)
         time_embeds = sinusoidal_embedding_1d(self.cfg.freq_dim, t.flatten()).unflatten(0, (t.shape[0], seqlen))
@@ -233,24 +207,21 @@ class WanModel(nn.Module):
         e0 = self.time_projection(e).unflatten(2, (6, -1))
         assert e.dtype == torch.float32 and e0.dtype == torch.float32
 
-        if context.shape[1] < 512:
-            context = F.pad(context, (0, 0, 0, 512 - context.shape[1]))
-        elif context.shape[1] > 512:
-            context = context[:, :512]
-        context = self.text_embedding(context)
+        assert txt.shape[1] == 512
+        txt = self.text_embedding(txt)
 
-        rope_embeds = self.get_rope(F_, H, W, device=x.device)
+        rope = self.pos_embed.create((0, 0, 0), (F_, H, W))
         for block in self.blocks:
-            x = block(x, e0, rope_embeds, context)
+            vid = block(vid, e0, rope, txt)
 
-        x = self.head(x, e)
+        vid = self.head(vid, e)
 
-        nF, nH, nW = self.cfg.patch_size
+        pF, pH, pW = self.cfg.patch_size
         out_dim = self.cfg.out_dim
-        x = x.reshape(x.shape[0], F_, H, W, nF, nH, nW, out_dim)
-        x = x.permute(0, 7, 1, 4, 2, 5, 3, 6)
-        x = x.reshape(x.shape[0], out_dim, F_ * nF, H * nH, W * nW)
-        return x
+        vid = vid.reshape(B, F_, H, W, pF, pH, pW, out_dim)
+        vid = vid.permute(0, 7, 1, 4, 2, 5, 3, 6)
+        vid = vid.reshape(B, out_dim, F_ * pF, H * pH, W * pW)
+        return vid
 
 
 def load_wan(name: str):

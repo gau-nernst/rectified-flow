@@ -77,7 +77,7 @@ class Wan5BPipeline:
         solver: str = "unipc",
     ):
         device = self.vae.conv1.weight.device
-        latents, context, neg_context = prepare_inputs(
+        latents, txt, neg_txt = prepare_inputs(
             self.vae.cfg,
             self.umt5,
             prompt,
@@ -95,8 +95,8 @@ class Wan5BPipeline:
             self.wan,
             latents,
             timesteps,
-            context,
-            neg_context,
+            txt,
+            neg_txt,
             cfg_scale=cfg_scale,
             first_frame=img,
             solver=solver,
@@ -118,8 +118,8 @@ def wan_generate(
     wan: WanModel,
     latents: Tensor,
     timesteps: list[int],
-    context: Tensor,
-    neg_context: Tensor | None = None,
+    txt: Tensor,
+    neg_txt: Tensor | None = None,
     cfg_scale: float = 5.0,
     first_frame: Tensor | None = None,
     solver: str = "unipc",
@@ -144,11 +144,11 @@ def wan_generate(
         else:
             t = torch.tensor([t_discrete], dtype=torch.float, device="cuda")
 
-        v = wan(latents, t, context)
+        v = wan(latents, t, txt)
 
         # classifier-free guidance
         if cfg_scale != 1.0:
-            neg_v = wan(latents, t, neg_context)
+            neg_v = wan(latents, t, neg_txt)
             v = neg_v.lerp(v, cfg_scale)
 
         latents = solver_.step(latents, v, i)
@@ -157,63 +157,3 @@ def wan_generate(
             latents[:, :, :1] = first_frame
 
     return latents
-
-
-if __name__ == "__main__":
-    import argparse
-
-    import av
-    from PIL import Image
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--prompt", required=True)
-    parser.add_argument("--output", required=True)
-    parser.add_argument("--input_img")
-    parser.add_argument("--duration", type=float, default=5.0)
-    parser.add_argument("--num_steps", type=int, default=50)
-    parser.add_argument("--seed", type=int)
-    args = parser.parse_args()
-
-    fps = 24  # Wan2.2-5B is 24. Wan2.2-14B is 16
-    num_frames = int(args.duration * fps) // 4 * 4 + 1
-
-    gen = Wan5BPipeline(offload_wan=True, offload_umt5=True)
-    gen.cuda()
-
-    if args.input_img is not None:
-        img_pil = Image.open(args.input_img)
-        img_pil = img_pil.resize((1280, 704), resample=Image.Resampling.LANCZOS)
-        img_pil = img_pil.convert("RGB")
-        img_pt = torch.frombuffer(img_pil.tobytes(), dtype=torch.uint8).view(704, 1280, 3)
-        img_pt = img_pt.permute(2, 0, 1).unsqueeze(0)
-        img_pt = img_pt.float().sub(127.5).div(127.5)
-    else:
-        img_pt = None
-
-    # [3, T, H, W]
-    video = gen.generate(
-        args.prompt,
-        img=img_pt,
-        num_frames=num_frames,
-        num_steps=args.num_steps,
-        seed=args.seed,
-        pbar=True,
-    ).squeeze(0)
-
-    # TODO: merge uint8 conversion to VAE
-    video_np = video.add(1).mul(127.5).round().clip(0, 255).to(torch.uint8).permute(1, 2, 3, 0).cpu().numpy()
-
-    container = av.open(args.output, mode="w")
-    stream = container.add_stream("libx264", rate=fps)
-    stream.width = 1280
-    stream.height = 704
-
-    for frame_id in range(video_np.shape[0]):
-        frame = av.VideoFrame.from_ndarray(video_np[frame_id])
-        for packet in stream.encode(frame):
-            container.mux(packet)
-
-    for packet in stream.encode():
-        container.mux(packet)
-
-    container.close()
