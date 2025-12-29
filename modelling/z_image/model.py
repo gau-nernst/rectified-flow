@@ -45,13 +45,12 @@ class Attention(nn.Module):
 class FeedForward(nn.Module):
     def __init__(self, dim: int, hidden_dim: int) -> None:
         super().__init__()
-        self.w13 = nn.Linear(dim, hidden_dim * 2, bias=False)
+        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
-        self.register_load_state_dict_pre_hook(make_merge_hook(["w1", "w3"], "w13"))
 
     def forward(self, x: Tensor) -> Tensor:
-        w1, w3 = self.w13(x).chunk(2, dim=-1)
-        return self.w2(F.silu(w1) * w3)
+        return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 
 class Block(nn.Module):
