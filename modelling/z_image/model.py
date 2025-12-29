@@ -123,18 +123,6 @@ class ZImage(nn.Module):
         self.all_final_layer["2-1"] = FinalLayer(cfg.dim, patchified_dim)
 
     @staticmethod
-    def create_coordinate_grid(start_list: tuple[int, ...], size_list: tuple[int, ...], device=None) -> Tensor:
-        if start_list is None:
-            start_list = (0 for _ in size_list)
-
-        axes = [
-            torch.arange(start, start + size, dtype=torch.int32, device=device)
-            for start, size in zip(start_list, size_list)
-        ]
-        grids = torch.meshgrid(axes, indexing="ij")
-        return torch.stack(grids, dim=-1)
-
-    @staticmethod
     def _pad_tokens(x: Tensor, pad_token: Tensor):
         """Pad to a multiple of 32"""
         pad_len = (-x.shape[1]) % 32
