@@ -161,20 +161,23 @@ def flux1_generate(
     solver: str = "euler",
     pbar: bool = False,
 ) -> Tensor:
+    B, _, H, W = latents.shape
+
     if isinstance(guidance, (int, float)):
-        guidance = torch.full(latents.shape[:1], guidance, device=latents.device)
+        guidance = torch.full((B,), guidance, device=latents.device)
 
     num_steps = len(timesteps) - 1
     solver_ = get_solver(solver, timesteps)
+    rope = flux.make_rope(H // 2, W // 2, txt.shape[1])
 
     for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
         t = torch.tensor([timesteps[i]], device="cuda")
-        v = flux(latents, t, txt, vec, guidance).float()
+        v = flux(latents, t, txt, vec, guidance, rope).float()
 
         # classifier-free guidance
         if cfg_scale != 1.0:
             assert neg_txt is not None and neg_vec is not None
-            neg_v = flux(latents, t, neg_txt, neg_vec, guidance).float()
+            neg_v = flux(latents, t, neg_txt, neg_vec, guidance, rope).float()
             v = neg_v.lerp(v, cfg_scale)
 
         latents = solver_.step(latents, v, i)

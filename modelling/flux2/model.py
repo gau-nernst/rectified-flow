@@ -144,6 +144,20 @@ class Flux2(nn.Module):
         )
         self.final_layer = LastLayer(cfg.dim, 1, cfg.img_dim, bias=False)
 
+    def make_rope(self, H: int, W: int, L: int):
+        # main image:         https://github.com/black-forest-labs/flux2/blob/b56ac614/src/flux2/sampling.py#L93
+        # conditioned images: https://github.com/black-forest-labs/flux2/blob/b56ac614/src/flux2/sampling.py#L52
+        # conditioned text:   https://github.com/black-forest-labs/flux2/blob/b56ac614/src/flux2/sampling.py#L141
+        # RoPE embedding has 4 components:
+        # - time: main image is at t=0, conditioning images are at t=10, 20, ...
+        # - height: all text embeds stay at pos=0
+        # - width: all text embeds stay at pos=0
+        # - text length
+        # technically conditioning images can have sizes different from the main image's
+        img_rope = self.pos_embed.create((0, 0, 0, 0), (1, H, W, 1))
+        txt_rope = self.pos_embed.create((0, 0, 0, 0), (1, 1, 1, L))
+        return torch.cat([txt_rope, img_rope], dim=0)
+
     def forward(
         self,
         img: Tensor,
@@ -163,18 +177,8 @@ class Flux2(nn.Module):
         if guidance is not None:  # allow no guidance_embed
             vec = vec + self.guidance_in(timestep_embedding(guidance, 256).to(img.dtype))
 
-        # TODO: update this
-        # https://github.com/black-forest-labs/flux2/blob/b56ac614/src/flux2/sampling.py#L93
-        # https://github.com/black-forest-labs/flux2/blob/b56ac614/src/flux2/sampling.py#L141
-        # RoPE embedding has 4 components:
-        # - time: (TBC) when there are multiple images, they are placed at t=0, t=1, ...
-        # - height: all text embeds stay at pos=0
-        # - width: all text embeds stay at pos=0
-        # - text length
         if rope is None:
-            img_rope = self.pos_embed.create((0, 0, 0, 0), (1, H, W, 1))
-            txt_rope = self.pos_embed.create((0, 0, 0, 0), (1, 1, 1, L))
-            rope = torch.cat([txt_rope, img_rope], dim=0)
+            rope = self.make_rope(H, W, L)
 
         mod_img = self.double_stream_modulation_img(vec)
         mod_txt = self.double_stream_modulation_txt(vec)

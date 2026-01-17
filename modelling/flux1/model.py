@@ -206,6 +206,15 @@ class Flux1(nn.Module):
         )
         self.final_layer = LastLayer(cfg.dim, 1, cfg.img_dim)
 
+    def make_rope(self, H: int, W: int, L: int):
+        # RoPE embedding has 3 components:
+        # - time: text embeds stay at pos=0, img embeds stay at pos=0
+        # - height: all text embeds stay at pos=0
+        # - width: all text embeds stay at pos=0
+        img_rope = self.pos_embed.create((0, 0, 0), (1, H, W))
+        txt_rope = self.pos_embed.create((0, 0, 0), (1, 1, 1)).expand(L, -1)
+        return torch.cat([txt_rope, img_rope], dim=0)
+
     def forward(
         self,
         img: Tensor,
@@ -234,22 +243,16 @@ class Flux1(nn.Module):
         if guidance is not None:  # allow no guidance_embed
             vec = vec + self.guidance_in(timestep_embedding(guidance, 256).to(img.dtype))
 
-        # RoPE embedding has 3 components:
-        # - time: text embeds stay at pos=0, img embeds stay at pos=0
-        # - height: all text embeds stay at pos=0
-        # - width: all text embeds stay at pos=0
         if rope is None:
-            img_rope = self.pos_embed.create((0, 0, 0), (1, nH, nW))
-            txt_rope = self.pos_embed.create((0, 0, 0), (1, 1, 1)).expand(L, -1)
-            rope = torch.cat([txt_rope, img_rope], dim=0)
+            rope = self.make_rope(nH, nW, L)
 
         for block in self.double_blocks:
             img, txt = block(img, txt, vec, rope)
 
-        img = torch.cat([txt, img], dim=1)
+        joint = torch.cat([txt, img], dim=1)
         for block in self.single_blocks:
-            img = block(img, vec, rope)
-        img = img[:, L:]
+            joint = block(joint, vec, rope)
+        img = joint[:, L:]
 
         img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
 
