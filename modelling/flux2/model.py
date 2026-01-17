@@ -105,7 +105,7 @@ class SingleStreamBlock(nn.Module):
         return x + gate * output
 
 
-# default is Klein-4B
+# default is klein-4B
 class Flux2Config(NamedTuple):
     img_dim: int = 128
     txt_dim: int = 7680

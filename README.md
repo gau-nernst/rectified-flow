@@ -7,7 +7,7 @@ Supported models:
   - Wan2.2-TI2V-5B: T2V and I2V
   - Wan2.2-T2V-A14B and Wan2.2-I2V-A14B: WIP
 - [Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo)
-- [FLUX.2-Klein](https://github.com/black-forest-labs/flux2). T2I only, TI2I is WIP.
+- [FLUX.2-klein](https://github.com/black-forest-labs/flux2). T2I only, TI2I is WIP.
 
 Supported features:
 
