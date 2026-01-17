@@ -75,7 +75,7 @@ class ZImagePipeline:
         latents: Tensor | None = None,
         denoise: float = 1.0,
         cfg_scale: float = 1.0,
-        num_steps: int = 50,
+        num_steps: int = 8,
         seed: int | None = None,
         solver: str = "euler",
         pbar: bool = False,
