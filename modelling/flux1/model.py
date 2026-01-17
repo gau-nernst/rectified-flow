@@ -3,7 +3,7 @@
 # https://github.com/black-forest-labs/flux/blob/7e14a05e/src/flux/model.py
 
 import math
-from dataclasses import dataclass
+from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -33,21 +33,21 @@ def timestep_embedding(t: Tensor, dim: int, max_period: float = 10_000.0, time_f
 
 
 class MLPEmbedder(nn.Sequential):
-    def __init__(self, in_dim: int, hidden_dim: int) -> None:
+    def __init__(self, in_dim: int, hidden_dim: int, bias: bool = True) -> None:
         super().__init__()
-        self.in_layer = nn.Linear(in_dim, hidden_dim)
+        self.in_layer = nn.Linear(in_dim, hidden_dim, bias=bias)
         self.silu = nn.SiLU()
-        self.out_layer = nn.Linear(hidden_dim, hidden_dim)
+        self.out_layer = nn.Linear(hidden_dim, hidden_dim, bias=bias)
 
 
 class SelfAttention(nn.Module):
-    def __init__(self, dim: int) -> None:
+    def __init__(self, dim: int, bias: bool = True, eps: float = 1e-6) -> None:
         super().__init__()
         self.head_dim = 128
-        self.qkv = nn.Linear(dim, dim * 3)
-        self.q_norm = nn.RMSNorm(128, eps=1e-6)
-        self.k_norm = nn.RMSNorm(128, eps=1e-6)
-        self.proj = nn.Linear(dim, dim)
+        self.qkv = nn.Linear(dim, dim * 3, bias=bias)
+        self.q_norm = nn.RMSNorm(self.head_dim, eps=eps)
+        self.k_norm = nn.RMSNorm(self.head_dim, eps=eps)
+        self.proj = nn.Linear(dim, dim, bias=bias)
         remap_pairs = [
             ("norm.query_norm.scale", "q_norm.weight"),
             ("norm.key_norm.scale", "k_norm.weight"),
@@ -59,8 +59,8 @@ class SelfAttention(nn.Module):
         return self.q_norm(q), self.k_norm(k), v
 
 
-def modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
-    x = F.layer_norm(x, x.shape[-1:], eps=1e-6)
+def modulate(x: Tensor, shift: Tensor, scale: Tensor, eps: float = 1e-6) -> Tensor:
+    x = F.layer_norm(x, x.shape[-1:], eps=eps)
     return (1.0 + scale) * x + shift
 
 
@@ -76,15 +76,21 @@ class Modulation(nn.Module):
 
 
 class DoubleStreamBlock(nn.Module):
-    def __init__(self, dim: int, mlp_ratio: float, attn_impl: str = "pt") -> None:
+    def __init__(
+        self,
+        dim: int,
+        mlp_ratio: float,
+        attn_impl: str = "pt",
+        eps: float = 1e-6,
+    ) -> None:
         super().__init__()
         self.head_dim = 128
         mlp_dim = int(dim * mlp_ratio)
-        self.norm = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
+        self.norm = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
         self.attn_impl = attn_impl
 
         self.img_mod = Modulation(dim, double=True)
-        self.img_attn = SelfAttention(dim)
+        self.img_attn = SelfAttention(dim, eps=eps)
         self.img_mlp = nn.Sequential(
             nn.Linear(dim, mlp_dim),
             nn.GELU(approximate="tanh"),
@@ -92,7 +98,7 @@ class DoubleStreamBlock(nn.Module):
         )
 
         self.txt_mod = Modulation(dim, double=True)
-        self.txt_attn = SelfAttention(dim)
+        self.txt_attn = SelfAttention(dim, eps=eps)
         self.txt_mlp = nn.Sequential(
             nn.Linear(dim, mlp_dim),
             nn.GELU(approximate="tanh"),
@@ -127,7 +133,13 @@ class SingleStreamBlock(nn.Module):
     https://arxiv.org/abs/2302.05442 and adapted modulation interface.
     """
 
-    def __init__(self, dim: int, mlp_ratio: float = 4.0, attn_impl: str = "pt") -> None:
+    def __init__(
+        self,
+        dim: int,
+        mlp_ratio: float = 4.0,
+        attn_impl: str = "pt",
+        eps: float = 1e-6,
+    ) -> None:
         super().__init__()
         self.dim = dim
         self.attn_impl = attn_impl
@@ -137,8 +149,8 @@ class SingleStreamBlock(nn.Module):
         self.linear1 = nn.Linear(dim, dim * 3 + self.mlp_dim)  # qkv and mlp_in
         self.linear2 = nn.Linear(dim + self.mlp_dim, dim)  # proj and mlp_out
 
-        self.q_norm = nn.RMSNorm(self.head_dim, eps=1e-6)
-        self.k_norm = nn.RMSNorm(self.head_dim, eps=1e-6)
+        self.q_norm = nn.RMSNorm(self.head_dim, eps=eps)
+        self.k_norm = nn.RMSNorm(self.head_dim, eps=eps)
 
         self.mlp_act = nn.GELU(approximate="tanh")
         self.modulation = Modulation(dim, double=False)
@@ -165,49 +177,57 @@ class SingleStreamBlock(nn.Module):
 
 
 class LastLayer(nn.Module):
-    def __init__(self, dim: int, patch_size: int, out_channels: int) -> None:
+    def __init__(self, dim: int, patch_size: int, out_channels: int, bias: bool = True) -> None:
         super().__init__()
-        self.linear = nn.Linear(dim, patch_size * patch_size * out_channels)
-        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(dim, 2 * dim))
+        self.linear = nn.Linear(dim, patch_size * patch_size * out_channels, bias=bias)
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(dim, 2 * dim, bias=bias))
 
     def forward(self, x: Tensor, vec: Tensor) -> Tensor:
         shift, scale = self.adaLN_modulation(vec)[:, None, :].chunk(2, dim=-1)
         return self.linear(modulate(x, shift, scale))
 
 
-@dataclass
-class FluxConfig:
+# default is Flux.1-dev
+class FluxConfig(NamedTuple):
     in_channels: int = 64
     out_channels: int = 64
     vec_in_dim: int = 768
     context_in_dim: int = 4096
     hidden_size: int = 3072
     mlp_ratio: float = 4.0
-    depth: int = 19
-    depth_single_blocks: int = 38
+    num_double_blocks: int = 19
+    num_single_blocks: int = 38
     rope_dims: tuple[int, int, int] = (16, 56, 56)
     theta: float = 1e4
     patch_size: int = 2
     guidance_embed: bool = True  # False for schnell
 
 
-class Flux(nn.Module):
-    def __init__(self, cfg: FluxConfig | None = None) -> None:
+class Flux1(nn.Module):
+    def __init__(self, cfg: FluxConfig = FluxConfig()) -> None:
         super().__init__()
-        cfg = cfg or FluxConfig()
         self.cfg = cfg
+
+        # input projections
         self.img_in = nn.Linear(cfg.in_channels, cfg.hidden_size)
-        self.time_in = MLPEmbedder(256, cfg.hidden_size)
-        self.vector_in = MLPEmbedder(cfg.vec_in_dim, cfg.hidden_size)
-        self.guidance_in = MLPEmbedder(256, cfg.hidden_size) if cfg.guidance_embed else nn.Identity()
         self.txt_in = nn.Linear(cfg.context_in_dim, cfg.hidden_size)
+        self.time_in = MLPEmbedder(256, cfg.hidden_size)
+
+        # CLIP embedding (1 for each image). only used in Flux.1
+        if cfg.vec_in_dim > 0:
+            self.vector_in = MLPEmbedder(cfg.vec_in_dim, cfg.hidden_size)
+
+        # CFG distillation
+        if cfg.guidance_embed:
+            self.guidance_in = MLPEmbedder(256, cfg.hidden_size)
+
         self.pos_embed = RopeND(cfg.rope_dims, (512, 512, 512), theta=1e4)
 
         self.double_blocks = nn.ModuleList(
-            [DoubleStreamBlock(cfg.hidden_size, cfg.mlp_ratio) for _ in range(cfg.depth)]
+            [DoubleStreamBlock(cfg.hidden_size, cfg.mlp_ratio) for _ in range(cfg.num_double_blocks)]
         )
         self.single_blocks = nn.ModuleList(
-            [SingleStreamBlock(cfg.hidden_size, cfg.mlp_ratio) for _ in range(cfg.depth_single_blocks)]
+            [SingleStreamBlock(cfg.hidden_size, cfg.mlp_ratio) for _ in range(cfg.num_single_blocks)]
         )
         self.final_layer = LastLayer(cfg.hidden_size, 1, cfg.out_channels)
 
@@ -265,31 +285,38 @@ class Flux(nn.Module):
         return img
 
 
-def _load_flux(repo_id: str, filename: str, prefix: str | None = None):
+def _load_flux1(repo_id: str, filename: str, prefix: str | None = None):
     state_dict = load_hf_state_dict(repo_id, filename, prefix=prefix)
 
     # support depth-pruned FLUX, such as Flex.1-alpha
-    config = FluxConfig(depth=0, depth_single_blocks=0)
+    num_double_blocks = 0
+    num_single_blocks = 0
+
     for key in state_dict.keys():
         if key.startswith("double_blocks."):
-            config.depth = max(config.depth, int(key.split(".")[1]) + 1)
+            num_double_blocks = max(num_double_blocks, int(key.split(".")[1]) + 1)
         elif key.startswith("single_blocks."):
-            config.depth_single_blocks = max(config.depth_single_blocks, int(key.split(".")[1]) + 1)
+            num_single_blocks = max(num_single_blocks, int(key.split(".")[1]) + 1)
 
+    config = FluxConfig(
+        num_double_blocks=num_double_blocks,
+        num_single_blocks=num_single_blocks,
+    )
     with torch.device("meta"):
-        model = Flux(config)
+        model = Flux1(config)
+
     model.load_state_dict(state_dict, assign=True)
     return model
 
 
-def load_flux(name: str = "flux-dev"):
+def load_flux1(name: str = "flux1-dev"):
     repo_id, filename, prefix = {
-        "flux-dev": ("black-forest-labs/FLUX.1-dev", "flux1-dev.safetensors", None),
-        "flux-schnell": ("black-forest-labs/FLUX.1-schnell", "flux1-schnell.safetensors", None),
-        "flux-krea-dev": ("black-forest-labs/FLUX.1-Krea-dev", "flux1-krea-dev.safetensors", None),
+        "flux1-dev": ("black-forest-labs/FLUX.1-dev", "flux1-dev.safetensors", None),
+        "flux1-schnell": ("black-forest-labs/FLUX.1-schnell", "flux1-schnell.safetensors", None),
+        "flux1-krea-dev": ("black-forest-labs/FLUX.1-Krea-dev", "flux1-krea-dev.safetensors", None),
         "flex1-alpha": ("ostris/Flex.1-alpha", "Flex.1-alpha.safetensors", "model.diffusion_model."),
         "flex2-preview": ("ostris/Flex.2-preview", "Flex.2-preview.safetensors", None),
     }[name]
 
     # BF16
-    return _load_flux(repo_id, filename, prefix=prefix)
+    return _load_flux1(repo_id, filename, prefix=prefix)

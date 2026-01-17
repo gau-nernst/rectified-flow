@@ -8,24 +8,18 @@ from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 from torchvision.transforms import v2
 
-from infer_flux import FluxTextEmbedder
-from modelling import (
-    Flux,
-    LoRALinear,
-    load_autoencoder,
-    load_flux,
-)
-from offload import PerLayerOffloadWithBackward
+from modelling import Flux1, Flux1TextEmbedder, LoRALinear, load_autoencoder, load_flux1
+from modelling.offload import PerLayerOffloadWithBackward
 from time_sampler import TimeSampler
 
 
 def setup_model(model_name: str, offload: bool, lora: int, use_compile: bool, int8_training: bool):
     if model_name.startswith(("flux", "flex")):
-        model = load_flux(model_name)
+        model = load_flux1(model_name)
         layers = list(model.double_blocks) + list(model.single_blocks)
 
         ae = load_autoencoder("flux")
-        text_embedder = FluxTextEmbedder(offload_t5=True)
+        text_embedder = Flux1TextEmbedder(offload_t5=True)
 
     else:
         raise ValueError(f"Unsupported {model_name=}")
@@ -49,7 +43,7 @@ def setup_model(model_name: str, offload: bool, lora: int, use_compile: bool, in
 
 
 def compute_loss(
-    model: Flux,
+    model: Flux1,
     latents: Tensor,
     embeds: Tensor,
     vecs: Tensor,

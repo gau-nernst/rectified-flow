@@ -7,7 +7,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # improve me
 from PIL import Image
 from tqdm import tqdm
 
-from modelling import FluxPipeline
+from modelling import Flux1Pipeline
 
 if __name__ == "__main__":
 
@@ -29,7 +29,7 @@ if __name__ == "__main__":
     N = len(all_prompts)
 
     if args.model == "flux-dev":
-        gen = FluxPipeline(offload_flux=True, offload_t5=True)
+        gen = Flux1Pipeline(offload_flux=True, offload_t5=True)
         extra_kwargs = dict()
     else:
         raise ValueError(f"{args.model=}")

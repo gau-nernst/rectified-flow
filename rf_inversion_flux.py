@@ -7,15 +7,15 @@ import torch
 from torch import Tensor
 from tqdm import tqdm
 
-from infer_flux import flux_time_shift
-from modelling import Flux
+from modelling import Flux1
+from modelling.flux1.pipeline import flux_time_shift
 
 logger = logging.getLogger(__name__)
 
 
 # Algorithm 1 & 2
 def rf_inversion_step(
-    flux: Flux,
+    flux: Flux1,
     latents: Tensor,
     reference: Tensor,
     direction: Literal["forward", "reverse"],
@@ -40,7 +40,7 @@ def rf_inversion_step(
 
 @torch.no_grad()
 def rf_inversion_generate(
-    flux: Flux,
+    flux: Flux1,
     latents: Tensor,
     txt: Tensor,
     vec: Tensor,

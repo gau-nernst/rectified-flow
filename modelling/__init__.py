@@ -1,5 +1,5 @@
 from .autoencoder import AutoEncoder, AutoEncoderConfig, load_autoencoder
-from .flux import Flux, FluxConfig, FluxPipeline, FluxTextEmbedder, load_flux
+from .flux1 import Flux1, Flux1Pipeline, Flux1TextEmbedder, FluxConfig, load_flux1
 from .lora import LoRALinear
 from .text_embedder import TextEmbedder, load_clip_l, load_t5, load_umt5_xxl
 from .utils import load_hf_state_dict

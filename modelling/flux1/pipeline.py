@@ -8,10 +8,10 @@ from ..autoencoder import AutoEncoder, load_autoencoder
 from ..offload import PerLayerOffloadCUDAStream
 from ..solvers import get_solver
 from ..text_embedder import load_clip_l, load_t5
-from .model import Flux, load_flux
+from .model import Flux1, load_flux1
 
 
-class FluxTextEmbedder:
+class Flux1TextEmbedder:
     def __init__(self, offload_t5: bool = False) -> None:
         self.t5 = load_t5()  #  9.5 GB in BF16
         self.clip = load_clip_l().bfloat16()  # 246 MB in BF16
@@ -33,7 +33,7 @@ class FluxTextEmbedder:
 
 def prepare_inputs(
     ae: AutoEncoder,
-    text_embedder: FluxTextEmbedder,
+    text_embedder: Flux1TextEmbedder,
     prompt: str | list[str],
     negative_prompt: str | list[str] | None = None,
     img_size: int | tuple[int, int] = 512,
@@ -62,11 +62,11 @@ def prepare_inputs(
     return latents, embeds, vecs, neg_embeds, neg_vecs
 
 
-class FluxPipeline:
-    def __init__(self, flux: Flux | None = None, offload_flux: bool = False, offload_t5: bool = False) -> None:
-        self.flux = flux or load_flux()  # 23.8 GB in BF16
+class Flux1Pipeline:
+    def __init__(self, flux: Flux1 | None = None, offload_flux: bool = False, offload_t5: bool = False) -> None:
+        self.flux = flux or load_flux1()  # 23.8 GB in BF16
         self.ae = load_autoencoder("flux").bfloat16()  # 168 MB in BF16
-        self.text_embedder = FluxTextEmbedder(offload_t5)
+        self.text_embedder = Flux1TextEmbedder(offload_t5)
 
         # autoencoder and clip are small, don't need to offload
         self.flux_offloader = PerLayerOffloadCUDAStream(self.flux, enable=offload_flux)
@@ -112,7 +112,7 @@ class FluxPipeline:
         height, width = latents.shape[-2:]
         timesteps = flux_timesteps(denoise, 0.0, num_steps, height * width // 4)
 
-        latents = flux_generate(
+        latents = flux1_generate(
             flux=self.flux,
             latents=latents,
             timesteps=timesteps,
@@ -148,8 +148,8 @@ def flux_time_shift(timesteps: Tensor | float, img_seq_len: int, base_shift: flo
 
 
 @torch.no_grad()
-def flux_generate(
-    flux: Flux,
+def flux1_generate(
+    flux: Flux1,
     latents: Tensor,
     timesteps: list[float],
     txt: Tensor,

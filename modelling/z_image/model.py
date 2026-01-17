@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..attn import dispatch_attn
-from ..flux.model import timestep_embedding
+from ..flux1.model import timestep_embedding
 from ..rope import RopeND, apply_rope
 from ..utils import Linear, load_hf_state_dict, make_merge_hook
 
