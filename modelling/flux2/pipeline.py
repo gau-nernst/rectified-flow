@@ -56,6 +56,10 @@ class Flux2Qwen3TextEncoder(nn.Module):
 
 
 class Flux2Pipeline:
+    DEV_DEFAULTS = dict(guidance=4.0, cfg_scale=1.0, num_steps=50)
+    KLEIN_DEFAULTS = dict(guidance=None, cfg_scale=1.0, num_steps=4)
+    KLEIN_BASE_DEFAULTS = dict(guidance=None, cfg_scale=4.0, num_steps=50)
+
     def __init__(
         self,
         flux: Flux2 | None = None,
@@ -78,6 +82,7 @@ class Flux2Pipeline:
             m.cuda()
         return self
 
+    # default is for klein
     @torch.no_grad()
     def generate(
         self,
@@ -92,7 +97,13 @@ class Flux2Pipeline:
         pbar: bool = False,
     ) -> Tensor:
         txt = self.text_encoder(prompt)
-        neg_txt = self.text_encoder(neg_prompt) if cfg_scale != 1.0 else None
+
+        if cfg_scale != 1.0:
+            neg_txt = self.text_encoder(neg_prompt)
+            if neg_txt.shape[0] == 1:
+                neg_txt = neg_txt.expand(txt.shape[0], -1, -1)
+        else:
+            neg_txt = None
 
         bsize = txt.shape[0]
         if isinstance(img_size, int):
