@@ -54,7 +54,7 @@ def prepare_inputs(
 
     # keep latents in FP32 for accurate .lerp()
     rng = torch.Generator(device).manual_seed(seed) if seed is not None else None
-    noise = torch.randn(shape, device=device, dtype=torch.float, generator=rng)
+    noise = torch.randn(shape, device=device, dtype=torch.float32, generator=rng)
 
     # this is basically SDEdit https://arxiv.org/abs/2108.01073
     latents = latents.float().lerp(noise, denoise) if latents is not None else noise
@@ -85,7 +85,7 @@ class Flux1Pipeline:
     def generate(
         self,
         prompt: str | list[str],
-        negative_prompt: str | list[str] = "",
+        neg_prompt: str | list[str] = "",
         img_size: int | tuple[int, int] = 512,
         latents: Tensor | None = None,
         denoise: float = 1.0,
@@ -100,7 +100,7 @@ class Flux1Pipeline:
             self.ae,
             self.text_embedder,
             prompt,
-            negative_prompt if cfg_scale != 1.0 else None,
+            neg_prompt if cfg_scale != 1.0 else None,
             img_size,
             latents,
             denoise,
@@ -110,7 +110,7 @@ class Flux1Pipeline:
         # denoise from t=1 (noise) to t=0 (latents)
         # divide by 4 due to FLUX's input patchification
         height, width = latents.shape[-2:]
-        timesteps = flux_timesteps(denoise, 0.0, num_steps, height * width // 4)
+        timesteps = flux1_timesteps(denoise, 0.0, num_steps, height * width // 4)
 
         latents = flux1_generate(
             flux=self.flux,
@@ -128,21 +128,21 @@ class Flux1Pipeline:
         return self.ae.decode(latents, uint8=True)
 
 
-def flux_timesteps(start: float = 1.0, end: float = 0.0, num_steps: int = 50, img_seq_len: int = 0):
+def flux1_timesteps(start: float = 1.0, end: float = 0.0, num_steps: int = 50, img_seq_len: int = 0):
     # only dev version has time shift
     timesteps = torch.linspace(start, end, num_steps + 1)
-    timesteps = flux_time_shift(timesteps, img_seq_len)
+    timesteps = flux1_time_shift(timesteps, img_seq_len)
     return timesteps.tolist()
 
 
 # https://arxiv.org/abs/2403.03206
 # Section 5.3.2 - Resolution-dependent shifting of timesteps schedules
 # https://github.com/black-forest-labs/flux/blob/805da8571a0b49b6d4043950bd266a65328c243b/src/flux/sampling.py#L222-L238
-def flux_time_shift(timesteps: Tensor | float, img_seq_len: int, base_shift: float = 0.5, max_shift: float = 1.15):
+def flux1_time_shift(timesteps: Tensor | float, img_seq_len: int, base_shift: float = 0.5, max_shift: float = 1.15):
     m = (max_shift - base_shift) / (4096 - 256)
     b = base_shift - m * 256
-
     mu = m * img_seq_len + b
+
     exp_mu = math.exp(mu)  # this is (m/n) in Equation (23)
     return exp_mu / (exp_mu + 1 / timesteps - 1)
 

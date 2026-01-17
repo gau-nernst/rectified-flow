@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader, IterableDataset, default_collate, get_w
 from tqdm import tqdm
 
 from modelling import AutoEncoder, Flux1
-from modelling.flux1.pipeline import Flux1TextEmbedder, flux1_generate, flux_timesteps
+from modelling.flux1.pipeline import Flux1TextEmbedder, flux1_generate, flux1_timesteps
 from time_sampler import LogitNormal, Uniform
 from train_utils import EMA, compute_loss, parse_img_size, random_resize, setup_model
 
@@ -124,7 +124,7 @@ def save_images(
         noise = torch.randn(shape, device="cuda", dtype=torch.bfloat16, generator=rng)
 
         if isinstance(model, Flux1):
-            timesteps = flux_timesteps(img_seq_len=shape[2] * shape[3] // 4)
+            timesteps = flux1_timesteps(img_seq_len=shape[2] * shape[3] // 4)
 
             if len(model.double_blocks) == 19:  # flux-dev
                 guidance_list = [(3.5, 1.0), (1.0, 3.5), (2.0, 2.0)]

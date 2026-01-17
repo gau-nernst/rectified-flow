@@ -81,7 +81,7 @@ class ZImagePipeline:
         pbar: bool = False,
     ) -> Tensor:
         txt_embeds = self.embed_text(self.tokenizer, self.qwen3, prompt)
-        neg_txt_embeds = self.embed_text(self.tokenizer, self.qwen3, neg_prompt) if neg_prompt else None
+        neg_txt_embeds = self.embed_text(self.tokenizer, self.qwen3, neg_prompt) if cfg_scale != 1.0 else None
 
         bsize = txt_embeds.shape[0]
         if isinstance(img_size, int):
@@ -90,12 +90,12 @@ class ZImagePipeline:
             height, width = img_size
 
         ae = self.ae
-        shape = (bsize, self.ae.z_dim, height // ae.downsample, width // ae.downsample)
+        shape = (bsize, self.ae.cfg.z_dim, height // ae.downsample, width // ae.downsample)
         device = ae.encoder.conv_in.weight.device
 
         # keep latents in FP32 for accurate .lerp()
         rng = torch.Generator(device).manual_seed(seed) if seed is not None else None
-        noise = torch.randn(shape, device=device, dtype=torch.float, generator=rng)
+        noise = torch.randn(shape, device=device, dtype=torch.float32, generator=rng)
 
         # this is basically SDEdit https://arxiv.org/abs/2108.01073
         latents = latents.float().lerp(noise, denoise) if latents is not None else noise
@@ -105,6 +105,7 @@ class ZImagePipeline:
         timesteps = torch.linspace(1.0, 0.0, num_steps + 1)
         timesteps = 3.0 / (3.0 + 1 / timesteps - 1)
         timesteps = 1 - timesteps
+        timesteps = timesteps.tolist()
 
         latents = zimage_generate(
             self.zimage,

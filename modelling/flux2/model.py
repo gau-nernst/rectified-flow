@@ -147,38 +147,33 @@ class Flux2(nn.Module):
     def forward(
         self,
         img: Tensor,
-        t: Tensor,
+        time: Tensor,
         txt: Tensor,
         guidance: Tensor | None = None,
         rope: Tensor | None = None,
     ) -> Tensor:
-        # we integrate patchify and unpatchify into model's forward pass
-        B, C, H, W = img.shape
+        _, _, H, W = img.shape
         L = txt.shape[1]
-
-        patch_size = self.cfg.patch_size
-        nH = H // patch_size
-        nW = W // patch_size
-        img = img.to(self.img_in.weight.dtype)
-        img = img.view(B, C, nH, patch_size, nW, patch_size)
-        img = img.permute(0, 2, 4, 1, 3, 5)  # (B, nH, nW, C, 2, 2)
-        img = img.reshape(B, nH * nW, C * patch_size * patch_size)
+        img = img.to(self.img_in.weight.dtype).flatten(-2).transpose(1, 2)
 
         img = self.img_in(img)
         txt = self.txt_in(txt)
-        vec = self.time_in(timestep_embedding(t, 256).to(img.dtype))
+        vec = self.time_in(timestep_embedding(time, 256).to(img.dtype))
 
         if guidance is not None:  # allow no guidance_embed
             vec = vec + self.guidance_in(timestep_embedding(guidance, 256).to(img.dtype))
 
         # TODO: update this
-        # RoPE embedding has 3 components:
-        # - time: text embeds stay at pos=0, img embeds stay at pos=0
+        # https://github.com/black-forest-labs/flux2/blob/b56ac614/src/flux2/sampling.py#L93
+        # https://github.com/black-forest-labs/flux2/blob/b56ac614/src/flux2/sampling.py#L141
+        # RoPE embedding has 4 components:
+        # - time: (TBC) when there are multiple images, they are placed at t=0, t=1, ...
         # - height: all text embeds stay at pos=0
         # - width: all text embeds stay at pos=0
+        # - text length
         if rope is None:
-            img_rope = self.pos_embed.create((0, 0, 0), (1, nH, nW))
-            txt_rope = self.pos_embed.create((0, 0, 0), (1, 1, 1)).expand(L, -1)
+            img_rope = self.pos_embed.create((0, 0, 0, 0), (1, H, W, 1))
+            txt_rope = self.pos_embed.create((0, 0, 0, 0), (1, 1, 1, L))
             rope = torch.cat([txt_rope, img_rope], dim=0)
 
         mod_img = self.double_stream_modulation_img(vec)
@@ -193,11 +188,7 @@ class Flux2(nn.Module):
         img = joint[:, L:]
 
         img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
-
-        # unpatchify
-        img = img.view(B, nH, nW, C, patch_size, patch_size)
-        img = img.permute(0, 3, 1, 4, 2, 5)  # (B, C, nH, 2, nW, 2)
-        img = img.reshape(B, C, H, W)
+        img = img.transpose(1, 2).unflatten(-1, (H, W))
         return img
 
 
@@ -235,6 +226,8 @@ def load_flux2(name: str = "klein-4B"):
         "dev": ("black-forest-labs/FLUX.2-dev", "flux2-dev.safetensors"),
         "klein-4B": ("black-forest-labs/FLUX.2-klein-4B", "flux-2-klein-4b.safetensors"),
         "klein-9B": ("black-forest-labs/FLUX.2-klein-9B", "flux-2-klein-9b.safetensors"),
+        "klein-base-4B": ("black-forest-labs/FLUX.2-klein-base-4B", "flux-2-klein-base-4b.safetensors"),
+        "klein-base-9B": ("black-forest-labs/FLUX.2-klein-base-9B", "flux-2-klein-base-9b.safetensors"),
     }[name]
 
     return _load_flux2(repo_id, filename)
