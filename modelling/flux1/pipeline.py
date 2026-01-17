@@ -49,7 +49,7 @@ def prepare_inputs(
         height = width = img_size
     else:
         height, width = img_size
-    shape = (bsize, ae.z_dim, height // ae.downsample, width // ae.downsample)
+    shape = (bsize, ae.cfg.z_dim, height // ae.downsample, width // ae.downsample)
     device = ae.encoder.conv_in.weight.device
 
     # keep latents in FP32 for accurate .lerp()
@@ -65,7 +65,7 @@ def prepare_inputs(
 class Flux1Pipeline:
     def __init__(self, flux: Flux1 | None = None, offload_flux: bool = False, offload_t5: bool = False) -> None:
         self.flux = flux or load_flux1()  # 23.8 GB in BF16
-        self.ae = load_autoencoder("flux").bfloat16()  # 168 MB in BF16
+        self.ae = load_autoencoder("flux1").bfloat16()  # 168 MB in BF16
         self.text_embedder = Flux1TextEmbedder(offload_t5)
 
         # autoencoder and clip are small, don't need to offload

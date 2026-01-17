@@ -18,7 +18,7 @@ def setup_model(model_name: str, offload: bool, lora: int, use_compile: bool, in
         model = load_flux1(model_name)
         layers = list(model.double_blocks) + list(model.single_blocks)
 
-        ae = load_autoencoder("flux")
+        ae = load_autoencoder("flux1")
         text_embedder = Flux1TextEmbedder(offload_t5=True)
 
     else:

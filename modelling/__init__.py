@@ -1,4 +1,4 @@
-from .autoencoder import AutoEncoder, AutoEncoderConfig, load_autoencoder
+from .autoencoder import AEConfig, AutoEncoder, load_autoencoder
 from .flux1 import Flux1, Flux1Config, Flux1Pipeline, Flux1TextEmbedder, load_flux1
 from .flux2 import Flux2, Flux2Config, load_flux2
 from .lora import LoRALinear

@@ -13,7 +13,7 @@ from .model import ZImage, load_zimage
 class ZImagePipeline:
     def __init__(self, zimage: ZImage | None = None) -> None:
         self.zimage = zimage or load_zimage().bfloat16()
-        self.ae = load_autoencoder("flux").bfloat16()
+        self.ae = load_autoencoder("flux1").bfloat16()
 
         # text stuff
         self.tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")

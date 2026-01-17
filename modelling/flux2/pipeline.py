@@ -9,7 +9,7 @@ from transformers import AutoModel, AutoTokenizer, PreTrainedTokenizer
 class Flux2KleinTextEmbedder(nn.Module):
     def __init__(self, model_id: str):
         super().__init__()
-        self.model = AutoModel.from_pretrained(model_id, torch_dtype="auto")
+        self.model = AutoModel.from_pretrained(model_id, dtype="auto")
         self.tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_id)
 
         # TODO: we can truncate Qwen3 to 27 layers

@@ -66,7 +66,7 @@ class TextEmbedder(nn.Module):
 
 def load_t5(max_length: int = 512) -> TextEmbedder:
     model_id = "mcmonkey/google_t5-v1_1-xxl_encoderonly"
-    model = T5EncoderModel.from_pretrained(model_id, torch_dtype=torch.bfloat16)
+    model = T5EncoderModel.from_pretrained(model_id, dtype=torch.bfloat16)
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     return TextEmbedder(model, tokenizer, max_length, "last_hidden_state")
 
@@ -78,7 +78,7 @@ def load_clip_l(output_key: str | int | list[str | int] = "pooler_output") -> Te
     # NOTE: use weights from Stability AI to reduce download time, since it is FP16 and doesn't include ViT's weights.
     model = CLIPTextModel.from_pretrained(
         "stabilityai/stable-diffusion-3.5-large",
-        torch_dtype=torch.float16,
+        dtype=torch.float16,
         subfolder="text_encoder",
     )
     tokenizer = AutoTokenizer.from_pretrained("openai/clip-vit-large-patch14")
@@ -90,7 +90,7 @@ def load_umt5_xxl(max_length: int = 512) -> TextEmbedder:
     # use umt5 from diffusers version for convenience
     model = UMT5EncoderModel.from_pretrained(
         "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         subfolder="text_encoder",
     )
     tokenizer = AutoTokenizer.from_pretrained("google/umt5-xxl")

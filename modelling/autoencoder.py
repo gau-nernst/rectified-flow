@@ -1,7 +1,7 @@
-# https://github.com/black-forest-labs/flux/blob/7e14a05ed7280f7a34ece612f7324fcc2ec9efbb/src/flux/modules/autoencoder.py
-# https://github.com/Stability-AI/sd3.5/blob/4e484e05308d83fb77ae6f680028e6c313f9da54/sd3_impls.py
+# https://github.com/black-forest-labs/flux/blob/7e14a05e/src/flux/modules/autoencoder.py
+# https://github.com/Stability-AI/sd3.5/blob/4e484e05/sd3_impls.py
 
-from dataclasses import dataclass
+from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -10,28 +10,14 @@ from torch import Tensor, nn
 from .utils import load_hf_state_dict
 
 
-@dataclass
-class AutoEncoderConfig:
-    in_ch: int = 3
-    ch: int = 128
-    out_ch: int = 3
-    ch_mult: tuple[int] = (1, 2, 4, 4)
-    num_res_blocks: int = 2
-    z_channels: int = 16
-    scale_factor: float = 1.0
-    shift_factor: float = 0.0
-    quant_conv: bool = False
-
-
 class AttnBlock(nn.Module):
-    def __init__(self, in_channels: int) -> None:
+    def __init__(self, dim: int) -> None:
         super().__init__()
-        self.in_channels = in_channels
-        self.norm = nn.GroupNorm(32, in_channels, eps=1e-6)
-        self.q = nn.Linear(in_channels, in_channels)
-        self.k = nn.Linear(in_channels, in_channels)
-        self.v = nn.Linear(in_channels, in_channels)
-        self.proj_out = nn.Linear(in_channels, in_channels)
+        self.norm = nn.GroupNorm(32, dim, eps=1e-6)
+        self.q = nn.Linear(dim, dim)
+        self.k = nn.Linear(dim, dim)
+        self.v = nn.Linear(dim, dim)
+        self.proj_out = nn.Linear(dim, dim)
 
         def hook(module, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
             for name in ("q", "k", "v", "proj_out"):
@@ -50,60 +36,67 @@ class AttnBlock(nn.Module):
 
 
 class ResnetBlock(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int | None = None) -> None:
+    def __init__(self, in_dim: int, out_dim: int | None = None) -> None:
         super().__init__()
-        out_channels = in_channels if out_channels is None else out_channels
+        out_dim = out_dim or in_dim
 
-        self.norm1 = nn.GroupNorm(32, in_channels, eps=1e-6)
+        self.norm1 = nn.GroupNorm(32, in_dim, eps=1e-6)
         self.swish1 = nn.SiLU()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, 1, 1)
+        self.conv1 = nn.Conv2d(in_dim, out_dim, 3, 1, 1)
 
-        self.norm2 = nn.GroupNorm(32, out_channels, eps=1e-6)
+        self.norm2 = nn.GroupNorm(32, out_dim, eps=1e-6)
         self.swish2 = nn.SiLU()
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, 1, 1)
+        self.conv2 = nn.Conv2d(out_dim, out_dim, 3, 1, 1)
 
-        if in_channels != out_channels:
-            self.nin_shortcut = nn.Conv2d(in_channels, out_channels, 1)
+        if in_dim != out_dim:
+            self.nin_shortcut = nn.Conv2d(in_dim, out_dim, 1)
         else:
             self.nin_shortcut = nn.Identity()
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         h = self.conv1(self.swish1(self.norm1(x)))
         h = self.conv2(self.swish2(self.norm2(h)))
         return self.nin_shortcut(x) + h
 
 
 class Downsample(nn.Sequential):
-    def __init__(self, in_channels: int) -> None:
+    def __init__(self, dim: int) -> None:
         super().__init__()
         # no asymmetric padding in torch conv, must do it ourselves
         self.pad = nn.ZeroPad2d((0, 1, 0, 1))
-        self.conv = nn.Conv2d(in_channels, in_channels, 3, 2, 0)
+        self.conv = nn.Conv2d(dim, dim, 3, 2, 0)
 
 
 class Upsample(nn.Sequential):
-    def __init__(self, in_channels: int, out_channels: int | None = None) -> None:
+    def __init__(self, in_dim: int, out_dim: int | None = None) -> None:
         super().__init__()
         self.upsample = nn.Upsample(scale_factor=2.0, mode="nearest")
-        self.conv = nn.Conv2d(in_channels, out_channels or in_channels, 3, 1, 1)
+        self.conv = nn.Conv2d(in_dim, out_dim or in_dim, 3, 1, 1)
 
 
 class Encoder(nn.Module):
-    def __init__(self, in_ch: int, ch: int, ch_mult: tuple[int], num_res_blocks: int, z_channels: int) -> None:
+    def __init__(
+        self,
+        in_dim: int,
+        dim: int,
+        dim_mult: tuple[int, ...],
+        num_res_blocks: int,
+        z_dim: int,
+        quant_conv: bool = False,
+    ) -> None:
         super().__init__()
-        self.num_resolutions = len(ch_mult)
+        self.num_resolutions = len(dim_mult)
         self.num_res_blocks = num_res_blocks
         # downsampling
-        self.conv_in = nn.Conv2d(in_ch, ch, 3, 1, 1)
+        self.conv_in = nn.Conv2d(in_dim, dim, 3, 1, 1)
 
-        in_ch_mult = (1,) + tuple(ch_mult)
-        self.in_ch_mult = in_ch_mult
+        in_ch_mult = (1,) + tuple(dim_mult)
         self.down = nn.ModuleList()
         for i_level in range(self.num_resolutions):
             block = nn.ModuleList()
             attn = nn.ModuleList()
-            block_in = ch * in_ch_mult[i_level]
-            block_out = ch * ch_mult[i_level]
+            block_in = dim * in_ch_mult[i_level]
+            block_out = dim * dim_mult[i_level]
             for _ in range(self.num_res_blocks):
                 block.append(ResnetBlock(block_in, block_out))
                 block_in = block_out
@@ -115,15 +108,15 @@ class Encoder(nn.Module):
             self.down.append(down)
 
         # middle
-        self.mid = nn.Module()
+        self.mid = nn.Sequential()
         self.mid.block_1 = ResnetBlock(block_in, block_in)
         self.mid.attn_1 = AttnBlock(block_in)
         self.mid.block_2 = ResnetBlock(block_in, block_in)
 
         # end
         self.norm_out = nn.GroupNorm(32, block_in, eps=1e-6)
-        self.conv_out = nn.Conv2d(block_in, 2 * z_channels, 3, 1, 1)
-        self.swish = nn.SiLU()
+        self.conv_out = nn.Conv2d(block_in, 2 * z_dim, 3, 1, 1)
+        self.quant_conv = nn.Conv2d(2 * z_dim, 2 * z_dim, 1) if quant_conv else nn.Identity()
 
     def forward(self, x: Tensor) -> Tensor:
         # downsampling
@@ -138,34 +131,38 @@ class Encoder(nn.Module):
                 hs.append(self.down[i_level].downsample(hs[-1]))
 
         # middle
-        h = hs[-1]
-        h = self.mid.block_1(h)
-        h = self.mid.attn_1(h)
-        h = self.mid.block_2(h)
+        h = self.mid(hs[-1])
 
         # end
-        h = self.norm_out(h)
-        h = self.swish(h)
-        h = self.conv_out(h)
+        h = self.conv_out(F.silu(self.norm_out(h)))
+        h = self.quant_conv(h)
         return h
 
 
 class Decoder(nn.Module):
-    def __init__(self, ch: int, out_ch: int, ch_mult: tuple[int], num_res_blocks: int, z_channels: int) -> None:
+    def __init__(
+        self,
+        dim: int,
+        out_dim: int,
+        dim_mult: tuple[int, ...],
+        num_res_blocks: int,
+        z_dim: int,
+        quant_conv: bool = False,
+    ) -> None:
         super().__init__()
-        self.ch = ch
-        self.num_resolutions = len(ch_mult)
+        self.num_resolutions = len(dim_mult)
         self.num_res_blocks = num_res_blocks
         self.ffactor = 2 ** (self.num_resolutions - 1)
 
         # compute in_ch_mult, block_in and curr_res at lowest res
-        block_in = ch * ch_mult[self.num_resolutions - 1]
+        block_in = dim * dim_mult[self.num_resolutions - 1]
 
         # z to block_in
-        self.conv_in = nn.Conv2d(z_channels, block_in, 3, 1, 1)
+        self.post_quant_conv = nn.Conv2d(z_dim, z_dim, 1) if quant_conv else nn.Identity()
+        self.conv_in = nn.Conv2d(z_dim, block_in, 3, 1, 1)
 
         # middle
-        self.mid = nn.Module()
+        self.mid = nn.Sequential()
         self.mid.block_1 = ResnetBlock(block_in, block_in)
         self.mid.attn_1 = AttnBlock(block_in)
         self.mid.block_2 = ResnetBlock(block_in, block_in)
@@ -175,7 +172,7 @@ class Decoder(nn.Module):
         for i_level in reversed(range(self.num_resolutions)):
             block = nn.ModuleList()
             attn = nn.ModuleList()
-            block_out = ch * ch_mult[i_level]
+            block_out = dim * dim_mult[i_level]
             for _ in range(self.num_res_blocks + 1):
                 block.append(ResnetBlock(block_in, block_out))
                 block_in = block_out
@@ -188,17 +185,15 @@ class Decoder(nn.Module):
 
         # end
         self.norm_out = nn.GroupNorm(32, block_in, eps=1e-6)
-        self.conv_out = nn.Conv2d(block_in, out_ch, 3, 1, 1)
-        self.swish = nn.SiLU()
+        self.conv_out = nn.Conv2d(block_in, out_dim, 3, 1, 1)
 
     def forward(self, z: Tensor) -> Tensor:
         # z to block_in
-        h = self.conv_in(z)
+        h = self.post_quant_conv(z)
+        h = self.conv_in(h)
 
         # middle
-        h = self.mid.block_1(h)
-        h = self.mid.attn_1(h)
-        h = self.mid.block_2(h)
+        h = self.mid(h)
 
         # upsampling
         for i_level in reversed(range(self.num_resolutions)):
@@ -210,9 +205,7 @@ class Decoder(nn.Module):
                 h = self.up[i_level].upsample(h)
 
         # end
-        h = self.norm_out(h)
-        h = self.swish(h)
-        h = self.conv_out(h)
+        h = self.conv_out(F.silu(self.norm_out(h)))
         return h
 
 
@@ -226,85 +219,110 @@ def diagonal_gaussian(z: Tensor, sample: bool) -> Tensor:
         return mean
 
 
+class AEConfig(NamedTuple):
+    in_dim: int = 3
+    dim: int = 128
+    out_dim: int = 3
+    dim_mult: tuple[int] = (1, 2, 4, 4)
+    num_res_blocks: int = 2
+    z_dim: int = 16
+    scale_shift: tuple[float, float] = (1.0, 0.0)
+    quant_conv: bool = False
+    use_bn: bool = False
+
+
 class AutoEncoder(nn.Module):
-    def __init__(self, cfg: AutoEncoderConfig | None = None) -> None:
+    def __init__(self, cfg: AEConfig = AEConfig()) -> None:
         super().__init__()
-        cfg = cfg or AutoEncoderConfig()
-        self.encoder = Encoder(
-            cfg.in_ch,
-            cfg.ch,
-            cfg.ch_mult,
-            cfg.num_res_blocks,
-            cfg.z_channels,
-        )
-        self.decoder = Decoder(
-            cfg.ch,
-            cfg.out_ch,
-            cfg.ch_mult,
-            cfg.num_res_blocks,
-            cfg.z_channels,
-        )
+        self.cfg = cfg
+        self.downsample = int(2 ** (len(cfg.dim_mult) - 1))
 
-        self.z_dim = cfg.z_channels
-        self.downsample = int(2 ** (len(cfg.ch_mult) - 1))
-        self.quant_conv = nn.Conv2d(2 * self.z_dim, 2 * self.z_dim, 1) if cfg.quant_conv else nn.Identity()
-        self.post_quant_conv = nn.Conv2d(self.z_dim, self.z_dim, 1) if cfg.quant_conv else nn.Identity()
+        self.encoder = Encoder(cfg.in_dim, cfg.dim, cfg.dim_mult, cfg.num_res_blocks, cfg.z_dim, cfg.quant_conv)
+        self.decoder = Decoder(cfg.dim, cfg.out_dim, cfg.dim_mult, cfg.num_res_blocks, cfg.z_dim, cfg.quant_conv)
 
-        self.scale_factor = cfg.scale_factor
-        self.shift_factor = cfg.shift_factor
+        # Flux.2
+        if cfg.use_bn:
+            self.bn = nn.BatchNorm2d(4 * cfg.z_dim, eps=1e-4, affine=False)
 
     def encode(self, x: Tensor, sample: bool = False) -> Tensor:
         if x.dtype == torch.uint8:
             x = x.float() / 127.5 - 1
-        x = x.to(self.encoder.conv_in.weight.dtype)
 
-        z = diagonal_gaussian(self.quant_conv(self.encoder(x)).float(), sample)
-        z = self.scale_factor * (z - self.shift_factor)
+        mean_var = self.encoder(x.to(self.encoder.conv_in.weight.dtype))
+        z = diagonal_gaussian(mean_var.float(), sample)
+
+        if self.cfg.use_bn:
+            # Flux.2 does patchify in AE, before BN. right now for other models, we patchify inside the model
+            # we should consolidate this some how
+            # patchify
+            B, C, H, W = z.shape
+            nH = H // 2
+            nW = W // 2
+            z = z.view(B, C, nH, 2, nW, 2)
+            z = z.permute(0, 1, 3, 5, 2, 4)
+            z = z.reshape(B, -1, nH, nW)
+
+            # normalize
+            z = self.bn(z)
+
+        else:
+            scale, shift = self.cfg.scale_shift
+            z = (z - shift) * scale
+
         return z
 
     def decode(self, z: Tensor, uint8: bool = False) -> Tensor:
-        z = z.float() / self.scale_factor + self.shift_factor
-        z = z.to(self.decoder.conv_in.weight.dtype)
-        x = self.decoder(self.post_quant_conv(z))
+        if self.cfg.use_bn:
+            # inverse normalize
+            mean = self.bn.running_mean.view(-1, 1, 1)
+            var = self.bn.running_var.view(-1, 1, 1)
+            eps = self.bn.eps
+            z = z.float() * (var + eps).sqrt() + mean
+
+            # unpatchify
+            B, _, nH, nW = z.shape
+            H = nH * 2
+            W = nW * 2
+            z = z.view(B, -1, 2, 2, nH, nW)
+            z = z.permute(0, 1, 4, 2, 5, 3)
+            z = z.reshape(B, -1, H, W)
+
+        else:
+            scale, shift = self.cfg.scale_shift
+            z = z.float() / scale + shift
+
+        x = self.decoder(z.to(self.decoder.conv_in.weight.dtype))
 
         if uint8:
-            x = x.float().add(1).mul(127.5).clip(0, 255).to(torch.uint8)
+            x = x.float().add(1).mul(127.5).round().clip(0, 255).to(torch.uint8)
         return x
 
     def forward(self, x: Tensor, sample: bool = False) -> Tensor:
         return self.decode(self.encode(x, sample), x.dtype == torch.uint8)
 
 
-def _load_autoencoder(
-    repo_id: str,
-    filename: str,
-    scale_factor: float,
-    shift_factor: float,
-    prefix: str | None = None,
-):
-    state_dict = load_hf_state_dict(repo_id, filename, prefix=prefix)
-    config = AutoEncoderConfig(
-        z_channels=state_dict["encoder.conv_out.weight"].shape[0] // 2,
-        quant_conv="quant_conv.weight" in state_dict,
-        scale_factor=scale_factor,
-        shift_factor=shift_factor,
+def _load_autoencoder(repo_id: str, filename: str, scale_shift: tuple[float, float] = (1.0, 0.0)):
+    state_dict = load_hf_state_dict(repo_id, filename)
+
+    cfg = AEConfig(
+        z_dim=state_dict["encoder.conv_out.weight"].shape[0] // 2,
+        scale_shift=scale_shift,
+        quant_conv="encoder.quant_conv.weight" in state_dict,
+        use_bn="bn.running_mean" in state_dict,
     )
     with torch.device("meta"):
-        ae = AutoEncoder(config)
+        ae = AutoEncoder(cfg)
+
     ae.load_state_dict(state_dict, assign=True)
+    ae.eval()
     return ae
 
 
 def load_autoencoder(name: str):
-    repo_id, filename, scale_factor, shift_factor, prefix = dict(
+    repo_id, filename, scale_shift = dict(
         # original weight is FP32
-        flux=(
-            "black-forest-labs/FLUX.1-dev",
-            "ae.safetensors",
-            0.3611,
-            0.1159,
-            None,
-        ),
+        flux1=("black-forest-labs/FLUX.1-dev", "ae.safetensors", (0.3611, 0.1159)),
+        flux2=("black-forest-labs/FLUX.2-dev", "ae.safetensors", (1.0, 0.0)),
     )[name]
 
-    return _load_autoencoder(repo_id, filename, scale_factor, shift_factor, prefix)
+    return _load_autoencoder(repo_id, filename, scale_shift)
