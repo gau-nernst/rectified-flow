@@ -21,8 +21,8 @@ from PIL import Image, ImageOps
 from torch.utils.data import DataLoader, IterableDataset, default_collate, get_worker_info
 from tqdm import tqdm
 
-from modelling import AutoEncoder, Flux
-from modelling.flux.pipeline import FluxTextEmbedder, flux_generate, flux_timesteps
+from modelling import AutoEncoder, Flux1
+from modelling.flux1.pipeline import Flux1TextEmbedder, flux1_generate, flux1_timesteps
 from time_sampler import LogitNormal, Uniform
 from train_utils import EMA, compute_loss, parse_img_size, random_resize, setup_model
 
@@ -102,9 +102,9 @@ class ImageDataset(IterableDataset):
 
 @torch.no_grad()
 def save_images(
-    model: Flux,
+    model: Flux1,
     ae: AutoEncoder,
-    text_embedder: FluxTextEmbedder,
+    text_embedder: Flux1TextEmbedder,
     prompt_path: str,
     save_dir: Path,
     img_size: tuple[int, int],
@@ -123,8 +123,8 @@ def save_images(
         shape = (embeds.shape[0], 16, img_size[0] // 8, img_size[1] // 8)
         noise = torch.randn(shape, device="cuda", dtype=torch.bfloat16, generator=rng)
 
-        if isinstance(model, Flux):
-            timesteps = flux_timesteps(img_seq_len=shape[2] * shape[3] // 4)
+        if isinstance(model, Flux1):
+            timesteps = flux1_timesteps(img_seq_len=shape[2] * shape[3] // 4)
 
             if len(model.double_blocks) == 19:  # flux-dev
                 guidance_list = [(3.5, 1.0), (1.0, 3.5), (2.0, 2.0)]
@@ -134,7 +134,7 @@ def save_images(
                 raise ValueError
 
             for guidance, cfg_scale in guidance_list:
-                latents = flux_generate(
+                latents = flux1_generate(
                     model,
                     noise,
                     timesteps,

@@ -3,7 +3,7 @@ import time
 import torch
 import torch.nn.functional as F
 
-from modelling import load_flux
+from modelling import load_flux1
 from modelling.mx import MXLinear
 from modelling.nvfp4 import NVFP4Linear
 
@@ -29,7 +29,7 @@ def patched_sdpa(q, k, v, *args, **kwargs):
 # F.linear = patched_linear
 # F.scaled_dot_product_attention = patched_sdpa
 
-flux = load_flux().cuda()
+flux = load_flux1().cuda()
 
 allowed_keys = [
     "img_attn",

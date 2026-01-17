@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..attn import dispatch_attn
-from ..flux.model import timestep_embedding
+from ..flux1.model import timestep_embedding
 from ..rope import RopeND, apply_rope
 from ..utils import Linear, load_hf_state_dict, make_merge_hook
 
@@ -81,13 +81,13 @@ class Block(nn.Module):
 
 @dataclasses.dataclass
 class ZImageConfig:
-    in_channels: int = 16
+    img_dim: int = 16
     txt_dim: int = 2560
+    mod_dim: int = 256
     dim: int = 3840
     n_refiner_layers: int = 2
     n_layers: int = 30
     patch_size: int = 2
-    mod_dim: int = 256
     mlp_ratio: float = 8 / 3
     rope_dims: tuple[int, int, int] = (32, 48, 48)
 
@@ -105,7 +105,7 @@ class ZImage(nn.Module):
         self.cap_pad_token = nn.Parameter(torch.zeros(1, cfg.dim))
 
         # image-only processing
-        patchified_dim = cfg.patch_size * cfg.patch_size * cfg.in_channels
+        patchified_dim = cfg.patch_size * cfg.patch_size * cfg.img_dim
         self.all_x_embedder = nn.ModuleDict()
         self.all_x_embedder["2-1"] = Linear(patchified_dim, cfg.dim)
         self.noise_refiner = nn.ModuleList(
