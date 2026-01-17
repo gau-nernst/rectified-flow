@@ -114,7 +114,7 @@ class Flux2Config(NamedTuple):
     num_double_blocks: int = 5
     num_single_blocks: int = 20
     patch_size: int = 2
-    cfg_distill: bool = False
+    guidance_embed: bool = False
 
 
 class Flux2(nn.Module):
@@ -126,7 +126,7 @@ class Flux2(nn.Module):
         self.img_in = nn.Linear(cfg.img_dim, cfg.dim, bias=False)
         self.txt_in = nn.Linear(cfg.txt_dim, cfg.dim, bias=False)
         self.time_in = MLPEmbedder(256, cfg.dim, bias=False)
-        if cfg.cfg_distill:
+        if cfg.guidance_embed:
             self.guidance_in = MLPEmbedder(256, cfg.dim, bias=False)
 
         # 4D rope
@@ -209,14 +209,14 @@ def _load_flux2(repo_id: str, filename: str):
             num_single_blocks = max(num_single_blocks, int(key.split(".")[1]) + 1)
 
     dim, txt_dim = state_dict["txt_in.weight"].shape
-    cfg_distill = "guidance_in.in_layer.weight" in state_dict
+    guidance_embed = "guidance_in.in_layer.weight" in state_dict
 
     cfg = Flux2Config(
         txt_dim=txt_dim,
         dim=dim,
         num_double_blocks=num_double_blocks,
         num_single_blocks=num_single_blocks,
-        cfg_distill=cfg_distill,
+        guidance_embed=guidance_embed,
     )
     with torch.device("meta"):
         model = Flux2(cfg)

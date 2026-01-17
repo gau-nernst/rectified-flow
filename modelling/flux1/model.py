@@ -178,7 +178,7 @@ class Flux1Config(NamedTuple):
     num_double_blocks: int = 19
     num_single_blocks: int = 38
     patch_size: int = 2
-    cfg_distill: bool = True  # False for schnell
+    guidance_embed: bool = True  # False for schnell
 
 
 class Flux1(nn.Module):
@@ -191,7 +191,7 @@ class Flux1(nn.Module):
         self.txt_in = nn.Linear(cfg.txt_dim, cfg.dim)
         self.time_in = MLPEmbedder(256, cfg.dim)
         self.vector_in = MLPEmbedder(cfg.vec_dim, cfg.dim)
-        if cfg.cfg_distill:
+        if cfg.guidance_embed:
             self.guidance_in = MLPEmbedder(256, cfg.dim)
 
         # 3D rope
