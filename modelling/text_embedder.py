@@ -1,4 +1,4 @@
-# https://github.com/black-forest-labs/flux/blob/7e14a05ed7280f7a34ece612f7324fcc2ec9efbb/src/flux/modules/conditioner.py#L5
+# https://github.com/black-forest-labs/flux/blob/7e14a05e/src/flux/modules/conditioner.py
 
 import torch
 from torch import Tensor, nn

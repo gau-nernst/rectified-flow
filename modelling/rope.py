@@ -35,6 +35,7 @@ class RopeND(nn.Module):
         dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__()
+        assert len(dims) == len(max_lens)
         self.dims = dims
         self.max_lens = max_lens
         self.theta = theta

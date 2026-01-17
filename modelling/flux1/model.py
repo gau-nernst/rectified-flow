@@ -65,52 +65,39 @@ def modulate(x: Tensor, shift: Tensor, scale: Tensor, eps: float = 1e-6) -> Tens
 
 
 class Modulation(nn.Module):
-    def __init__(self, dim: int, double: bool) -> None:
+    def __init__(self, dim: int, double: bool, bias: bool = True) -> None:
         super().__init__()
         self.multiplier = 6 if double else 3
         self.silu = nn.SiLU()
-        self.lin = nn.Linear(dim, self.multiplier * dim)
+        self.lin = nn.Linear(dim, self.multiplier * dim, bias=bias)
 
     def forward(self, vec: Tensor) -> tuple[Tensor, ...]:
         return self.lin(self.silu(vec))[:, None, :].chunk(self.multiplier, dim=-1)
 
 
 class DoubleStreamBlock(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        mlp_ratio: float,
-        attn_impl: str = "pt",
-        eps: float = 1e-6,
-    ) -> None:
+    def __init__(self, dim: int, mlp_ratio: float, attn_impl: str = "pt", eps: float = 1e-6) -> None:
         super().__init__()
         self.head_dim = 128
         mlp_dim = int(dim * mlp_ratio)
-        self.norm = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
         self.attn_impl = attn_impl
+        self.eps = eps
 
         self.img_mod = Modulation(dim, double=True)
-        self.img_attn = SelfAttention(dim, eps=eps)
-        self.img_mlp = nn.Sequential(
-            nn.Linear(dim, mlp_dim),
-            nn.GELU(approximate="tanh"),
-            nn.Linear(mlp_dim, dim),
-        )
-
         self.txt_mod = Modulation(dim, double=True)
+
+        self.img_attn = SelfAttention(dim, eps=eps)
         self.txt_attn = SelfAttention(dim, eps=eps)
-        self.txt_mlp = nn.Sequential(
-            nn.Linear(dim, mlp_dim),
-            nn.GELU(approximate="tanh"),
-            nn.Linear(mlp_dim, dim),
-        )
+
+        self.img_mlp = nn.Sequential(nn.Linear(dim, mlp_dim), nn.GELU(approximate="tanh"), nn.Linear(mlp_dim, dim))
+        self.txt_mlp = nn.Sequential(nn.Linear(dim, mlp_dim), nn.GELU(approximate="tanh"), nn.Linear(mlp_dim, dim))
 
     def forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor) -> tuple[Tensor, Tensor]:
         img_shift1, img_scale1, img_gate1, img_shift2, img_scale2, img_gate2 = self.img_mod(vec)
         txt_shift1, txt_scale1, txt_gate1, txt_shift2, txt_scale2, txt_gate2 = self.txt_mod(vec)
 
-        img_q, img_k, img_v = self.img_attn.forward_qkv(modulate(img, img_shift1, img_scale1))
-        txt_q, txt_k, txt_v = self.txt_attn.forward_qkv(modulate(txt, txt_shift1, txt_scale1))
+        img_q, img_k, img_v = self.img_attn.forward_qkv(modulate(img, img_shift1, img_scale1, eps=self.eps))
+        txt_q, txt_k, txt_v = self.txt_attn.forward_qkv(modulate(txt, txt_shift1, txt_scale1, eps=self.eps))
 
         q = apply_rope(torch.cat((txt_q, img_q), dim=1), pe)
         k = apply_rope(torch.cat((txt_k, img_k), dim=1), pe)
@@ -133,18 +120,13 @@ class SingleStreamBlock(nn.Module):
     https://arxiv.org/abs/2302.05442 and adapted modulation interface.
     """
 
-    def __init__(
-        self,
-        dim: int,
-        mlp_ratio: float = 4.0,
-        attn_impl: str = "pt",
-        eps: float = 1e-6,
-    ) -> None:
+    def __init__(self, dim: int, mlp_ratio: float, attn_impl: str = "pt", eps: float = 1e-6) -> None:
         super().__init__()
-        self.dim = dim
-        self.attn_impl = attn_impl
         self.head_dim = 128
+        self.dim = dim
         self.mlp_dim = int(dim * mlp_ratio)
+        self.attn_impl = attn_impl
+        self.eps = eps
 
         self.linear1 = nn.Linear(dim, dim * 3 + self.mlp_dim)  # qkv and mlp_in
         self.linear2 = nn.Linear(dim + self.mlp_dim, dim)  # proj and mlp_out
@@ -163,7 +145,7 @@ class SingleStreamBlock(nn.Module):
 
     def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
         shift, scale, gate = self.modulation(vec)
-        x_mod = modulate(x, shift, scale)
+        x_mod = modulate(x, shift, scale, eps=self.eps)
         qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.dim, self.mlp_dim], dim=-1)
 
         q, k, v = qkv.unflatten(2, (-1, self.head_dim)).chunk(3, dim=2)
@@ -188,55 +170,48 @@ class LastLayer(nn.Module):
 
 
 # default is Flux.1-dev
-class FluxConfig(NamedTuple):
-    in_channels: int = 64
-    out_channels: int = 64
-    vec_in_dim: int = 768
-    context_in_dim: int = 4096
-    hidden_size: int = 3072
-    mlp_ratio: float = 4.0
+class Flux1Config(NamedTuple):
+    img_dim: int = 64
+    txt_dim: int = 4096
+    vec_dim: int = 768
+    dim: int = 3072
     num_double_blocks: int = 19
     num_single_blocks: int = 38
-    rope_dims: tuple[int, int, int] = (16, 56, 56)
-    theta: float = 1e4
     patch_size: int = 2
-    guidance_embed: bool = True  # False for schnell
+    cfg_distill: bool = True  # False for schnell
 
 
 class Flux1(nn.Module):
-    def __init__(self, cfg: FluxConfig = FluxConfig()) -> None:
+    def __init__(self, cfg: Flux1Config = Flux1Config()) -> None:
         super().__init__()
         self.cfg = cfg
 
         # input projections
-        self.img_in = nn.Linear(cfg.in_channels, cfg.hidden_size)
-        self.txt_in = nn.Linear(cfg.context_in_dim, cfg.hidden_size)
-        self.time_in = MLPEmbedder(256, cfg.hidden_size)
+        self.img_in = nn.Linear(cfg.img_dim, cfg.dim)
+        self.txt_in = nn.Linear(cfg.txt_dim, cfg.dim)
+        self.time_in = MLPEmbedder(256, cfg.dim)
+        self.vector_in = MLPEmbedder(cfg.vec_dim, cfg.dim)
+        if cfg.cfg_distill:
+            self.guidance_in = MLPEmbedder(256, cfg.dim)
 
-        # CLIP embedding (1 for each image). only used in Flux.1
-        if cfg.vec_in_dim > 0:
-            self.vector_in = MLPEmbedder(cfg.vec_in_dim, cfg.hidden_size)
+        # 3D rope
+        self.pos_embed = RopeND(dims=(16, 56, 56), max_lens=(512, 512, 512), theta=1e4)
 
-        # CFG distillation
-        if cfg.guidance_embed:
-            self.guidance_in = MLPEmbedder(256, cfg.hidden_size)
-
-        self.pos_embed = RopeND(cfg.rope_dims, (512, 512, 512), theta=1e4)
-
+        mlp_ratio = 4.0
         self.double_blocks = nn.ModuleList(
-            [DoubleStreamBlock(cfg.hidden_size, cfg.mlp_ratio) for _ in range(cfg.num_double_blocks)]
+            [DoubleStreamBlock(cfg.dim, mlp_ratio) for _ in range(cfg.num_double_blocks)]
         )
         self.single_blocks = nn.ModuleList(
-            [SingleStreamBlock(cfg.hidden_size, cfg.mlp_ratio) for _ in range(cfg.num_single_blocks)]
+            [SingleStreamBlock(cfg.dim, mlp_ratio) for _ in range(cfg.num_single_blocks)]
         )
-        self.final_layer = LastLayer(cfg.hidden_size, 1, cfg.out_channels)
+        self.final_layer = LastLayer(cfg.dim, 1, cfg.img_dim)
 
     def forward(
         self,
         img: Tensor,
         t: Tensor,
         txt: Tensor,
-        y: Tensor,
+        vec: Tensor,
         guidance: Tensor | None = None,
         rope: Tensor | None = None,
     ) -> Tensor:
@@ -254,7 +229,7 @@ class Flux1(nn.Module):
 
         img = self.img_in(img)
         txt = self.txt_in(txt)
-        vec = self.time_in(timestep_embedding(t, 256).to(img.dtype)) + self.vector_in(y)
+        vec = self.time_in(timestep_embedding(t, 256).to(img.dtype)) + self.vector_in(vec)
 
         if guidance is not None:  # allow no guidance_embed
             vec = vec + self.guidance_in(timestep_embedding(guidance, 256).to(img.dtype))
@@ -298,22 +273,22 @@ def _load_flux1(repo_id: str, filename: str, prefix: str | None = None):
         elif key.startswith("single_blocks."):
             num_single_blocks = max(num_single_blocks, int(key.split(".")[1]) + 1)
 
-    config = FluxConfig(
+    cfg = Flux1Config(
         num_double_blocks=num_double_blocks,
         num_single_blocks=num_single_blocks,
     )
     with torch.device("meta"):
-        model = Flux1(config)
+        model = Flux1(cfg)
 
     model.load_state_dict(state_dict, assign=True)
     return model
 
 
-def load_flux1(name: str = "flux1-dev"):
+def load_flux1(name: str = "dev"):
     repo_id, filename, prefix = {
-        "flux1-dev": ("black-forest-labs/FLUX.1-dev", "flux1-dev.safetensors", None),
-        "flux1-schnell": ("black-forest-labs/FLUX.1-schnell", "flux1-schnell.safetensors", None),
-        "flux1-krea-dev": ("black-forest-labs/FLUX.1-Krea-dev", "flux1-krea-dev.safetensors", None),
+        "dev": ("black-forest-labs/FLUX.1-dev", "flux1-dev.safetensors", None),
+        "schnell": ("black-forest-labs/FLUX.1-schnell", "flux1-schnell.safetensors", None),
+        "krea-dev": ("black-forest-labs/FLUX.1-Krea-dev", "flux1-krea-dev.safetensors", None),
         "flex1-alpha": ("ostris/Flex.1-alpha", "Flex.1-alpha.safetensors", "model.diffusion_model."),
         "flex2-preview": ("ostris/Flex.2-preview", "Flex.2-preview.safetensors", None),
     }[name]
