@@ -2,7 +2,9 @@
 
 import math
 
+import numpy as np
 import torch
+from PIL import Image
 from torch import Tensor, nn
 from tqdm import tqdm
 from transformers import AutoTokenizer, PreTrainedTokenizer, Qwen3Model
@@ -88,6 +90,7 @@ class Flux2Pipeline:
         self,
         prompt: str | list[str],
         neg_prompt: str | list[str] = "",
+        ref_imgs: list[Image.Image] | None = None,
         img_size: int | tuple[int, int] = 512,
         guidance: Tensor | float | None = None,
         cfg_scale: float = 1.0,
@@ -123,9 +126,20 @@ class Flux2Pipeline:
         timesteps = flux2_time_shift(timesteps, num_steps, shape[2] * shape[3])
         timesteps = timesteps.tolist()
 
+        if ref_imgs is not None:
+            ref_latents = []
+            for img in ref_imgs:
+                img = crop_to_multiple(img)
+                img = torch.from_numpy(np.asarray(img))
+                img = img.permute(2, 0, 1).to(device)  # HWC->CHW
+                ref_latents.append(self.ae.encode(img.unsqueeze(0)).squeeze(0))
+        else:
+            ref_latents = None
+
         latents = flux2_generate(
             flux=self.flux,
             latents=noise,
+            ref_latents=ref_latents,
             timesteps=timesteps,
             txt=txt,
             neg_txt=neg_txt,
@@ -157,6 +171,16 @@ def flux2_time_shift(timesteps: Tensor | float, num_steps: int, img_seq_len: int
     return exp_mu / (exp_mu + 1 / timesteps - 1)
 
 
+def crop_to_multiple(img: Image.Image, x: int = 16):
+    W, H = img.size
+    newW = W // x * x
+    newH = H // x * x
+
+    left = (W - newW) // 2
+    top = (H - newH) // 2
+    return img.crop((left, top, left + newW, top + newH))
+
+
 @torch.no_grad()
 def flux2_generate(
     flux: Flux2,
@@ -164,12 +188,14 @@ def flux2_generate(
     timesteps: list[float],
     txt: Tensor,
     neg_txt: Tensor | None = None,
+    ref_latents: list[Tensor] | None = None,
     guidance: Tensor | float | None = 3.5,
     cfg_scale: float = 1.0,
     solver: str = "euler",
     pbar: bool = False,
 ) -> Tensor:
     B, _, H, W = latents.shape
+    img_len = H * W
 
     if isinstance(guidance, (int, float)):
         guidance = torch.full((B,), guidance, device=latents.device)
@@ -179,18 +205,39 @@ def flux2_generate(
 
     img_rope = flux.make_img_rope(H, W)
     txt_rope = flux.make_txt_rope(txt.shape[1])
-    rope = torch.cat([img_rope, txt_rope], dim=0)
+
+    if ref_latents is not None:
+        ref_ropes = []
+        flat_latents = []
+
+        for i, ref_lat in enumerate(ref_latents):
+            _, h, w = ref_lat.shape
+            ref_ropes.append(flux.make_img_rope(h, w, t=10 * (i + 1)))
+            flat_latents.append(ref_lat.flatten(-2).transpose(0, 1))
+
+        rope = torch.cat([img_rope, *ref_ropes, txt_rope], dim=0)
+        ref_imgs = torch.cat(flat_latents, dim=0).unsqueeze(0).expand(B, -1, -1)
+
+    else:
+        rope = torch.cat([img_rope, txt_rope], dim=0)
 
     latents = latents.flatten(-2).transpose(1, 2)  # (B, C, H, W) -> (B, H*W, C)
 
     for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
+        # concat reference latents (images) if needed.
+        if ref_latents is not None:
+            imgs = torch.cat([latents, ref_imgs], dim=1)
+        else:
+            imgs = latents
+
+        # only keep the velocity for the latents being denoised.
         t = torch.tensor([timesteps[i]], device="cuda")
-        v = flux(latents, t, txt, rope, guidance).float()
+        v = flux(imgs, t, txt, rope, guidance)[:, :img_len].float()
 
         # classifier-free guidance
         if cfg_scale != 1.0:
             assert neg_txt is not None
-            neg_v = flux(latents, t, neg_txt, rope, guidance).float()
+            neg_v = flux(imgs, t, neg_txt, rope, guidance)[:, :img_len].float()
             v = neg_v.lerp(v, cfg_scale)
 
         latents = solver_.step(latents, v, i)
