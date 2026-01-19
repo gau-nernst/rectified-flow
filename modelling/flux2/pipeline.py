@@ -176,18 +176,24 @@ def flux2_generate(
 
     num_steps = len(timesteps) - 1
     solver_ = get_solver(solver, timesteps)
-    rope = flux.make_rope(H, W, txt.shape[1])
+
+    img_rope = flux.make_img_rope(H, W)
+    txt_rope = flux.make_txt_rope(txt.shape[1])
+    rope = torch.cat([img_rope, txt_rope], dim=0)
+
+    latents = latents.flatten(-2).transpose(1, 2)  # (B, C, H, W) -> (B, H*W, C)
 
     for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
         t = torch.tensor([timesteps[i]], device="cuda")
-        v = flux(latents, t, txt, guidance, rope).float()
+        v = flux(latents, t, txt, rope, guidance).float()
 
         # classifier-free guidance
         if cfg_scale != 1.0:
             assert neg_txt is not None
-            neg_v = flux(latents, t, neg_txt, guidance, rope).float()
+            neg_v = flux(latents, t, neg_txt, rope, guidance).float()
             v = neg_v.lerp(v, cfg_scale)
 
         latents = solver_.step(latents, v, i)
 
+    latents = latents.transpose(1, 2).unflatten(-1, (H, W))
     return latents
