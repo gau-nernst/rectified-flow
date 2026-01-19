@@ -129,7 +129,7 @@ class Flux2Pipeline:
         if ref_imgs is not None:
             ref_latents = []
             for img in ref_imgs:
-                img = crop_to_multiple(img)
+                img = crop_to_multiple(img).convert("RGB")
                 img = torch.from_numpy(np.asarray(img))
                 img = img.permute(2, 0, 1).to(device)  # HWC->CHW
                 ref_latents.append(self.ae.encode(img.unsqueeze(0)).squeeze(0))
