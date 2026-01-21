@@ -1,15 +1,12 @@
 import gc
 import io
-import sqlite3
-import time
 import uuid
-from contextlib import asynccontextmanager
+from functools import lru_cache
 from pathlib import Path
-from typing import Annotated
 
 import requests
 import torch
-from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
@@ -21,7 +18,6 @@ APP_ROOT = Path(__file__).resolve().parent
 STATIC_DIR = APP_ROOT / "static"
 IMAGE_DIR = APP_ROOT / "images"
 IMAGE_DIR.mkdir(parents=True, exist_ok=True)
-DB_PATH = IMAGE_DIR / "index.db"
 
 MODELS = ["klein-4B", "klein-9B", "klein-base-4B", "klein-base-9B"]
 MODEL_DEFAULTS = {
@@ -35,111 +31,108 @@ PIPELINE: Flux2Pipeline | None = None
 ACTIVE_MODEL: str | None = None
 
 
-def _save_image(db_conn: sqlite3.Connection, img: Image.Image, label: str | None = None) -> str:
-    image_id = uuid.uuid4().hex
-    filename = f"{image_id}.png"
+def _safe_filename(name: str) -> str:
+    return Path(name).name
+
+
+@lru_cache(maxsize=10)
+def load_image(filename: str) -> Image.Image:
     path = IMAGE_DIR / filename
-    img.save(path, format="PNG")
-    db_conn.execute(
-        """
-        INSERT INTO images (id, filename, label, created_at, width, height)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (image_id, filename, label or "", time.time(), img.width, img.height),
-    )
-    db_conn.commit()
-    return image_id
+    return Image.open(path).convert("RGB")
 
-
-def get_db(req: Request) -> sqlite3.Connection:
-    return req.app.state.db_conn
-
-
-DBDep = Annotated[sqlite3.Connection, Depends(get_db)]
 
 image_router = APIRouter(tags=["image"])
 
 
-@image_router.get("/list", response_class=JSONResponse)
-def image_list(db_conn: DBDep):
-    rows = db_conn.execute("SELECT * FROM images ORDER BY created_at DESC").fetchall()
-    items = [dict(row) for row in rows]
+@image_router.get("/", response_class=JSONResponse)
+@image_router.get("", response_class=JSONResponse, include_in_schema=False)
+def image_list():
+    items = []
+    for path in IMAGE_DIR.iterdir():
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+            continue
+        filename = path.name
+        stat = path.stat()
+        with Image.open(path) as img:
+            width, height = img.size
+        items.append(
+            {
+                "filename": filename,
+                "created_at": stat.st_mtime,
+                "width": width,
+                "height": height,
+            }
+        )
+    items.sort(key=lambda item: item["created_at"], reverse=True)
     return {"items": items}
 
 
-@image_router.get("/{image_id}", response_class=FileResponse)
-def image_get(image_id: str, db_conn: DBDep):
-    row = db_conn.execute("SELECT * FROM images WHERE id = ?", (image_id,)).fetchone()
-    if row is None:
+@image_router.get("/{filename}", response_class=FileResponse)
+def image_get(filename: str):
+    safe_name = _safe_filename(filename)
+    if safe_name != filename:
         raise HTTPException(status_code=404, detail="Unknown image")
-    path = IMAGE_DIR / row["filename"]
+    path = IMAGE_DIR / safe_name
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Unknown image")
     return FileResponse(path)
 
 
-@image_router.post("/save", response_class=JSONResponse)
-async def image_save(db_conn: DBDep, file: UploadFile = File(...), label: str | None = Form(default=None)):
-    data = await file.read()
-    img = Image.open(io.BytesIO(data)).convert("RGB")
-    image_id = _save_image(db_conn, img, label=label)
-    return {"id": image_id}
+@image_router.post("/", response_class=JSONResponse)
+async def image_import(
+    file: UploadFile | None = File(default=None),
+    url: str | None = Form(default=None),
+):
+    data: bytes
+    source_name: str
+    if file is not None:
+        data = await file.read()
+        source_name = file.filename or f"import_{uuid.uuid4().hex}"
+    elif url:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.content
+        source_name = f"url_{uuid.uuid4().hex}"
+    else:
+        raise HTTPException(status_code=400, detail="Provide a file or url")
+    with Image.open(io.BytesIO(data)) as image_info:
+        fmt = (image_info.format or "png").lower()
+    if fmt == "jpeg":
+        fmt = "jpg"
+    safe_name = Path(source_name).name
+    if not safe_name or safe_name in {".", ".."}:
+        safe_name = f"image_{uuid.uuid4().hex}.{fmt}"
+    base = Path(safe_name).stem
+    suffix = Path(safe_name).suffix or f".{fmt}"
+    candidate = f"{base}{suffix}"
+    if (IMAGE_DIR / candidate).exists():
+        candidate = f"{base}_{uuid.uuid4().hex}{suffix}"
+    (IMAGE_DIR / candidate).write_bytes(data)
+    return {"filename": candidate}
 
 
-@image_router.post("/delete/{image_id}")
-def image_delete(image_id: str, db_conn: DBDep) -> JSONResponse:
-    row = db_conn.execute("SELECT * FROM images WHERE id = ?", (image_id,)).fetchone()
-    if row is None:
+@image_router.delete("/{filename}")
+def image_delete(filename: str):
+    safe_name = _safe_filename(filename)
+    if safe_name != filename:
         raise HTTPException(status_code=404, detail="Unknown image")
-    db_conn.execute("DELETE FROM images WHERE id = ?", (image_id,))
-    db_conn.commit()
-    info = dict(row)
-    path = IMAGE_DIR / info["filename"]
-    if path.exists():
-        path.unlink()
-    return {"ok": True}
+    path = IMAGE_DIR / safe_name
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Unknown image")
+    path.unlink()
+    return None
 
 
-@image_router.post("/load-url")
-def image_load_url(db_conn: DBDep, url: str = Form(...)) -> JSONResponse:
-    resp = requests.get(url, timeout=10)
-    resp.raise_for_status()
-    img = Image.open(io.BytesIO(resp.content))
-    img_id = _save_image(db_conn, img, label="url")
-    return {"id": img_id}
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # init db
-    db_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    db_conn.row_factory = sqlite3.Row
-    db_conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS images (
-            id TEXT PRIMARY KEY,
-            filename TEXT NOT NULL,
-            label TEXT NOT NULL,
-            created_at REAL NOT NULL,
-            width INTEGER NOT NULL,
-            height INTEGER NOT NULL
-        )
-        """
-    )
-    db_conn.commit()
-    app.state.db_conn = db_conn
-
-    yield
-
-    db_conn.close()
-
-
-app = FastAPI(lifespan=lifespan)
+app = FastAPI()
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(image_router, prefix="/image")
 
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return None
 
 
 @app.get("/")
@@ -160,57 +153,47 @@ class GenerateRequest(BaseModel):
     num_steps: int = 4
     cfg_scale: float = 1.0
     seed: int | None = None
-    image_input_ids: list[str] = Field(default_factory=list)
+    image_input_filenames: list[str] = Field(default_factory=list)
 
 
 @app.post("/generate")
-async def generate(db_conn: DBDep, payload: GenerateRequest):
+async def generate(request: GenerateRequest):
     ref_imgs: list[Image.Image] = []
 
-    image_ids = payload.image_input_ids
+    image_filenames = request.image_input_filenames
 
-    for image_id in image_ids:
-        row = db_conn.execute("SELECT * FROM images WHERE id = ?", (image_id,)).fetchone()
-        path = IMAGE_DIR / row["filename"]
-        ref_imgs.append(Image.open(path).convert("RGB"))
+    for filename in image_filenames:
+        safe_name = _safe_filename(filename)
+        if safe_name != filename:
+            continue
+        img = load_image(safe_name).copy()
+        ref_imgs.append(img)
 
     if not ref_imgs:
         ref_imgs = None
 
-    img = PIPELINE.generate(
-        prompt=payload.prompt,
-        neg_prompt=payload.neg_prompt,
+    img_pt = PIPELINE.generate(
+        prompt=request.prompt,
+        neg_prompt=request.neg_prompt,
         ref_imgs=ref_imgs,
-        img_size=(payload.height, payload.width),
-        cfg_scale=payload.cfg_scale,
-        num_steps=payload.num_steps,
-        seed=payload.seed,
+        img_size=(request.height, request.width),
+        cfg_scale=request.cfg_scale,
+        num_steps=request.num_steps,
+        seed=request.seed,
         pbar=False,
     )
-
-    if img.ndim == 3:
-        img = img.unsqueeze(0)
-    img = img[0].permute(1, 2, 0).cpu().numpy()
-    pil_img = Image.fromarray(img)
-
-    image_id = None
+    img_np = img_pt.squeeze(0).permute(1, 2, 0).cpu().numpy()
+    pil_img = Image.fromarray(img_np)
 
     img_bytes = io.BytesIO()
-    pil_img.save(img_bytes, format="PNG")
+    pil_img.save(img_bytes, format="WEBP", lossless=True)
     img_bytes.seek(0)
 
-    headers = {
-        "X-Width": str(payload.width),
-        "X-Height": str(payload.height),
-    }
-    if image_id:
-        headers["X-Image-Id"] = image_id
-
-    return Response(content=img_bytes.getvalue(), media_type="image/png", headers=headers)
+    return Response(content=img_bytes.getvalue(), media_type="image/webp")
 
 
 @app.post("/model/load")
-def load_model(model: str = Form(...)) -> JSONResponse:
+def load_model(model: str):
     global PIPELINE, ACTIVE_MODEL
     if PIPELINE is not None:
         del PIPELINE
@@ -220,7 +203,7 @@ def load_model(model: str = Form(...)) -> JSONResponse:
     PIPELINE = Flux2Pipeline(flux=load_flux2(model)).cuda()
     ACTIVE_MODEL = model
 
-    return {"ok": True}
+    return None
 
 
 @app.get("/vram")

@@ -14,7 +14,6 @@ const outputImage = document.getElementById("output_image");
 const outputMeta = document.getElementById("output_meta");
 const saveOutputBtn = document.getElementById("save_output");
 const shelf = document.getElementById("image_shelf");
-const inputZone = document.getElementById("input_zone");
 const inputStackEl = document.getElementById("input_stack");
 const importBtn = document.getElementById("import_btn");
 const fileInput = document.getElementById("file_input");
@@ -25,7 +24,6 @@ let modelDefaults = {};
 let shelfImages = [];
 let inputStack = [];
 let latestOutputBlob = null;
-let latestOutputImageId = null;
 
 async function fetchModels() {
   const res = await fetch("/models");
@@ -58,11 +56,11 @@ function applyDefaults(modelName) {
 }
 
 async function fetchShelf() {
-  const res = await fetch("/image/list");
+  const res = await fetch("/image/");
   const data = await res.json();
   shelfImages = data.items || [];
   renderShelf();
-  inputStack = inputStack.filter((id) => shelfImages.some((item) => item.id === id));
+  inputStack = inputStack.filter((filename) => shelfImages.some((item) => item.filename === filename));
   renderInputStack();
 }
 
@@ -71,28 +69,26 @@ function renderShelf() {
   shelfImages.forEach((item) => {
     const card = document.createElement("div");
     card.className = "shelf-card";
-    card.draggable = true;
-    card.addEventListener("dragstart", (event) => {
-      event.dataTransfer.setData("source", "shelf");
-      event.dataTransfer.setData("shelf_id", item.id);
+    card.addEventListener("dblclick", () => {
+      toggleInputItem(item.filename);
     });
 
     const img = document.createElement("img");
-    img.src = `/image/${item.id}`;
-    img.alt = item.label || "shelf image";
+    img.src = `/image/${item.filename}`;
+    img.alt = item.filename;
 
     const actions = document.createElement("div");
     actions.className = "shelf-actions";
 
     const label = document.createElement("span");
-    label.textContent = item.label || "shelf image";
+    label.textContent = item.filename;
 
     const del = document.createElement("button");
     del.textContent = "Delete";
     del.addEventListener("click", async (event) => {
       event.stopPropagation();
-      await fetch(`/image/delete/${item.id}`, { method: "POST" });
-      inputStack = inputStack.filter((id) => id !== item.id);
+      await fetch(`/image/${item.filename}`, { method: "DELETE" });
+      inputStack = inputStack.filter((filename) => filename !== item.filename);
       await fetchShelf();
     });
 
@@ -107,41 +103,24 @@ function renderShelf() {
 
 function renderInputStack() {
   inputStackEl.innerHTML = "";
-  inputStack.forEach((imageId, index) => {
-    const item = shelfImages.find((entry) => entry.id === imageId);
+  inputStack.forEach((filename, index) => {
+    const item = shelfImages.find((entry) => entry.filename === filename);
     if (!item) return;
 
     const row = document.createElement("div");
     row.className = "stack-item";
-    row.draggable = true;
-    row.addEventListener("dragstart", (event) => {
-      event.dataTransfer.setData("source", "input");
-      event.dataTransfer.setData("index", index.toString());
-    });
-    row.addEventListener("dragover", (event) => event.preventDefault());
-    row.addEventListener("drop", (event) => {
-      event.preventDefault();
-      const source = event.dataTransfer.getData("source");
-      if (source === "input") {
-        const fromIndex = Number(event.dataTransfer.getData("index"));
-        moveInputItem(fromIndex, index);
-      } else if (source === "shelf") {
-        const droppedId = event.dataTransfer.getData("shelf_id");
-        insertInputItem(droppedId, index);
-      }
-    });
 
     const img = document.createElement("img");
-    img.src = `/image/${item.id}`;
-    img.alt = item.label || "input";
+    img.src = `/image/${item.filename}`;
+    img.alt = item.filename;
 
     const label = document.createElement("span");
-    label.textContent = item.label || "input";
+    label.textContent = item.filename;
 
     const removeBtn = document.createElement("button");
     removeBtn.textContent = "Remove";
     removeBtn.addEventListener("click", () => {
-      inputStack = inputStack.filter((id, idx) => idx !== index);
+      inputStack = inputStack.filter((_, idx) => idx !== index);
       renderInputStack();
     });
 
@@ -152,32 +131,19 @@ function renderInputStack() {
   });
 }
 
-function addInputItem(imageId) {
-  if (!imageId) return;
-  if (inputStack.includes(imageId)) return;
-  inputStack.push(imageId);
-  renderInputStack();
-}
-
-function insertInputItem(imageId, index) {
-  if (!imageId) return;
-  if (inputStack.includes(imageId)) return;
-  inputStack.splice(index, 0, imageId);
-  renderInputStack();
-}
-
-function moveInputItem(fromIndex, toIndex) {
-  if (fromIndex === toIndex) return;
-  const [item] = inputStack.splice(fromIndex, 1);
-  inputStack.splice(toIndex, 0, item);
+function toggleInputItem(filename) {
+  if (!filename) return;
+  if (inputStack.includes(filename)) {
+    inputStack = inputStack.filter((entry) => entry !== filename);
+  } else {
+    inputStack.push(filename);
+  }
   renderInputStack();
 }
 
 async function handleGenerate() {
   generateBtn.disabled = true;
   outputMeta.textContent = "Generating...";
-  latestOutputImageId = null;
-
   const payload = {
     prompt: promptInput.value || "",
     neg_prompt: negPromptInput.value || "",
@@ -186,7 +152,7 @@ async function handleGenerate() {
     num_steps: Number(numStepsInput.value) || 4,
     cfg_scale: Number(cfgScaleInput.value) || 1.0,
     seed: seedInput.value ? Number(seedInput.value) : null,
-    image_input_ids: inputStack,
+    image_input_filenames: inputStack,
   };
 
   const res = await fetch("/generate", {
@@ -204,15 +170,8 @@ async function handleGenerate() {
   const blob = await res.blob();
   latestOutputBlob = blob;
   outputImage.src = URL.createObjectURL(blob);
-  outputMeta.textContent = `Generated ${res.headers.get("X-Width")}x${res.headers.get("X-Height")}`;
-
-  const imageId = res.headers.get("X-Image-Id");
-  latestOutputImageId = imageId;
+  outputMeta.textContent = `Generated ${payload.width}x${payload.height}`;
   saveOutputBtn.disabled = false;
-
-  if (imageId) {
-    await fetchShelf();
-  }
 
   generateBtn.disabled = false;
 }
@@ -220,15 +179,12 @@ async function handleGenerate() {
 async function saveOutputToShelf() {
   if (!latestOutputBlob) return;
 
-  if (latestOutputImageId) {
-    await fetchShelf();
-    return;
-  }
-
   const form = new FormData();
-  form.append("file", latestOutputBlob, "output.png");
-  form.append("label", "generated");
-  const res = await fetch("/image/save", { method: "POST", body: form });
+  const suffix = globalThis.crypto?.randomUUID
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  form.append("file", latestOutputBlob, `flux_${suffix}.webp`);
+  const res = await fetch("/image", { method: "POST", body: form });
   if (res.ok) {
     await fetchShelf();
   }
@@ -238,7 +194,7 @@ async function loadFromUrl() {
   if (!urlInput.value) return;
   const form = new FormData();
   form.append("url", urlInput.value);
-  const res = await fetch("/image/load-url", { method: "POST", body: form });
+  const res = await fetch("/image", { method: "POST", body: form });
   if (res.ok) {
     urlInput.value = "";
     await fetchShelf();
@@ -248,9 +204,11 @@ async function loadFromUrl() {
 async function loadModel() {
   loadModelBtn.disabled = true;
   modelStatus.textContent = "Loading model...";
-  const form = new FormData();
-  form.append("model", modelSelect.value);
-  const res = await fetch("/model/load", { method: "POST", body: form });
+  const res = await fetch("/model/load", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: modelSelect.value }),
+  });
   if (res.ok) {
     modelStatus.textContent = `Loaded: ${modelSelect.value}`;
   } else {
@@ -271,8 +229,7 @@ fileInput.addEventListener("change", async () => {
     files.map(async (file) => {
       const form = new FormData();
       form.append("file", file);
-      form.append("label", "imported");
-      await fetch("/image/save", { method: "POST", body: form });
+      await fetch("/image", { method: "POST", body: form });
     })
   );
   fileInput.value = "";
@@ -283,21 +240,6 @@ saveOutputBtn.addEventListener("click", saveOutputToShelf);
 generateBtn.addEventListener("click", handleGenerate);
 
 fetchModels().then(fetchShelf);
-
-inputZone.addEventListener("dragover", (event) => event.preventDefault());
-inputZone.addEventListener("drop", (event) => {
-  event.preventDefault();
-  const source = event.dataTransfer.getData("source");
-  if (source === "input") {
-    const fromIndex = Number(event.dataTransfer.getData("index"));
-    moveInputItem(fromIndex, inputStack.length);
-    return;
-  }
-  if (source === "shelf") {
-    const imageId = event.dataTransfer.getData("shelf_id");
-    addInputItem(imageId);
-  }
-});
 
 async function refreshVram() {
   try {

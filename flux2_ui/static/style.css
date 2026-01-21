@@ -272,21 +272,8 @@ textarea {
   font-size: 12px;
 }
 
-.stack-zone {
-  margin-top: 16px;
-  padding: 14px;
-  border-radius: 16px;
-  border: 1px dashed rgba(31, 111, 109, 0.4);
-  background: var(--accent-soft);
-}
-
-.stack-hint {
-  font-size: 12px;
-  color: var(--accent-strong);
-  margin-bottom: 10px;
-}
-
 .stack {
+  margin-top: 16px;
   display: grid;
   gap: 10px;
 }
