@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Flux.2 Studio</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Flux.2 Studio</p>
+        <h1>Design with light, prompt with intent.</h1>
+        <p class="subhead">Text-to-image and multi-image conditioning, with a living shelf of temporary references.</p>
+      </div>
+        <div class="hero-card">
+          <div>
+            <span class="label">Model</span>
+            <select id="model"></select>
+            <button id="load_model" class="ghost">Load model</button>
+            <div id="model_status" class="hint"></div>
+            <div id="vram_status" class="hint"></div>
+          </div>
+        </div>
+    </header>
+
+    <main class="grid">
+      <section class="panel panel--prompt">
+        <div class="panel-header">
+          <h2>Prompt</h2>
+          <button id="generate" class="primary">Generate</button>
+        </div>
+        <label class="label">Prompt</label>
+        <textarea id="prompt" rows="4" placeholder="Describe the image..."></textarea>
+        <label class="label">Negative prompt</label>
+        <textarea id="neg_prompt" rows="2" placeholder="What should be avoided?"></textarea>
+
+        <div class="row">
+          <div>
+            <label class="label">Width</label>
+            <input id="width" type="number" value="512" min="128" step="16" />
+          </div>
+          <div>
+            <label class="label">Height</label>
+            <input id="height" type="number" value="512" min="128" step="16" />
+          </div>
+          <div>
+            <label class="label">Seed</label>
+            <input id="seed" type="number" placeholder="Random" />
+          </div>
+          <div>
+            <label class="label">Steps</label>
+            <input id="num_steps" type="number" min="1" max="100" value="4" />
+          </div>
+          <div>
+            <label class="label">Guidance</label>
+            <input id="guidance" type="number" step="0.1" placeholder="None" />
+          </div>
+          <div>
+            <label class="label">CFG</label>
+            <input id="cfg_scale" type="number" step="0.1" value="1.0" />
+          </div>
+        </div>
+
+      </section>
+
+      <section class="panel panel--inputs">
+        <div class="panel-header">
+          <h2>Input Images</h2>
+          <span class="hint">Drag shelf images into stack</span>
+        </div>
+        <div class="stack-zone" id="input_zone">
+          <div class="stack-hint">Drag shelf images here to use as inputs</div>
+          <div id="input_stack" class="stack"></div>
+        </div>
+      </section>
+
+      <section class="panel panel--output">
+        <div class="panel-header">
+          <h2>Output</h2>
+          <button id="save_output" class="ghost" disabled>Save to shelf</button>
+        </div>
+        <div class="output-card">
+          <img id="output_image" alt="Generated" />
+          <div id="output_meta" class="meta"></div>
+        </div>
+      </section>
+    </main>
+
+    <section class="panel panel--shelf">
+      <div class="panel-header">
+        <h2>Image Shelf</h2>
+        <span class="hint">Import images and reuse across generations</span>
+      </div>
+      <div class="import-row">
+        <button id="import_btn" class="ghost">Import image</button>
+        <input id="file_input" type="file" accept="image/*" multiple hidden />
+      </div>
+
+      <div class="url-row">
+        <input id="image_url" type="text" placeholder="Paste image URL..." />
+        <button id="load_url">Load URL</button>
+      </div>
+      <div class="shelf" id="temp_shelf"></div>
+    </section>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
