@@ -40,9 +40,25 @@ def _safe_filename(name: str) -> str:
 image_router = APIRouter(tags=["image"])
 
 
+def _init_counters():
+    COUNTER["flux"] = 0
+    COUNTER["import"] = 0
+    for path in IMAGE_DIR.iterdir():
+        if not (path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}):
+            continue
+
+        name = path.stem
+        try:
+            key, idx = name.split("_")
+            COUNTER[key] = max(COUNTER.get(key, 0), int(idx))
+        except Exception:
+            continue
+
+
 @image_router.get("/", response_class=JSONResponse)
 @image_router.get("", response_class=JSONResponse, include_in_schema=False)
 def image_list():
+    _init_counters()
     items = []
 
     for path in IMAGE_DIR.iterdir():
@@ -66,6 +82,7 @@ def image_list():
 
 
 @image_router.post("/", response_class=JSONResponse)
+@image_router.post("", response_class=JSONResponse, include_in_schema=False)
 async def image_import(
     file: UploadFile | None = File(default=None),
     url: str | None = Form(default=None),
@@ -82,10 +99,10 @@ async def image_import(
     else:
         raise HTTPException(status_code=400, detail="Provide a file or url")
 
-    fmt = Image.open(io.BytesIO(data)).format
+    fmt = Image.open(io.BytesIO(data)).format.lower()
     key = "flux" if is_flux else "import"
 
-    filename = f"{key}_{COUNTER[key]}.{fmt}"
+    filename = f"{key}_{COUNTER[key]:04d}.{fmt}"
     (IMAGE_DIR / filename).write_bytes(data)
     COUNTER[key] += 1
 
@@ -110,20 +127,7 @@ def image_delete(filename: str):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # init COUNTER
-    for path in IMAGE_DIR.iterdir():
-        if not (path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}):
-            continue
-
-        # file is named like flux_0012.webp
-        # attempt to extract key and index. if failed, move on.
-        name = path.stem
-        try:
-            key, idx = name.split("_")
-            COUNTER[key] = max(COUNTER[key], int(idx))
-        except Exception:
-            continue
-
+    _init_counters()
     yield
 
 
@@ -191,16 +195,16 @@ async def generate(req: GenerateRequest):
     return Response(content=img_bytes.getvalue(), media_type="image/webp")
 
 
-@app.post("/model/load")
-def load_model(model: str):
+@app.post("/model/{model_name}")
+def load_model(model_name: str):
     global PIPELINE, ACTIVE_MODEL
     if PIPELINE is not None:
         del PIPELINE
         gc.collect()
         torch.cuda.empty_cache()
 
-    PIPELINE = Flux2Pipeline(flux=load_flux2(model)).cuda()
-    ACTIVE_MODEL = model
+    PIPELINE = Flux2Pipeline(flux=load_flux2(model_name)).cuda()
+    ACTIVE_MODEL = model_name
 
 
 @app.get("/vram")

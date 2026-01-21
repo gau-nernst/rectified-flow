@@ -152,6 +152,12 @@ h1 {
   margin-bottom: 14px;
 }
 
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .panel h2 {
   margin: 0;
   font-size: 1.05rem;

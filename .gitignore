@@ -14,5 +14,4 @@ torchinductor/
 *.tar
 *.tsv
 *.log
-*.db
 uv.lock

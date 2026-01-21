@@ -19,6 +19,7 @@ const importBtn = document.getElementById("import_btn");
 const fileInput = document.getElementById("file_input");
 const urlInput = document.getElementById("image_url");
 const loadUrlBtn = document.getElementById("load_url");
+const rescanBtn = document.getElementById("rescan_shelf");
 
 let modelDefaults = {};
 let shelfImages = [];
@@ -202,10 +203,8 @@ async function loadFromUrl() {
 async function loadModel() {
   loadModelBtn.disabled = true;
   modelStatus.textContent = "Loading model...";
-  const res = await fetch("/model/load", {
+  const res = await fetch(`/model/${encodeURIComponent(modelSelect.value)}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: modelSelect.value }),
   });
   if (res.ok) {
     modelStatus.textContent = `Loaded: ${modelSelect.value}`;
@@ -218,6 +217,7 @@ async function loadModel() {
 
 modelSelect.addEventListener("change", () => applyDefaults(modelSelect.value));
 loadUrlBtn.addEventListener("click", loadFromUrl);
+rescanBtn.addEventListener("click", fetchShelf);
 loadModelBtn.addEventListener("click", loadModel);
 importBtn.addEventListener("click", () => fileInput.click());
 fileInput.addEventListener("change", async () => {
