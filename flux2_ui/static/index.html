@@ -12,7 +12,7 @@
       <div>
         <p class="eyebrow">Flux.2 Studio</p>
         <h1>Design with light, prompt with intent.</h1>
-        <p class="subhead">Text-to-image and multi-image conditioning, with a living shelf of temporary references.</p>
+        <p class="subhead">Text-to-image and multi-image conditioning, with a living shelf of reusable references.</p>
       </div>
         <div class="hero-card">
           <div>
@@ -52,10 +52,6 @@
           <div>
             <label class="label">Steps</label>
             <input id="num_steps" type="number" min="1" max="100" value="4" />
-          </div>
-          <div>
-            <label class="label">Guidance</label>
-            <input id="guidance" type="number" step="0.1" placeholder="None" />
           </div>
           <div>
             <label class="label">CFG</label>
@@ -102,7 +98,7 @@
         <input id="image_url" type="text" placeholder="Paste image URL..." />
         <button id="load_url">Load URL</button>
       </div>
-      <div class="shelf" id="temp_shelf"></div>
+      <div class="shelf" id="image_shelf"></div>
     </section>
   </div>
 
