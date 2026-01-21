@@ -180,10 +180,8 @@ async function saveOutputToShelf() {
   if (!latestOutputBlob) return;
 
   const form = new FormData();
-  const suffix = globalThis.crypto?.randomUUID
-    ? globalThis.crypto.randomUUID()
-    : `${Date.now()}_${Math.random().toString(16).slice(2)}`;
-  form.append("file", latestOutputBlob, `flux_${suffix}.webp`);
+  form.append("file", latestOutputBlob, `image.webp`);
+  form.append("is_flux", "true");
   const res = await fetch("/image", { method: "POST", body: form });
   if (res.ok) {
     await fetchShelf();

@@ -1,6 +1,6 @@
 import gc
 import io
-import uuid
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
 
@@ -30,6 +30,8 @@ MODEL_DEFAULTS = {
 PIPELINE: Flux2Pipeline | None = None
 ACTIVE_MODEL: str | None = None
 
+COUNTER = {"flux": 0, "import": 0}
+
 
 def _safe_filename(name: str) -> str:
     return Path(name).name
@@ -42,23 +44,23 @@ image_router = APIRouter(tags=["image"])
 @image_router.get("", response_class=JSONResponse, include_in_schema=False)
 def image_list():
     items = []
+
     for path in IMAGE_DIR.iterdir():
-        if not path.is_file():
+        if not (path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}):
             continue
-        if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
-            continue
+
         filename = path.name
-        stat = path.stat()
         with Image.open(path) as img:
             width, height = img.size
-        items.append(
-            {
-                "filename": filename,
-                "created_at": stat.st_mtime,
-                "width": width,
-                "height": height,
-            }
-        )
+
+        entry = {
+            "filename": filename,
+            "created_at": path.stat().st_mtime,
+            "width": width,
+            "height": height,
+        }
+        items.append(entry)
+
     items.sort(key=lambda item: item["created_at"], reverse=True)
     return {"items": items}
 
@@ -67,33 +69,27 @@ def image_list():
 async def image_import(
     file: UploadFile | None = File(default=None),
     url: str | None = Form(default=None),
+    is_flux: bool = Form(default=False),
 ):
-    data: bytes
-    source_name: str
     if file is not None:
         data = await file.read()
-        source_name = file.filename or f"import_{uuid.uuid4().hex}"
+
     elif url:
         resp = requests.get(url, timeout=10)
         resp.raise_for_status()
         data = resp.content
-        source_name = f"url_{uuid.uuid4().hex}"
+
     else:
         raise HTTPException(status_code=400, detail="Provide a file or url")
-    with Image.open(io.BytesIO(data)) as image_info:
-        fmt = (image_info.format or "png").lower()
-    if fmt == "jpeg":
-        fmt = "jpg"
-    safe_name = Path(source_name).name
-    if not safe_name or safe_name in {".", ".."}:
-        safe_name = f"image_{uuid.uuid4().hex}.{fmt}"
-    base = Path(safe_name).stem
-    suffix = Path(safe_name).suffix or f".{fmt}"
-    candidate = f"{base}{suffix}"
-    if (IMAGE_DIR / candidate).exists():
-        candidate = f"{base}_{uuid.uuid4().hex}{suffix}"
-    (IMAGE_DIR / candidate).write_bytes(data)
-    return {"filename": candidate}
+
+    fmt = Image.open(io.BytesIO(data)).format
+    key = "flux" if is_flux else "import"
+
+    filename = f"{key}_{COUNTER[key]}.{fmt}"
+    (IMAGE_DIR / filename).write_bytes(data)
+    COUNTER[key] += 1
+
+    return {"filename": filename}
 
 
 @image_router.get("/{filename}", response_class=FileResponse)
@@ -112,7 +108,26 @@ def image_delete(filename: str):
     path.unlink()
 
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # init COUNTER
+    for path in IMAGE_DIR.iterdir():
+        if not (path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}):
+            continue
+
+        # file is named like flux_0012.webp
+        # attempt to extract key and index. if failed, move on.
+        name = path.stem
+        try:
+            key, idx = name.split("_")
+            COUNTER[key] = max(COUNTER[key], int(idx))
+        except Exception:
+            continue
+
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(image_router, prefix="/image")
 
