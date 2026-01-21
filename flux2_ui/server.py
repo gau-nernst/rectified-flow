@@ -1,16 +1,12 @@
 import gc
 import io
-from contextlib import asynccontextmanager
-from functools import lru_cache
 from pathlib import Path
 
-import requests
 import torch
-from fastapi import APIRouter, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
-from pydantic import BaseModel, Field
 
 from modelling import Flux2Pipeline, load_flux2
 
@@ -30,110 +26,8 @@ MODEL_DEFAULTS = {
 PIPELINE: Flux2Pipeline | None = None
 ACTIVE_MODEL: str | None = None
 
-COUNTER = {"flux": 0, "import": 0}
-
-
-def _safe_filename(name: str) -> str:
-    return Path(name).name
-
-
-image_router = APIRouter(tags=["image"])
-
-
-def _init_counters():
-    COUNTER["flux"] = 0
-    COUNTER["import"] = 0
-    for path in IMAGE_DIR.iterdir():
-        if not (path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}):
-            continue
-
-        name = path.stem
-        try:
-            key, idx = name.split("_")
-            COUNTER[key] = max(COUNTER.get(key, 0), int(idx))
-        except Exception:
-            continue
-
-
-@image_router.get("/", response_class=JSONResponse)
-@image_router.get("", response_class=JSONResponse, include_in_schema=False)
-def image_list():
-    _init_counters()
-    items = []
-
-    for path in IMAGE_DIR.iterdir():
-        if not (path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}):
-            continue
-
-        filename = path.name
-        with Image.open(path) as img:
-            width, height = img.size
-
-        entry = {
-            "filename": filename,
-            "created_at": path.stat().st_mtime,
-            "width": width,
-            "height": height,
-        }
-        items.append(entry)
-
-    items.sort(key=lambda item: item["created_at"], reverse=True)
-    return {"items": items}
-
-
-@image_router.post("/", response_class=JSONResponse)
-@image_router.post("", response_class=JSONResponse, include_in_schema=False)
-async def image_import(
-    file: UploadFile | None = File(default=None),
-    url: str | None = Form(default=None),
-    is_flux: bool = Form(default=False),
-):
-    if file is not None:
-        data = await file.read()
-
-    elif url:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        data = resp.content
-
-    else:
-        raise HTTPException(status_code=400, detail="Provide a file or url")
-
-    fmt = Image.open(io.BytesIO(data)).format.lower()
-    key = "flux" if is_flux else "import"
-
-    filename = f"{key}_{COUNTER[key]:04d}.{fmt}"
-    (IMAGE_DIR / filename).write_bytes(data)
-    COUNTER[key] += 1
-
-    return {"filename": filename}
-
-
-@image_router.get("/{filename}", response_class=FileResponse)
-def image_get(filename: str):
-    path = IMAGE_DIR / _safe_filename(filename)
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Unknown image")
-    return FileResponse(path)
-
-
-@image_router.delete("/{filename}")
-def image_delete(filename: str):
-    path = IMAGE_DIR / _safe_filename(filename)
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Unknown image")
-    path.unlink()
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    _init_counters()
-    yield
-
-
-app = FastAPI(lifespan=lifespan)
+app = FastAPI()
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-app.include_router(image_router, prefix="/image")
 
 
 @app.get("/health")
@@ -151,38 +45,51 @@ def list_models():
     return {"models": MODELS, "defaults": MODEL_DEFAULTS, "active_model": ACTIVE_MODEL}
 
 
-class GenerateRequest(BaseModel):
-    prompt: str
-    neg_prompt: str = ""
-    width: int = 512
-    height: int = 512
-    num_steps: int = 4
-    cfg_scale: float = 1.0
-    seed: int | None = None
-    image_input_filenames: list[str] = Field(default_factory=list)
+@app.post("/image", response_class=JSONResponse)
+async def image_import(
+    file: UploadFile = File(...),
+):
+    data = await file.read()
+    filename = file.filename or ""
+    if not filename or filename in {".", ".."}:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    if "/" in filename or "\\" in filename or Path(filename).name != filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    path = IMAGE_DIR / filename
+    if path.exists():
+        raise HTTPException(status_code=409, detail="File already exists")
+    Image.open(io.BytesIO(data))
+    path.write_bytes(data)
 
-
-@lru_cache(maxsize=10)
-def load_img_rgb(filename: str) -> Image.Image:
-    path = IMAGE_DIR / _safe_filename(filename)
-    return Image.open(path).convert("RGB")
+    return {"filename": filename}
 
 
 @app.post("/generate")
-async def generate(req: GenerateRequest):
-    if req.image_input_filenames:
-        ref_imgs = [load_img_rgb(filename) for filename in req.image_input_filenames]
-    else:
+async def generate(
+    prompt: str = Form(...),
+    neg_prompt: str = Form(""),
+    width: int = Form(512),
+    height: int = Form(512),
+    num_steps: int = Form(4),
+    cfg_scale: float = Form(1.0),
+    seed: int | None = Form(None),
+    images: list[UploadFile] = File(default=[]),
+):
+    ref_imgs = []
+    for image in images:
+        data = await image.read()
+        ref_imgs.append(Image.open(io.BytesIO(data)).convert("RGB"))
+    if not ref_imgs:
         ref_imgs = None
 
     img_pt = PIPELINE.generate(
-        prompt=req.prompt,
-        neg_prompt=req.neg_prompt,
+        prompt=prompt,
+        neg_prompt=neg_prompt,
         ref_imgs=ref_imgs,
-        img_size=(req.height, req.width),
-        cfg_scale=req.cfg_scale,
-        num_steps=req.num_steps,
-        seed=req.seed,
+        img_size=(height, width),
+        cfg_scale=cfg_scale,
+        num_steps=num_steps,
+        seed=seed,
         pbar=False,
     )
     img_np = img_pt.squeeze(0).permute(1, 2, 0).cpu().numpy()

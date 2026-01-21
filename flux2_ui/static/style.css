@@ -236,46 +236,64 @@ textarea {
 
 .shelf {
   display: grid;
-  grid-template-columns: repeat(auto-fill, 120px);
+  gap: 10px;
+}
+
+.shelf-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
   gap: 12px;
-  justify-content: start;
-}
-
-.shelf-card {
-  border: 1px solid var(--stroke);
-  border-radius: 12px;
-  overflow: hidden;
+  align-items: center;
   background: #fff;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  border-radius: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--stroke);
 }
 
-.shelf-card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 12px 26px rgba(29, 27, 23, 0.12);
-}
-
-.shelf-card img {
-  width: 100%;
-  display: block;
-  height: 110px;
-  object-fit: contain;
+.shelf-item img {
+  width: 64px;
+  height: 64px;
+  border-radius: 10px;
+  object-fit: cover;
   background: #f3efe7;
 }
 
-.shelf-card .shelf-actions {
-  display: flex;
-  justify-content: space-between;
-  padding: 6px 8px;
+.shelf-meta {
+  display: grid;
+  gap: 4px;
+}
+
+.shelf-meta .name {
+  font-size: 13px;
+}
+
+.shelf-meta .size {
   font-size: 12px;
   color: var(--muted);
 }
 
-.shelf-card button {
-  background: transparent;
-  border: none;
-  color: var(--accent);
-  cursor: pointer;
+.shelf-error {
   font-size: 12px;
+  color: #b42318;
+}
+
+.shelf-item .shelf-actions {
+  display: grid;
+  gap: 6px;
+}
+
+.shelf-item button {
+  background: transparent;
+  border: 1px solid var(--stroke);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.shelf-item button[disabled] {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .stack {
