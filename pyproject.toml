@@ -1,3 +1,19 @@
+[project]
+name = "flow-matching"
+version = "0.0.0"
+dependencies = [
+    "torch>=2.9.1",
+    "torchvision>=0.24.1",
+    "ruff>=0.14.13",
+    "ipykernel>=7.1.0",
+    "transformers>=4.57.6",
+    "pandas>=2.3.3",
+    "psutil>=7.2.1",
+    "wandb>=0.24.0",
+    "sentencepiece>=0.2.1",
+    "protobuf>=6.33.4",
+]
+
 [tool.ruff]
 line-length = 120
 

@@ -1,4 +1,4 @@
-# rectified-flow
+# flow-matching
 
 Supported models:
 
@@ -19,12 +19,8 @@ Supported features:
 - Solvers: Euler, [DPM-Solver++(2M)](https://arxiv.org/abs/2211.01095), [UniPC](https://arxiv.org/abs/2302.04867)
 
 ```bash
-uv venv --python=3.12 --managed-python
+uv sync
 source .venv/bin/activate
-
-# install torch and torchvision following https://pytorch.org/get-started/locally/
-uv pip install torch torchvision
-uv pip install -r requirements.txt
 ```
 
 Resources:
