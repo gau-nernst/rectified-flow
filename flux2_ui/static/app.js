@@ -19,7 +19,7 @@ const importBtn = document.getElementById("import_btn");
 const fileInput = document.getElementById("file_input");
 const urlInput = document.getElementById("image_url");
 const loadUrlBtn = document.getElementById("load_url");
-const rescanBtn = document.getElementById("rescan_shelf");
+const importServerBtn = document.getElementById("import_server");
 
 let modelDefaults = {};
 let shelfImages = [];
@@ -40,7 +40,7 @@ function applyDefaults(modelName) {
   }
 }
 
-async function addShelfItem(blob, filename, isFlux) {
+async function addShelfItem(blob, filename, isFlux, saved = false) {
   const url = URL.createObjectURL(blob);
   let width = 0;
   let height = 0;
@@ -64,11 +64,27 @@ async function addShelfItem(blob, filename, isFlux) {
     width,
     height,
     isFlux,
-    saved: false,
+    saved,
     error: "",
   });
 
   renderShelf();
+}
+
+// Pull shelf entries from server and add missing files.
+async function importFromServer() {
+  const res = await fetch("/image");
+  if (!res.ok) return;
+  const data = await res.json();
+  const existing = new Set(shelfImages.map((item) => item.filename));
+  for (const item of data || []) {
+    const filename = item.filename || item;
+    if (!filename || existing.has(filename)) continue;
+    const imgRes = await fetch(`/image/${encodeURIComponent(filename)}`);
+    if (!imgRes.ok) continue;
+    const blob = await imgRes.blob();
+    await addShelfItem(blob, filename, filename.startsWith("flux_"), true);
+  }
 }
 
 // Render shelf as a list with actions.
@@ -114,7 +130,7 @@ function renderShelf() {
     const deleteBtn = document.createElement("button");
     deleteBtn.type = "button";
     deleteBtn.dataset.action = "delete";
-    deleteBtn.textContent = "Delete";
+    deleteBtn.textContent = "Remove";
 
     actions.appendChild(addBtn);
     actions.appendChild(saveBtn);
@@ -258,9 +274,8 @@ loadUrlBtn.addEventListener("click", async () => {
   await addShelfItem(blob, name, false);
   urlInput.value = "";
 });
-rescanBtn.addEventListener("click", () => {
-  renderShelf();
-  renderInputStack();
+importServerBtn.addEventListener("click", async () => {
+  await importFromServer();
 });
 loadModelBtn.addEventListener("click", async () => {
   loadModelBtn.disabled = true;
@@ -361,6 +376,7 @@ generateBtn.addEventListener("click", async () => {
     modelStatus.textContent = "No model loaded";
   }
   applyDefaults(modelSelect.value);
+  await importFromServer();
 })();
 
 // VRAM status polling.

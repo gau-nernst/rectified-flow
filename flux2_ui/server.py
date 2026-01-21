@@ -4,7 +4,7 @@ from pathlib import Path
 
 import torch
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
@@ -45,6 +45,27 @@ def list_models():
     return {"models": MODELS, "defaults": MODEL_DEFAULTS, "active_model": ACTIVE_MODEL}
 
 
+@app.get("/image", response_class=JSONResponse)
+def image_list():
+    items = []
+    for path in IMAGE_DIR.iterdir():
+        if not (path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}):
+            continue
+        items.append({"filename": path.name})
+    return items
+
+
+@app.get("/image/{filename}", response_class=FileResponse)
+def image_get(filename: str):
+    safe_name = Path(filename).name
+    if safe_name != filename:
+        raise HTTPException(status_code=404, detail="Unknown image")
+    path = IMAGE_DIR / safe_name
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Unknown image")
+    return FileResponse(path)
+
+
 @app.post("/image", response_class=JSONResponse)
 async def image_import(
     file: UploadFile = File(...),
@@ -60,8 +81,6 @@ async def image_import(
         raise HTTPException(status_code=409, detail="File already exists")
     Image.open(io.BytesIO(data))
     path.write_bytes(data)
-
-    return {"filename": filename}
 
 
 @app.post("/generate")

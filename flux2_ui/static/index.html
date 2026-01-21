@@ -3,16 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Flux.2 Studio</title>
+  <title>Flux.2 UI</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
   <div class="page">
     <header class="hero">
       <div>
-        <p class="eyebrow">Flux.2 Studio</p>
-        <h1>Design with light, prompt with intent.</h1>
-        <p class="subhead">Text-to-image and multi-image conditioning, with a living shelf of reusable references.</p>
+        <h1>Flux.2 UI</h1>
       </div>
         <div class="hero-card">
           <div>
@@ -64,7 +62,7 @@
       <section class="panel panel--inputs">
         <div class="panel-header">
           <h2>Input Images</h2>
-          <span class="hint">Use the shelf buttons to add inputs</span>
+          <span class="hint">Add images as input from the shelf below</span>
         </div>
         <div id="input_stack" class="stack"></div>
       </section>
@@ -86,7 +84,7 @@
         <h2>Image Shelf</h2>
         <div class="panel-actions">
           <span class="hint">Import images and reuse across generations</span>
-          <button id="rescan_shelf" class="ghost">Rescan</button>
+          <button id="import_server" class="ghost">Import from server</button>
         </div>
       </div>
       <div class="import-row">
