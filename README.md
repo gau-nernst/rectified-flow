@@ -1,4 +1,4 @@
-# rectified-flow
+# flow-matching
 
 Supported models:
 
@@ -7,7 +7,7 @@ Supported models:
   - Wan2.2-TI2V-5B: T2V and I2V
   - Wan2.2-T2V-A14B and Wan2.2-I2V-A14B: WIP
 - [Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo)
-- [FLUX.2-klein](https://github.com/black-forest-labs/flux2). T2I only, TI2I is WIP.
+- [FLUX.2-klein](https://github.com/black-forest-labs/flux2). T2I and TI2I.
 
 Supported features:
 
@@ -19,12 +19,8 @@ Supported features:
 - Solvers: Euler, [DPM-Solver++(2M)](https://arxiv.org/abs/2211.01095), [UniPC](https://arxiv.org/abs/2302.04867)
 
 ```bash
-uv venv --python=3.12 --managed-python
+uv sync
 source .venv/bin/activate
-
-# install torch and torchvision following https://pytorch.org/get-started/locally/
-uv pip install torch torchvision
-uv pip install -r requirements.txt
 ```
 
 Resources:

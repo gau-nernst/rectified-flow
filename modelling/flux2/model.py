@@ -144,41 +144,34 @@ class Flux2(nn.Module):
         )
         self.final_layer = LastLayer(cfg.dim, 1, cfg.img_dim, bias=False)
 
-    def make_rope(self, H: int, W: int, L: int):
-        # main image:         https://github.com/black-forest-labs/flux2/blob/b56ac614/src/flux2/sampling.py#L93
-        # conditioned images: https://github.com/black-forest-labs/flux2/blob/b56ac614/src/flux2/sampling.py#L52
-        # conditioned text:   https://github.com/black-forest-labs/flux2/blob/b56ac614/src/flux2/sampling.py#L141
-        # RoPE embedding has 4 components:
-        # - time: main image is at t=0, conditioning images are at t=10, 20, ...
-        # - height: all text embeds stay at pos=0
-        # - width: all text embeds stay at pos=0
-        # - text length
-        # technically conditioning images can have sizes different from the main image's
-        img_rope = self.pos_embed.create((0, 0, 0, 0), (1, H, W, 1))
-        txt_rope = self.pos_embed.create((0, 0, 0, 0), (1, 1, 1, L))
-        return torch.cat([txt_rope, img_rope], dim=0)
+    # 4D RoPE used in Flux.2
+    # main image:         https://github.com/black-forest-labs/flux2/blob/b56ac614/src/flux2/sampling.py#L93
+    # conditioned images: https://github.com/black-forest-labs/flux2/blob/b56ac614/src/flux2/sampling.py#L52
+    # conditioned text:   https://github.com/black-forest-labs/flux2/blob/b56ac614/src/flux2/sampling.py#L141
+    # - time: main image is at t=0, conditioning images are at t=10, 20, ...
+    # - height: all text embeds stay at pos=0
+    # - width: all text embeds stay at pos=0
+    # - text length
+    def make_img_rope(self, H: int, W: int, t: int = 0) -> Tensor:
+        return self.pos_embed.create((t, 0, 0, 0), (1, H, W, 1))
+
+    def make_txt_rope(self, L: int):
+        return self.pos_embed.create((0, 0, 0, 0), (1, 1, 1, L))
 
     def forward(
         self,
         img: Tensor,
         time: Tensor,
         txt: Tensor,
+        rope: Tensor,
         guidance: Tensor | None = None,
-        rope: Tensor | None = None,
     ) -> Tensor:
-        _, _, H, W = img.shape
-        L = txt.shape[1]
-        img = img.to(self.img_in.weight.dtype).flatten(-2).transpose(1, 2)
-
-        img = self.img_in(img)
+        img = self.img_in(img.to(self.img_in.weight.dtype))
         txt = self.txt_in(txt)
         vec = self.time_in(timestep_embedding(time, 256).to(img.dtype))
 
         if guidance is not None:  # allow no guidance_embed
             vec = vec + self.guidance_in(timestep_embedding(guidance, 256).to(img.dtype))
-
-        if rope is None:
-            rope = self.make_rope(H, W, L)
 
         mod_img = self.double_stream_modulation_img(vec)
         mod_txt = self.double_stream_modulation_txt(vec)
@@ -189,11 +182,9 @@ class Flux2(nn.Module):
         mod = self.single_stream_modulation(vec)
         for block in self.single_blocks:
             joint = block(joint, rope, mod)
-        img = joint[:, L:]
+        img = joint[:, txt.shape[1] :]
 
-        img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
-        img = img.transpose(1, 2).unflatten(-1, (H, W))
-        return img
+        return self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
 
 
 def _load_flux2(repo_id: str, filename: str):
