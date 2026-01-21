@@ -178,11 +178,11 @@ class Flux2(nn.Module):
         for block in self.double_blocks:
             img, txt = block(img, txt, rope, mod_img, mod_txt)
 
-        joint = torch.cat([img, txt], dim=1)
+        joint = torch.cat([txt, img], dim=1)
         mod = self.single_stream_modulation(vec)
         for block in self.single_blocks:
             joint = block(joint, rope, mod)
-        img = joint[:, : img.shape[1]]
+        img = joint[:, txt.shape[1] :]
 
         return self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
 

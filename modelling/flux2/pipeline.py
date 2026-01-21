@@ -215,11 +215,11 @@ def flux2_generate(
             ref_ropes.append(flux.make_img_rope(h, w, t=10 * (i + 1)))
             flat_latents.append(ref_lat.flatten(-2).transpose(0, 1))
 
-        rope = torch.cat([img_rope, *ref_ropes, txt_rope], dim=0)
+        rope = torch.cat([txt_rope, img_rope, *ref_ropes], dim=0)
         ref_imgs = torch.cat(flat_latents, dim=0).unsqueeze(0).expand(B, -1, -1)
 
     else:
-        rope = torch.cat([img_rope, txt_rope], dim=0)
+        rope = torch.cat([txt_rope, img_rope], dim=0)
 
     latents = latents.flatten(-2).transpose(1, 2)  # (B, C, H, W) -> (B, H*W, C)
 
