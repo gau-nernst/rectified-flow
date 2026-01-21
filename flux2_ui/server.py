@@ -35,12 +35,6 @@ def _safe_filename(name: str) -> str:
     return Path(name).name
 
 
-@lru_cache(maxsize=10)
-def load_image(filename: str) -> Image.Image:
-    path = IMAGE_DIR / filename
-    return Image.open(path).convert("RGB")
-
-
 image_router = APIRouter(tags=["image"])
 
 
@@ -67,17 +61,6 @@ def image_list():
         )
     items.sort(key=lambda item: item["created_at"], reverse=True)
     return {"items": items}
-
-
-@image_router.get("/{filename}", response_class=FileResponse)
-def image_get(filename: str):
-    safe_name = _safe_filename(filename)
-    if safe_name != filename:
-        raise HTTPException(status_code=404, detail="Unknown image")
-    path = IMAGE_DIR / safe_name
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Unknown image")
-    return FileResponse(path)
 
 
 @image_router.post("/", response_class=JSONResponse)
@@ -113,16 +96,20 @@ async def image_import(
     return {"filename": candidate}
 
 
+@image_router.get("/{filename}", response_class=FileResponse)
+def image_get(filename: str):
+    path = IMAGE_DIR / _safe_filename(filename)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Unknown image")
+    return FileResponse(path)
+
+
 @image_router.delete("/{filename}")
 def image_delete(filename: str):
-    safe_name = _safe_filename(filename)
-    if safe_name != filename:
-        raise HTTPException(status_code=404, detail="Unknown image")
-    path = IMAGE_DIR / safe_name
+    path = IMAGE_DIR / _safe_filename(filename)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Unknown image")
     path.unlink()
-    return None
 
 
 app = FastAPI()
@@ -136,12 +123,12 @@ def health():
 
 
 @app.get("/")
-def index() -> HTMLResponse:
+def index():
     return HTMLResponse((STATIC_DIR / "index.html").read_text())
 
 
 @app.get("/models")
-def list_models() -> JSONResponse:
+def list_models():
     return {"models": MODELS, "defaults": MODEL_DEFAULTS, "active_model": ACTIVE_MODEL}
 
 
@@ -156,30 +143,27 @@ class GenerateRequest(BaseModel):
     image_input_filenames: list[str] = Field(default_factory=list)
 
 
+@lru_cache(maxsize=10)
+def load_img_rgb(filename: str) -> Image.Image:
+    path = IMAGE_DIR / _safe_filename(filename)
+    return Image.open(path).convert("RGB")
+
+
 @app.post("/generate")
-async def generate(request: GenerateRequest):
-    ref_imgs: list[Image.Image] = []
-
-    image_filenames = request.image_input_filenames
-
-    for filename in image_filenames:
-        safe_name = _safe_filename(filename)
-        if safe_name != filename:
-            continue
-        img = load_image(safe_name).copy()
-        ref_imgs.append(img)
-
-    if not ref_imgs:
+async def generate(req: GenerateRequest):
+    if req.image_input_filenames:
+        ref_imgs = [load_img_rgb(filename) for filename in req.image_input_filenames]
+    else:
         ref_imgs = None
 
     img_pt = PIPELINE.generate(
-        prompt=request.prompt,
-        neg_prompt=request.neg_prompt,
+        prompt=req.prompt,
+        neg_prompt=req.neg_prompt,
         ref_imgs=ref_imgs,
-        img_size=(request.height, request.width),
-        cfg_scale=request.cfg_scale,
-        num_steps=request.num_steps,
-        seed=request.seed,
+        img_size=(req.height, req.width),
+        cfg_scale=req.cfg_scale,
+        num_steps=req.num_steps,
+        seed=req.seed,
         pbar=False,
     )
     img_np = img_pt.squeeze(0).permute(1, 2, 0).cpu().numpy()
@@ -202,8 +186,6 @@ def load_model(model: str):
 
     PIPELINE = Flux2Pipeline(flux=load_flux2(model)).cuda()
     ACTIVE_MODEL = model
-
-    return None
 
 
 @app.get("/vram")
