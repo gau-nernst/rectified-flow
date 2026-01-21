@@ -20,6 +20,8 @@ const fileInput = document.getElementById("file_input");
 const urlInput = document.getElementById("image_url");
 const loadUrlBtn = document.getElementById("load_url");
 const importServerBtn = document.getElementById("import_server");
+const preview = document.getElementById("image_preview");
+const previewImage = document.getElementById("preview_image");
 
 let modelDefaults = {};
 let shelfImages = [];
@@ -77,6 +79,12 @@ async function importFromServer() {
   if (!res.ok) return;
   const data = await res.json();
   const existing = new Set(shelfImages.map((item) => item.filename));
+  const serverSet = new Set((data || []).map((item) => item.filename || item));
+  shelfImages.forEach((item) => {
+    if (item.saved && !serverSet.has(item.filename)) {
+      item.saved = false;
+    }
+  });
   for (const item of data || []) {
     const filename = item.filename || item;
     if (!filename || existing.has(filename)) continue;
@@ -85,6 +93,7 @@ async function importFromServer() {
     const blob = await imgRes.blob();
     await addShelfItem(blob, filename, filename.startsWith("flux_"), true);
   }
+  renderShelf();
 }
 
 // Render shelf as a list with actions.
@@ -98,6 +107,7 @@ function renderShelf() {
     const img = document.createElement("img");
     img.src = item.url;
     img.alt = item.filename;
+    img.dataset.id = item.id;
 
     const meta = document.createElement("div");
     meta.className = "shelf-meta";
@@ -162,6 +172,7 @@ function renderInputStack() {
     const img = document.createElement("img");
     img.src = item.url;
     img.alt = item.filename;
+    img.dataset.id = item.id;
 
     const label = document.createElement("span");
     label.textContent = item.filename;
@@ -180,8 +191,31 @@ function renderInputStack() {
 
 modelSelect.addEventListener("change", () => applyDefaults(modelSelect.value));
 
+// Preview large image on click.
+function openPreview(itemId) {
+  const item = shelfImages.find((entry) => entry.id === itemId);
+  if (!item) return;
+  previewImage.src = item.url;
+  preview.classList.remove("hidden");
+}
+
+function closePreview() {
+  previewImage.src = "";
+  preview.classList.add("hidden");
+}
+preview.addEventListener("click", (event) => {
+  if (event.target === preview) {
+    closePreview();
+  }
+});
+
 // Shelf actions (add/delete) via event delegation.
 shelf.addEventListener("click", async (event) => {
+  const img = event.target.closest("img");
+  if (img?.dataset.id) {
+    openPreview(img.dataset.id);
+    return;
+  }
   const addBtn = event.target.closest('button[data-action="add"]');
   if (addBtn) {
     const row = event.target.closest(".shelf-item");
@@ -241,6 +275,11 @@ shelf.addEventListener("click", async (event) => {
 
 // Input list actions via event delegation.
 inputStackEl.addEventListener("click", (event) => {
+  const img = event.target.closest("img");
+  if (img?.dataset.id) {
+    openPreview(img.dataset.id);
+    return;
+  }
   const removeBtn = event.target.closest('button[data-action="remove"]');
   if (!removeBtn) return;
   const row = event.target.closest(".stack-item");
