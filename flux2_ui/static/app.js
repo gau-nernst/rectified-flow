@@ -38,6 +38,7 @@ let fluxCounter = 0;
 let urlCounter = 0;
 let previewItems = [];
 let previewIndex = -1;
+let activeRenameId = null;
 
 function base64ToBlob(base64, mimeType) {
   const binary = atob(base64);
@@ -110,6 +111,18 @@ async function addShelfItem(blob, filename, isFlux, saved = false) {
   renderShelf();
 }
 
+function getUniqueFilename(prefix, ext) {
+  const existing = new Set(shelfImages.map((item) => item.filename));
+  let counter = fluxCounter;
+  let candidate = "";
+  do {
+    counter += 1;
+    candidate = `${prefix}${String(counter).padStart(4, "0")}.${ext}`;
+  } while (existing.has(candidate));
+  fluxCounter = counter;
+  return candidate;
+}
+
 // Pull shelf entries from server and add missing files.
 async function importFromServer() {
   const res = await fetch("/image");
@@ -152,6 +165,7 @@ function renderShelf() {
     const name = document.createElement("span");
     name.className = "name";
     name.textContent = item.filename;
+    name.dataset.action = "rename";
 
     const size = document.createElement("span");
     size.className = "size";
@@ -194,6 +208,74 @@ function renderShelf() {
     row.appendChild(actions);
     shelf.appendChild(row);
   });
+}
+
+function startRename(nameEl) {
+  const row = nameEl.closest(".shelf-item");
+  if (!row) return;
+  const itemId = row.dataset.id;
+  if (!itemId) return;
+  const item = shelfImages.find((entry) => entry.id === itemId);
+  if (!item) return;
+  if (activeRenameId && activeRenameId !== itemId) {
+    renderShelf();
+  }
+  activeRenameId = itemId;
+  nameEl.contentEditable = "true";
+  nameEl.spellcheck = false;
+  nameEl.dataset.originalName = item.filename;
+  nameEl.focus();
+  const selection = window.getSelection();
+  if (selection) {
+    const range = document.createRange();
+    range.selectNodeContents(nameEl);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  const finish = (commit) => {
+    nameEl.removeEventListener("blur", onBlur);
+    nameEl.removeEventListener("keydown", onKeydown);
+    nameEl.contentEditable = "false";
+    nameEl.spellcheck = true;
+    activeRenameId = null;
+
+    const originalName = nameEl.dataset.originalName || item.filename;
+    delete nameEl.dataset.originalName;
+    let nextName = commit ? nameEl.textContent.trim() : originalName;
+    if (!nextName) {
+      nextName = originalName;
+    }
+    if (nextName !== item.filename) {
+      const duplicate = shelfImages.some(
+        (entry) => entry.filename === nextName && entry.id !== item.id,
+      );
+      if (duplicate) {
+        item.error = "Name already exists";
+        nextName = item.filename;
+      } else {
+        item.filename = nextName;
+        item.error = "";
+      }
+    }
+    nameEl.textContent = nextName;
+    renderShelf();
+    renderInputStack();
+  };
+
+  const onBlur = () => finish(true);
+  const onKeydown = (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      finish(false);
+    }
+  };
+
+  nameEl.addEventListener("blur", onBlur);
+  nameEl.addEventListener("keydown", onKeydown);
 }
 
 // Render selected input images as a list.
@@ -354,6 +436,11 @@ shelf.addEventListener("click", async (event) => {
     renderShelf();
     return;
   }
+  const renameTarget = event.target.closest('[data-action="rename"]');
+  if (renameTarget) {
+    startRename(renameTarget);
+    return;
+  }
   const deleteBtn = event.target.closest('button[data-action="delete"]');
   if (!deleteBtn) return;
   const row = event.target.closest(".shelf-item");
@@ -439,8 +526,7 @@ fileInput.addEventListener("change", async () => {
 // Save output back into the shelf.
 saveOutputBtn.addEventListener("click", async () => {
   if (!latestOutputBlob) return;
-  fluxCounter += 1;
-  const filename = `flux_${String(fluxCounter).padStart(4, "0")}.webp`;
+  const filename = getUniqueFilename("flux_", "webp");
   await addShelfItem(latestOutputBlob, filename, true);
 });
 

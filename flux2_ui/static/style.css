@@ -264,8 +264,14 @@ textarea {
 
 .shelf-meta .name {
   font-size: 13px;
+  cursor: text;
+  border-radius: 6px;
+  padding: 2px 4px;
 }
 
+.shelf-meta .name:hover {
+  background: #f3efe7;
+}
 .shelf-meta .size {
   font-size: 12px;
   color: var(--muted);
