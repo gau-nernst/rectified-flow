@@ -70,7 +70,10 @@
       <section class="panel panel--output">
         <div class="panel-header">
           <h2>Output</h2>
-          <button id="save_output" class="ghost" disabled>Save to shelf</button>
+          <div class="panel-actions">
+            <button id="copy_output" class="ghost">Copy</button>
+            <button id="save_output" class="ghost" disabled>Save to shelf</button>
+          </div>
         </div>
         <div class="output-card">
           <img id="output_image" alt="Generated" />
@@ -95,8 +98,10 @@
       </div>
       <div class="import-row">
         <button id="import_btn" class="ghost">Import image</button>
+        <button id="paste_btn" class="ghost">Paste image</button>
         <input id="file_input" type="file" accept="image/*" multiple hidden />
       </div>
+      <div id="clipboard_status" class="hint"></div>
 
       <div class="url-row">
         <input id="image_url" type="text" placeholder="Paste image URL..." />

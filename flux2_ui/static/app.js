@@ -15,11 +15,14 @@ const outputMeta = document.getElementById("output_meta");
 const progressWrap = document.getElementById("progress_wrap");
 const progressFill = document.getElementById("progress_fill");
 const progressText = document.getElementById("progress_text");
+const copyOutputBtn = document.getElementById("copy_output");
 const saveOutputBtn = document.getElementById("save_output");
 const shelf = document.getElementById("image_shelf");
 const inputStackEl = document.getElementById("input_stack");
 const importBtn = document.getElementById("import_btn");
 const fileInput = document.getElementById("file_input");
+const pasteBtn = document.getElementById("paste_btn");
+const clipboardStatus = document.getElementById("clipboard_status");
 const urlInput = document.getElementById("image_url");
 const loadUrlBtn = document.getElementById("load_url");
 const importServerBtn = document.getElementById("import_server");
@@ -34,11 +37,10 @@ let shelfImages = [];
 let inputStack = [];
 let latestOutputBlob = null;
 let shelfIdCounter = 0;
-let fluxCounter = 0;
-let urlCounter = 0;
 let previewItems = [];
 let previewIndex = -1;
 let activeRenameId = null;
+const nameCounters = {};
 
 function base64ToBlob(base64, mimeType) {
   const binary = atob(base64);
@@ -67,6 +69,90 @@ function hideProgress() {
   progressWrap.classList.add("hidden");
   progressFill.style.width = "0%";
   progressText.textContent = "";
+}
+
+function setClipboardStatus(message, isError = false) {
+  if (!clipboardStatus) return;
+  clipboardStatus.textContent = message;
+  clipboardStatus.style.color = isError ? "#b42318" : "";
+}
+
+function getUniqueFilename(prefix, ext) {
+  const existing = new Set(shelfImages.map((item) => item.filename));
+  let counter = nameCounters[prefix] || 0;
+  let candidate = "";
+  do {
+    counter += 1;
+    candidate = `${prefix}${String(counter).padStart(4, "0")}.${ext}`;
+  } while (existing.has(candidate));
+  nameCounters[prefix] = counter;
+  return candidate;
+}
+
+async function copyBlobToClipboard(blob) {
+  if (!navigator.clipboard || !window.ClipboardItem) {
+    setClipboardStatus("Clipboard copy not supported", true);
+    return;
+  }
+  const type = blob.type || "image/png";
+  try {
+    const item = new ClipboardItem({ [type]: blob });
+    await navigator.clipboard.write([item]);
+    setClipboardStatus("Image copied to clipboard");
+    return;
+  } catch (err) {
+    const pngBlob = await convertBlobToPng(blob);
+    const item = new ClipboardItem({ "image/png": pngBlob });
+    await navigator.clipboard.write([item]);
+    setClipboardStatus("Image copied as PNG");
+  }
+}
+
+async function convertBlobToPng(blob) {
+  if (blob.type === "image/png") return blob;
+  if (window.createImageBitmap) {
+    const bitmap = await createImageBitmap(blob);
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(bitmap, 0, 0);
+    return new Promise((resolve, reject) => {
+      canvas.toBlob((out) => {
+        if (!out) {
+          reject(new Error("Failed to convert image"));
+          return;
+        }
+        resolve(out);
+      }, "image/png");
+    });
+  }
+  const imgUrl = URL.createObjectURL(blob);
+  try {
+    const img = new Image();
+    const loaded = new Promise((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error("Failed to decode image"));
+    });
+    img.src = imgUrl;
+    await loaded;
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth || img.width;
+    canvas.height = img.naturalHeight || img.height;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0);
+    return new Promise((resolve, reject) => {
+      canvas.toBlob((out) => {
+        if (!out) {
+          reject(new Error("Failed to convert image"));
+          return;
+        }
+        resolve(out);
+      }, "image/png");
+    });
+  } finally {
+    URL.revokeObjectURL(imgUrl);
+  }
 }
 
 // Populate model selector and apply defaults once.
@@ -109,18 +195,6 @@ async function addShelfItem(blob, filename, isFlux, saved = false) {
   });
 
   renderShelf();
-}
-
-function getUniqueFilename(prefix, ext) {
-  const existing = new Set(shelfImages.map((item) => item.filename));
-  let counter = fluxCounter;
-  let candidate = "";
-  do {
-    counter += 1;
-    candidate = `${prefix}${String(counter).padStart(4, "0")}.${ext}`;
-  } while (existing.has(candidate));
-  fluxCounter = counter;
-  return candidate;
 }
 
 // Pull shelf entries from server and add missing files.
@@ -193,8 +267,14 @@ function renderShelf() {
     deleteBtn.dataset.action = "delete";
     deleteBtn.textContent = "Remove";
 
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.dataset.action = "copy";
+    copyBtn.textContent = "Copy";
+
     actions.appendChild(addBtn);
     actions.appendChild(saveBtn);
+    actions.appendChild(copyBtn);
     actions.appendChild(deleteBtn);
 
     row.appendChild(img);
@@ -441,6 +521,23 @@ shelf.addEventListener("click", async (event) => {
     startRename(renameTarget);
     return;
   }
+  const copyBtn = event.target.closest('button[data-action="copy"]');
+  if (copyBtn) {
+    const row = event.target.closest(".shelf-item");
+    if (!row) return;
+    const itemId = row.dataset.id;
+    const item = shelfImages.find((entry) => entry.id === itemId);
+    if (!item) return;
+    try {
+      await copyBlobToClipboard(item.blob);
+      item.error = "";
+    } catch (err) {
+      item.error = err?.message || "Copy failed";
+      setClipboardStatus(item.error, true);
+    }
+    renderShelf();
+    return;
+  }
   const deleteBtn = event.target.closest('button[data-action="delete"]');
   if (!deleteBtn) return;
   const row = event.target.closest(".shelf-item");
@@ -487,14 +584,35 @@ loadUrlBtn.addEventListener("click", async () => {
     name = "";
   }
   if (!name) {
-    urlCounter += 1;
-    name = `url_${String(urlCounter).padStart(4, "0")}.${ext}`;
+    name = getUniqueFilename("url_", ext);
   }
   if (!name.includes(".")) {
     name = `${name}.${ext}`;
   }
   await addShelfItem(blob, name, false);
   urlInput.value = "";
+});
+pasteBtn.addEventListener("click", async () => {
+  try {
+    if (!navigator.clipboard?.read) {
+      setClipboardStatus("Clipboard paste not supported", true);
+      return;
+    }
+    const items = await navigator.clipboard.read();
+    for (const item of items) {
+      const type = item.types.find((t) => t.startsWith("image/"));
+      if (!type) continue;
+      const blob = await item.getType(type);
+      const ext = type.split("/")[1] || "png";
+      const filename = getUniqueFilename("paste_", ext);
+      await addShelfItem(blob, filename, false);
+      setClipboardStatus("Image pasted from clipboard");
+      return;
+    }
+    setClipboardStatus("Clipboard has no image", true);
+  } catch (err) {
+    setClipboardStatus(err?.message || "Clipboard paste failed", true);
+  }
 });
 importServerBtn.addEventListener("click", async () => {
   await importFromServer();
@@ -523,6 +641,30 @@ fileInput.addEventListener("change", async () => {
   fileInput.value = "";
 });
 
+document.addEventListener("paste", async (event) => {
+  const target = event.target;
+  if (
+    target &&
+    (target.tagName === "INPUT" ||
+      target.tagName === "TEXTAREA" ||
+      target.isContentEditable)
+  ) {
+    return;
+  }
+  const items = event.clipboardData?.items || [];
+  for (const item of items) {
+    if (!item.type.startsWith("image/")) continue;
+    const file = item.getAsFile();
+    if (!file) continue;
+    const ext = file.type.split("/")[1] || "png";
+    const filename = getUniqueFilename("paste_", ext);
+    await addShelfItem(file, filename, false);
+    setClipboardStatus("Image pasted from clipboard");
+    event.preventDefault();
+    return;
+  }
+});
+
 // Save output back into the shelf.
 saveOutputBtn.addEventListener("click", async () => {
   if (!latestOutputBlob) return;
@@ -534,6 +676,7 @@ saveOutputBtn.addEventListener("click", async () => {
 generateBtn.addEventListener("click", async () => {
   generateBtn.disabled = true;
   saveOutputBtn.disabled = true;
+  setClipboardStatus("");
   outputMeta.textContent = "Generating...";
   showProgress("Starting...");
   const payload = {
@@ -630,6 +773,23 @@ generateBtn.addEventListener("click", async () => {
     outputMeta.textContent = "Error: stream ended unexpectedly";
     hideProgress();
     generateBtn.disabled = false;
+  }
+});
+
+copyOutputBtn.addEventListener("click", async () => {
+  try {
+    let blob = latestOutputBlob;
+    if (!blob && outputImage.src) {
+      const res = await fetch(outputImage.src);
+      blob = await res.blob();
+    }
+    if (!blob) {
+      setClipboardStatus("No output image to copy", true);
+      return;
+    }
+    await copyBlobToClipboard(blob);
+  } catch (err) {
+    setClipboardStatus(err?.message || "Copy failed", true);
   }
 });
 
