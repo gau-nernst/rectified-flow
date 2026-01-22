@@ -31,6 +31,15 @@ let shelfIdCounter = 0;
 let fluxCounter = 0;
 let urlCounter = 0;
 
+function base64ToBlob(base64, mimeType) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mimeType });
+}
+
 // Populate model selector and apply defaults once.
 function applyDefaults(modelName) {
   const defaults = modelDefaults[modelName] || {};
@@ -291,7 +300,7 @@ inputStackEl.addEventListener("click", (event) => {
 });
 loadUrlBtn.addEventListener("click", async () => {
   if (!urlInput.value) return;
-  const res = await fetch(urlInput.value);
+  const res = await fetch(`/proxy?url=${encodeURIComponent(urlInput.value)}`);
   if (!res.ok) return;
   const blob = await res.blob();
   const type = blob.type.split("/")[1] || "webp";
@@ -351,6 +360,7 @@ saveOutputBtn.addEventListener("click", async () => {
 // Run generation using current settings and selected inputs.
 generateBtn.addEventListener("click", async () => {
   generateBtn.disabled = true;
+  saveOutputBtn.disabled = true;
   outputMeta.textContent = "Generating...";
   const payload = {
     prompt: promptInput.value || "",
@@ -387,13 +397,61 @@ generateBtn.addEventListener("click", async () => {
     return;
   }
 
-  const blob = await res.blob();
-  latestOutputBlob = blob;
-  outputImage.src = URL.createObjectURL(blob);
-  outputMeta.textContent = `Generated ${payload.width}x${payload.height}`;
-  saveOutputBtn.disabled = false;
+  if (!res.body) {
+    outputMeta.textContent = "Error: empty response";
+    generateBtn.disabled = false;
+    return;
+  }
 
-  generateBtn.disabled = false;
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finished = false;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    while (true) {
+      const newlineIndex = buffer.indexOf("\n");
+      if (newlineIndex === -1) break;
+      const line = buffer.slice(0, newlineIndex).trim();
+      buffer = buffer.slice(newlineIndex + 1);
+      if (!line) continue;
+      let msg;
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (msg.type === "progress") {
+        outputMeta.textContent = `Generating... ${msg.step}/${msg.total}`;
+      } else if (msg.type === "done") {
+        const blob = base64ToBlob(msg.image_base64, "image/webp");
+        latestOutputBlob = blob;
+        if (outputImage.src.startsWith("blob:")) {
+          URL.revokeObjectURL(outputImage.src);
+        }
+        outputImage.src = URL.createObjectURL(blob);
+        outputMeta.textContent = `Generated ${msg.width}x${msg.height}`;
+        saveOutputBtn.disabled = false;
+        generateBtn.disabled = false;
+        finished = true;
+        break;
+      } else if (msg.type === "error") {
+        outputMeta.textContent = `Error: ${msg.message || "generation failed"}`;
+        generateBtn.disabled = false;
+        finished = true;
+        break;
+      }
+    }
+    if (finished) break;
+  }
+
+  if (!finished) {
+    outputMeta.textContent = "Error: stream ended unexpectedly";
+    generateBtn.disabled = false;
+  }
 });
 
 // Initial load (models + shelf).

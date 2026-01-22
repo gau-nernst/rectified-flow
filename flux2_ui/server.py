@@ -1,10 +1,15 @@
+import base64
 import gc
 import io
+import json
+import queue
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import requests
 import torch
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
@@ -25,6 +30,7 @@ MODEL_DEFAULTS = {
 
 PIPELINE: Flux2Pipeline | None = None
 ACTIVE_MODEL: str | None = None
+THREAD_POOL = ThreadPoolExecutor(max_workers=1)
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -43,6 +49,14 @@ def index():
 @app.get("/models")
 def list_models():
     return {"models": MODELS, "defaults": MODEL_DEFAULTS, "active_model": ACTIVE_MODEL}
+
+
+@app.get("/proxy")
+def image_proxy(url: str) -> Response:
+    resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
+    content_type = resp.headers.get("content-type", "application/octet-stream")
+    return Response(content=resp.content, media_type=content_type)
 
 
 @app.get("/image", response_class=JSONResponse)
@@ -101,24 +115,54 @@ async def generate(
     if not ref_imgs:
         ref_imgs = None
 
-    img_pt = PIPELINE.generate(
-        prompt=prompt,
-        neg_prompt=neg_prompt,
-        ref_imgs=ref_imgs,
-        img_size=(height, width),
-        cfg_scale=cfg_scale,
-        num_steps=num_steps,
-        seed=seed,
-        pbar=False,
-    )
-    img_np = img_pt.squeeze(0).permute(1, 2, 0).cpu().numpy()
-    pil_img = Image.fromarray(img_np)
+    stream_queue: queue.Queue[str | None] = queue.Queue()
 
-    img_bytes = io.BytesIO()
-    pil_img.save(img_bytes, format="WEBP", lossless=True)
-    img_bytes.seek(0)
+    def emit(payload: dict) -> None:
+        stream_queue.put(json.dumps(payload, separators=(",", ":")) + "\n")
 
-    return Response(content=img_bytes.getvalue(), media_type="image/webp")
+    def run_job() -> None:
+        try:
+            # emit progress
+            def progress_cb(step: int, total: int) -> None:
+                emit({"type": "progress", "step": step, "total": total})
+
+            img_pt = PIPELINE.generate(
+                prompt=prompt,
+                neg_prompt=neg_prompt,
+                ref_imgs=ref_imgs,
+                img_size=(height, width),
+                cfg_scale=cfg_scale,
+                num_steps=num_steps,
+                seed=seed,
+                pbar=False,
+                progress_cb=progress_cb,
+            )
+            img_np = img_pt.squeeze(0).permute(1, 2, 0).cpu().numpy()
+            pil_img = Image.fromarray(img_np)
+
+            # for the last event, emit the image in base64
+            img_bytes = io.BytesIO()
+            pil_img.save(img_bytes, format="WEBP", lossless=True)
+            img_bytes.seek(0)
+            encoded = base64.b64encode(img_bytes.getvalue()).decode("ascii")
+            emit({"type": "done", "image_base64": encoded, "width": width, "height": height})
+
+        except Exception as exc:
+            emit({"type": "error", "message": str(exc)})
+
+        finally:
+            stream_queue.put(None)  # end signal
+
+    THREAD_POOL.submit(run_job)
+
+    def stream():
+        while True:
+            item = stream_queue.get()
+            if item is None:
+                break
+            yield item
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
 
 
 @app.post("/model/{model_name}")
@@ -129,7 +173,14 @@ def load_model(model_name: str):
         gc.collect()
         torch.cuda.empty_cache()
 
-    PIPELINE = Flux2Pipeline(flux=load_flux2(model_name)).cuda()
+    qwen_map = {
+        "klein-4B": "Qwen/Qwen3-4B-FP8",
+        "klein-base-4B": "Qwen/Qwen3-4B-FP8",
+        "klein-9B": "Qwen/Qwen3-8B-FP8",
+        "klein-base-9B": "Qwen/Qwen3-8B-FP8",
+    }
+    qwen_model = qwen_map.get(model_name)
+    PIPELINE = Flux2Pipeline(flux=load_flux2(model_name), text_encoder_id=qwen_model).cuda()
     ACTIVE_MODEL = model_name
 
 

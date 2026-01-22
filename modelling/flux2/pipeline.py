@@ -1,6 +1,7 @@
 # https://github.com/black-forest-labs/flux2/blob/b56ac614/src/flux2/text_encoder.py
 
 import math
+from collections.abc import Callable
 
 import numpy as np
 import torch
@@ -98,6 +99,7 @@ class Flux2Pipeline:
         seed: int | None = None,
         solver: str = "euler",
         pbar: bool = False,
+        progress_cb: Callable[[int, int], None] | None = None,
     ) -> Tensor:
         txt = self.text_encoder(prompt)
 
@@ -147,6 +149,7 @@ class Flux2Pipeline:
             cfg_scale=cfg_scale,
             solver=solver,
             pbar=pbar,
+            progress_cb=progress_cb,
         )
         return self.ae.decode(latents, uint8=True)
 
@@ -193,6 +196,7 @@ def flux2_generate(
     cfg_scale: float = 1.0,
     solver: str = "euler",
     pbar: bool = False,
+    progress_cb: Callable[[int, int], None] | None = None,
 ) -> Tensor:
     B, _, H, W = latents.shape
     img_len = H * W
@@ -241,6 +245,8 @@ def flux2_generate(
             v = neg_v.lerp(v, cfg_scale)
 
         latents = solver_.step(latents, v, i)
+        if progress_cb is not None:
+            progress_cb(i + 1, num_steps)
 
     latents = latents.transpose(1, 2).unflatten(-1, (H, W))
     return latents
