@@ -12,6 +12,9 @@ const seedInput = document.getElementById("seed");
 const generateBtn = document.getElementById("generate");
 const outputImage = document.getElementById("output_image");
 const outputMeta = document.getElementById("output_meta");
+const progressWrap = document.getElementById("progress_wrap");
+const progressFill = document.getElementById("progress_fill");
+const progressText = document.getElementById("progress_text");
 const saveOutputBtn = document.getElementById("save_output");
 const shelf = document.getElementById("image_shelf");
 const inputStackEl = document.getElementById("input_stack");
@@ -38,6 +41,26 @@ function base64ToBlob(base64, mimeType) {
     bytes[i] = binary.charCodeAt(i);
   }
   return new Blob([bytes], { type: mimeType });
+}
+
+function showProgress(label) {
+  progressWrap.classList.remove("hidden");
+  progressFill.style.width = "0%";
+  progressText.textContent = label || "Preparing...";
+}
+
+function updateProgress(step, total) {
+  const safeTotal = total || 1;
+  const percent = Math.max(0, Math.min(100, Math.round((step / safeTotal) * 100)));
+  progressWrap.classList.remove("hidden");
+  progressFill.style.width = `${percent}%`;
+  progressText.textContent = `Step ${step} of ${total} (${percent}%)`;
+}
+
+function hideProgress() {
+  progressWrap.classList.add("hidden");
+  progressFill.style.width = "0%";
+  progressText.textContent = "";
 }
 
 // Populate model selector and apply defaults once.
@@ -362,6 +385,7 @@ generateBtn.addEventListener("click", async () => {
   generateBtn.disabled = true;
   saveOutputBtn.disabled = true;
   outputMeta.textContent = "Generating...";
+  showProgress("Starting...");
   const payload = {
     prompt: promptInput.value || "",
     neg_prompt: negPromptInput.value || "",
@@ -393,12 +417,14 @@ generateBtn.addEventListener("click", async () => {
   if (!res.ok) {
     const text = await res.text();
     outputMeta.textContent = `Error: ${text}`;
+    hideProgress();
     generateBtn.disabled = false;
     return;
   }
 
   if (!res.body) {
     outputMeta.textContent = "Error: empty response";
+    hideProgress();
     generateBtn.disabled = false;
     return;
   }
@@ -425,7 +451,7 @@ generateBtn.addEventListener("click", async () => {
         continue;
       }
       if (msg.type === "progress") {
-        outputMeta.textContent = `Generating... ${msg.step}/${msg.total}`;
+        updateProgress(msg.step, msg.total);
       } else if (msg.type === "done") {
         const blob = base64ToBlob(msg.image_base64, "image/webp");
         latestOutputBlob = blob;
@@ -434,12 +460,14 @@ generateBtn.addEventListener("click", async () => {
         }
         outputImage.src = URL.createObjectURL(blob);
         outputMeta.textContent = `Generated ${msg.width}x${msg.height}`;
+        hideProgress();
         saveOutputBtn.disabled = false;
         generateBtn.disabled = false;
         finished = true;
         break;
       } else if (msg.type === "error") {
         outputMeta.textContent = `Error: ${msg.message || "generation failed"}`;
+        hideProgress();
         generateBtn.disabled = false;
         finished = true;
         break;
@@ -450,6 +478,7 @@ generateBtn.addEventListener("click", async () => {
 
   if (!finished) {
     outputMeta.textContent = "Error: stream ended unexpectedly";
+    hideProgress();
     generateBtn.disabled = false;
   }
 });
