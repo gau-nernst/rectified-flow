@@ -25,6 +25,9 @@ const loadUrlBtn = document.getElementById("load_url");
 const importServerBtn = document.getElementById("import_server");
 const preview = document.getElementById("image_preview");
 const previewImage = document.getElementById("preview_image");
+const previewPrev = document.getElementById("preview_prev");
+const previewNext = document.getElementById("preview_next");
+const previewLabel = document.getElementById("preview_label");
 
 let modelDefaults = {};
 let shelfImages = [];
@@ -33,6 +36,8 @@ let latestOutputBlob = null;
 let shelfIdCounter = 0;
 let fluxCounter = 0;
 let urlCounter = 0;
+let previewItems = [];
+let previewIndex = -1;
 
 function base64ToBlob(base64, mimeType) {
   const binary = atob(base64);
@@ -225,18 +230,77 @@ modelSelect.addEventListener("change", () => applyDefaults(modelSelect.value));
 
 // Preview large image on click.
 function openPreview(itemId) {
-  const item = shelfImages.find((entry) => entry.id === itemId);
-  if (!item) return;
-  previewImage.src = item.url;
-  preview.classList.remove("hidden");
+  previewItems = getPreviewItems();
+  previewIndex = previewItems.findIndex((entry) => entry.id === itemId);
+  if (previewIndex === -1) return;
+  renderPreview();
 }
 
 function closePreview() {
   previewImage.src = "";
+  previewLabel.textContent = "";
   preview.classList.add("hidden");
+  previewItems = [];
+  previewIndex = -1;
 }
 preview.addEventListener("click", (event) => {
   if (event.target === preview) {
+    closePreview();
+  }
+});
+
+function getPreviewItems() {
+  const items = [];
+  inputStack.forEach((itemId) => {
+    const item = shelfImages.find((entry) => entry.id === itemId);
+    if (!item) return;
+    items.push({ id: item.id, src: item.url, label: item.filename });
+  });
+  if (outputImage.src) {
+    items.push({ id: "output", src: outputImage.src, label: "Output" });
+  }
+  shelfImages.forEach((item) => {
+    items.push({ id: item.id, src: item.url, label: item.filename });
+  });
+  return items;
+}
+
+function renderPreview() {
+  if (previewIndex < 0 || previewIndex >= previewItems.length) return;
+  const current = previewItems[previewIndex];
+  previewImage.src = current.src;
+  previewLabel.textContent = `${current.label || "Image"} (${previewIndex + 1}/${previewItems.length})`;
+  preview.classList.remove("hidden");
+}
+
+function stepPreview(delta) {
+  if (previewItems.length === 0) return;
+  previewIndex = (previewIndex + delta + previewItems.length) % previewItems.length;
+  renderPreview();
+}
+
+previewPrev.addEventListener("click", (event) => {
+  event.stopPropagation();
+  stepPreview(-1);
+});
+
+previewNext.addEventListener("click", (event) => {
+  event.stopPropagation();
+  stepPreview(1);
+});
+
+outputImage.addEventListener("click", () => {
+  if (!outputImage.src) return;
+  openPreview("output");
+});
+
+document.addEventListener("keydown", (event) => {
+  if (preview.classList.contains("hidden")) return;
+  if (event.key === "ArrowLeft") {
+    stepPreview(-1);
+  } else if (event.key === "ArrowRight") {
+    stepPreview(1);
+  } else if (event.key === "Escape") {
     closePreview();
   }
 });
