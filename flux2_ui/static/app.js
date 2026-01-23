@@ -33,15 +33,29 @@ const ui = {
   previewLabel: document.getElementById("preview_label"),
 };
 
+/**
+ * @typedef {{ num_steps?: number, cfg_scale?: number }} ModelDefaults
+ * @typedef {{ id: string, filename: string, blob: Blob, url: string, saved: boolean, error: string }} ShelfItem
+ * @typedef {{ id: string, src: string, label: string }} PreviewItem
+ */
 const state = {
+  /** @type {{ [modelName: string]: ModelDefaults }} */
   modelDefaults: {},
+  /** @type {ShelfItem[]} */
   shelfImages: [],
+  /** @type {string[]} */
   inputStack: [],
+  /** @type {Blob | null} */
   latestOutputBlob: null,
+  /** @type {number} */
   shelfIdCounter: 0,
+  /** @type {PreviewItem[]} */
   previewItems: [],
+  /** @type {number} */
   previewIndex: -1,
+  /** @type {string | null} */
   activeRenameId: null,
+  /** @type {{ [prefix: string]: number }} */
   nameCounters: {},
 };
 
@@ -122,27 +136,12 @@ function applyDefaults(modelName) {
 
 async function addShelfItem(blob, filename, saved = false) {
   const url = URL.createObjectURL(blob);
-  let width = 0;
-  let height = 0;
-
-  await new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      width = img.naturalWidth;
-      height = img.naturalHeight;
-      resolve();
-    };
-    img.onerror = () => resolve();
-    img.src = url;
-  });
 
   state.shelfImages.unshift({
     id: `item_${++state.shelfIdCounter}`,
     filename,
     blob,
     url,
-    width,
-    height,
     saved,
     error: "",
   });
@@ -186,7 +185,6 @@ function buildShelfRow(item) {
   row.dataset.id = item.id;
 
   const img = document.createElement("img");
-  img.src = item.url;
   img.alt = item.filename;
   img.dataset.id = item.id;
 
@@ -200,7 +198,17 @@ function buildShelfRow(item) {
 
   const size = document.createElement("span");
   size.className = "size";
-  size.textContent = `${item.width}x${item.height}`;
+  size.textContent = "—";
+  const updateSize = () => {
+    if (img.naturalWidth && img.naturalHeight) {
+      size.textContent = `${img.naturalWidth}x${img.naturalHeight}`;
+    }
+  };
+  img.addEventListener("load", updateSize);
+  img.src = item.url;
+  if (img.complete) {
+    updateSize();
+  }
 
   meta.appendChild(name);
   meta.appendChild(size);
@@ -267,9 +275,7 @@ function setShelfRowError(row, message) {
 
 function startRename(nameEl) {
   const row = nameEl.closest(".shelf-item");
-  if (!row) return;
-
-  const itemId = row.dataset.id;
+  const itemId = row?.dataset.id;
   if (!itemId) return;
 
   const item = state.shelfImages.find((entry) => entry.id === itemId);
@@ -347,9 +353,16 @@ function buildInputRow(item, index) {
   row.dataset.index = index.toString();
 
   const img = document.createElement("img");
-  img.src = item.url;
   img.alt = item.filename;
   img.dataset.id = item.id;
+  const updateSize = () => {
+    size.textContent = `${img.naturalWidth}x${img.naturalHeight}`;
+  };
+  img.addEventListener("load", updateSize);
+  img.src = item.url;
+  if (img.complete) {
+    updateSize();
+  }
 
   const label = document.createElement("span");
   label.textContent = item.filename;
@@ -392,17 +405,15 @@ function closePreview() {
   state.previewIndex = -1;
 }
 ui.preview.addEventListener("click", (event) => {
-  if (event.target === ui.preview) {
-    closePreview();
-  }
+  if (event.target === ui.preview) closePreview();
 });
 
 function getPreviewItems() {
   const items = [];
   state.inputStack.forEach((itemId) => {
     const item = state.shelfImages.find((entry) => entry.id === itemId);
-    if (!item) return;
-    items.push({ id: item.id, src: item.url, label: item.filename });
+    if (item)
+      items.push({ id: item.id, src: item.url, label: item.filename });
   });
 
   if (ui.outputImage.src) {
@@ -417,6 +428,7 @@ function getPreviewItems() {
 
 function renderPreview() {
   if (state.previewIndex < 0 || state.previewIndex >= state.previewItems.length) return;
+
   const current = state.previewItems[state.previewIndex];
   ui.previewImage.src = current.src;
   const label = current.label || "Image";
@@ -426,17 +438,15 @@ function renderPreview() {
 
 function stepPreview(delta) {
   if (state.previewItems.length === 0) return;
-  state.previewIndex = (state.previewIndex + delta + state.previewItems.length) % state.previewItems.length;
+
+  const index = state.previewIndex + delta + state.previewItems.length;
+  state.previewIndex = index % state.previewItems.length;
   renderPreview();
 }
 
 ui.previewPrev.addEventListener("click", (event) => { event.stopPropagation(); stepPreview(-1); });
 ui.previewNext.addEventListener("click", (event) => { event.stopPropagation(); stepPreview(1); });
-
-ui.outputImage.addEventListener("click", () => {
-  if (!ui.outputImage.src) return;
-  openPreview("output");
-});
+ui.outputImage.addEventListener("click", () => { if (ui.outputImage.src) openPreview("output"); });
 
 document.addEventListener("keydown", (event) => {
   if (ui.preview.classList.contains("hidden")) return;
@@ -449,17 +459,15 @@ document.addEventListener("keydown", (event) => {
 // Shelf actions (add/delete) via event delegation.
 ui.shelf.addEventListener("click", async (event) => {
   const img = event.target.closest("img");
-  if (img?.dataset.id) {
-    openPreview(img.dataset.id);
+  const imgId = img?.dataset.id;
+  if (imgId) {
+    openPreview(imgId);
     return;
   }
 
   const addBtn = event.target.closest('button[data-action="add"]');
   if (addBtn) {
-    const row = event.target.closest(".shelf-item");
-    if (!row) return;
-
-    const itemId = row.dataset.id;
+    const itemId = event.target.closest(".shelf-item")?.dataset.id;
     if (!itemId) return;
 
     state.inputStack.push(itemId);
@@ -472,9 +480,8 @@ ui.shelf.addEventListener("click", async (event) => {
   const saveBtn = event.target.closest('button[data-action="save"]');
   if (saveBtn) {
     const row = event.target.closest(".shelf-item");
-    if (!row) return;
-
-    const itemId = row.dataset.id;
+    const itemId = row?.dataset.id;
+    if (!itemId) return;
     const item = state.shelfImages.find((entry) => entry.id === itemId);
     if (!item || item.saved) return;
 
@@ -515,9 +522,8 @@ ui.shelf.addEventListener("click", async (event) => {
   const copyBtn = event.target.closest('button[data-action="copy"]');
   if (copyBtn) {
     const row = event.target.closest(".shelf-item");
-    if (!row) return;
-
-    const itemId = row.dataset.id;
+    const itemId = row?.dataset.id;
+    if (!itemId) return;
     const item = state.shelfImages.find((entry) => entry.id === itemId);
     if (!item) return;
 
@@ -539,9 +545,8 @@ ui.shelf.addEventListener("click", async (event) => {
   if (!deleteBtn) return;
 
   const row = event.target.closest(".shelf-item");
-  if (!row) return;
-
-  const itemId = row.dataset.id;
+  const itemId = row?.dataset.id;
+  if (!itemId) return;
   const item = state.shelfImages.find((entry) => entry.id === itemId);
   if (item) {
     URL.revokeObjectURL(item.url);
@@ -555,17 +560,16 @@ ui.shelf.addEventListener("click", async (event) => {
 // Input list actions via event delegation.
 ui.inputStackEl.addEventListener("click", (event) => {
   const img = event.target.closest("img");
-  if (img?.dataset.id) {
-    openPreview(img.dataset.id);
+  const imgId = img?.dataset.id;
+  if (imgId) {
+    openPreview(imgId);
     return;
   }
   const removeBtn = event.target.closest('button[data-action="remove"]');
   if (!removeBtn) return;
 
   const row = event.target.closest(".stack-item");
-  if (!row) return;
-
-  const index = Number(row.dataset.index);
+  const index = Number(row?.dataset.index);
   if (Number.isNaN(index)) return;
   state.inputStack = state.inputStack.filter((_, idx) => idx !== index);
   row.remove();
@@ -575,6 +579,7 @@ ui.inputStackEl.addEventListener("click", (event) => {
     },
   );
 });
+
 ui.loadUrlBtn.addEventListener("click", async () => {
   if (!ui.urlInput.value) return;
   let blob;
@@ -630,9 +635,7 @@ ui.loadModelBtn.addEventListener("click", async () => {
 
 ui.importBtn.addEventListener("click", () => ui.fileInput.click());
 ui.fileInput.addEventListener("change", async () => {
-  const files = Array.from(ui.fileInput.files || []);
-  if (!files.length) return;
-  for (const file of files) {
+  for (const file of ui.fileInput.files || []) {
     await addShelfItem(file, file.name || "upload");
   }
   ui.fileInput.value = "";
@@ -648,11 +651,13 @@ document.addEventListener("paste", async (event) => {
   ) {
     return;
   }
+
   const items = event.clipboardData.items || [];
   for (const item of items) {
     if (!item.type.startsWith("image/")) continue;
     const file = item.getAsFile();
     if (!file) continue;
+
     const ext = file.type.split("/")[1] || "png";
     const filename = getUniqueFilename("paste_", ext);
     await addShelfItem(file, filename);
@@ -772,6 +777,7 @@ ui.copyOutputBtn.addEventListener("click", async () => {
   }
   try {
     await copyBlobToClipboard(state.latestOutputBlob);
+    setStatus("Copied to clipboard");
   } catch (err) {
     setStatus(err?.message || "Copy failed", true);
   }
