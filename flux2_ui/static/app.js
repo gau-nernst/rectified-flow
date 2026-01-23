@@ -22,8 +22,7 @@ const ui = {
   inputStackEl: document.getElementById("input_stack"),
   importBtn: document.getElementById("import_btn"),
   fileInput: document.getElementById("file_input"),
-  pasteBtn: document.getElementById("paste_btn"),
-  clipboardStatus: document.getElementById("clipboard_status"),
+  status: document.getElementById("status"),
   urlInput: document.getElementById("image_url"),
   loadUrlBtn: document.getElementById("load_url"),
   importServerBtn: document.getElementById("import_server"),
@@ -75,10 +74,18 @@ function hideProgress() {
   ui.progressText.textContent = "";
 }
 
-function setClipboardStatus(message, isError = false) {
-  if (!ui.clipboardStatus) return;
-  ui.clipboardStatus.textContent = message;
-  ui.clipboardStatus.style.color = isError ? "#b42318" : "";
+function setStatus(message, isError = false) {
+  ui.status.textContent = message;
+  ui.status.classList.toggle("error", isError);
+  ui.status.classList.remove("visible", "pop");
+  void ui.status.offsetWidth;
+  ui.status.classList.toggle("visible", Boolean(message));
+  ui.status.classList.add("pop");
+  if (!message) return;
+  clearTimeout(setStatus._hideTimer);
+  setStatus._hideTimer = setTimeout(() => {
+    ui.status.classList.remove("visible");
+  }, 3200);
 }
 
 function getUniqueFilename(prefix, ext) {
@@ -94,21 +101,15 @@ function getUniqueFilename(prefix, ext) {
 }
 
 async function copyBlobToClipboard(blob) {
-  if (!navigator.clipboard || !window.ClipboardItem) {
-    setClipboardStatus("Clipboard copy not supported", true);
-    return;
-  }
   const type = blob.type || "image/png";
   try {
     const item = new ClipboardItem({ [type]: blob });
     await navigator.clipboard.write([item]);
-    setClipboardStatus("Image copied to clipboard");
     return;
   } catch (err) {
     const pngBlob = await convertBlobToPng(blob);
     const item = new ClipboardItem({ "image/png": pngBlob });
     await navigator.clipboard.write([item]);
-    setClipboardStatus("Image copied as PNG");
   }
 }
 
@@ -159,14 +160,24 @@ async function addShelfItem(blob, filename, saved = false) {
     error: "",
   });
 
-  renderShelf();
+  const row = buildShelfRow(state.shelfImages[0]);
+  ui.shelf.prepend(row);
 }
 
 // Pull shelf entries from server and add missing files.
 async function importFromServer() {
-  const res = await fetch("/image");
-  if (!res.ok) return;
-  const data = await res.json();
+  let data;
+  try {
+    const res = await fetch("/image");
+    if (!res.ok) {
+      setStatus("Import from server failed", true);
+      return;
+    }
+    data = await res.json();
+  } catch (err) {
+    setStatus(err?.message || "Import from server failed", true);
+    return;
+  }
   const existing = new Set(state.shelfImages.map((item) => item.filename));
   const serverSet = new Set((data || []).map((item) => item.filename || item));
   state.shelfImages.forEach((item) => {
@@ -182,77 +193,98 @@ async function importFromServer() {
     const blob = await imgRes.blob();
     await addShelfItem(blob, filename, true);
   }
-  renderShelf();
+}
+
+function buildShelfRow(item) {
+  const row = document.createElement("div");
+  row.className = "shelf-item";
+  row.dataset.id = item.id;
+
+  const img = document.createElement("img");
+  img.src = item.url;
+  img.alt = item.filename;
+  img.dataset.id = item.id;
+
+  const meta = document.createElement("div");
+  meta.className = "shelf-meta";
+
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = item.filename;
+  name.dataset.action = "rename";
+
+  const size = document.createElement("span");
+  size.className = "size";
+  size.textContent = `${item.width}x${item.height}`;
+
+  meta.appendChild(name);
+  meta.appendChild(size);
+
+  const actions = document.createElement("div");
+  actions.className = "shelf-actions";
+
+  const addBtn = document.createElement("button");
+  addBtn.type = "button";
+  addBtn.dataset.action = "add";
+  addBtn.textContent = "Add";
+
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.dataset.action = "save";
+  saveBtn.textContent = item.saved ? "Saved" : "Save";
+  saveBtn.disabled = item.saved;
+
+  const deleteBtn = document.createElement("button");
+  deleteBtn.type = "button";
+  deleteBtn.dataset.action = "delete";
+  deleteBtn.textContent = "Remove";
+
+  const copyBtn = document.createElement("button");
+  copyBtn.type = "button";
+  copyBtn.dataset.action = "copy";
+  copyBtn.textContent = "Copy";
+
+  actions.appendChild(addBtn);
+  actions.appendChild(saveBtn);
+  actions.appendChild(copyBtn);
+  actions.appendChild(deleteBtn);
+
+  row.appendChild(img);
+  row.appendChild(meta);
+  if (item.error) {
+    const error = document.createElement("span");
+    error.className = "shelf-error";
+    error.textContent = item.error;
+    meta.appendChild(error);
+  }
+  row.appendChild(actions);
+  return row;
 }
 
 // Render shelf as a list with actions.
 function renderShelf() {
   ui.shelf.innerHTML = "";
   state.shelfImages.forEach((item) => {
-    const row = document.createElement("div");
-    row.className = "shelf-item";
-    row.dataset.id = item.id;
-
-    const img = document.createElement("img");
-    img.src = item.url;
-    img.alt = item.filename;
-    img.dataset.id = item.id;
-
-    const meta = document.createElement("div");
-    meta.className = "shelf-meta";
-
-    const name = document.createElement("span");
-    name.className = "name";
-    name.textContent = item.filename;
-    name.dataset.action = "rename";
-
-    const size = document.createElement("span");
-    size.className = "size";
-    size.textContent = `${item.width}x${item.height}`;
-
-    meta.appendChild(name);
-    meta.appendChild(size);
-
-    const actions = document.createElement("div");
-    actions.className = "shelf-actions";
-
-    const addBtn = document.createElement("button");
-    addBtn.type = "button";
-    addBtn.dataset.action = "add";
-    addBtn.textContent = "Add";
-
-    const saveBtn = document.createElement("button");
-    saveBtn.type = "button";
-    saveBtn.dataset.action = "save";
-    saveBtn.textContent = item.saved ? "Saved" : "Save";
-    saveBtn.disabled = item.saved;
-
-    const deleteBtn = document.createElement("button");
-    deleteBtn.type = "button";
-    deleteBtn.dataset.action = "delete";
-    deleteBtn.textContent = "Remove";
-
-    const copyBtn = document.createElement("button");
-    copyBtn.type = "button";
-    copyBtn.dataset.action = "copy";
-    copyBtn.textContent = "Copy";
-
-    actions.appendChild(addBtn);
-    actions.appendChild(saveBtn);
-    actions.appendChild(copyBtn);
-    actions.appendChild(deleteBtn);
-
-    row.appendChild(img);
-    row.appendChild(meta);
-    if (item.error) {
-      const error = document.createElement("span");
-      error.className = "shelf-error";
-      error.textContent = item.error;
-      meta.appendChild(error);
-    }
-    row.appendChild(actions);
-    ui.shelf.appendChild(row);
+    ui.shelf.appendChild(buildShelfRow(item));
   });
+}
+
+function setShelfRowError(row, message) {
+  const meta = row.querySelector(".shelf-meta");
+  if (!meta) return;
+  let errorEl = meta.querySelector(".shelf-error");
+  if (!message) {
+    if (errorEl) {
+      errorEl.remove();
+    }
+    return;
+  }
+  if (!errorEl) {
+    errorEl = document.createElement("span");
+    errorEl.className = "shelf-error";
+    meta.appendChild(errorEl);
+  }
+  errorEl.textContent = message;
 }
 
 function startRename(nameEl) {
@@ -263,7 +295,12 @@ function startRename(nameEl) {
   const item = state.shelfImages.find((entry) => entry.id === itemId);
   if (!item) return;
   if (state.activeRenameId && state.activeRenameId !== itemId) {
-    renderShelf();
+    const existing = ui.shelf.querySelector(
+      `.shelf-item[data-id="${state.activeRenameId}"] [data-action="rename"]`,
+    );
+    if (existing) {
+      existing.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    }
   }
   state.activeRenameId = itemId;
   nameEl.contentEditable = "true";
@@ -304,7 +341,7 @@ function startRename(nameEl) {
       }
     }
     nameEl.textContent = nextName;
-    renderShelf();
+    setShelfRowError(row, item.error);
     renderInputStack();
   };
 
@@ -323,33 +360,37 @@ function startRename(nameEl) {
   nameEl.addEventListener("keydown", onKeydown);
 }
 
+function buildInputRow(item, index) {
+  const row = document.createElement("div");
+  row.className = "stack-item";
+  row.dataset.index = index.toString();
+
+  const img = document.createElement("img");
+  img.src = item.url;
+  img.alt = item.filename;
+  img.dataset.id = item.id;
+
+  const label = document.createElement("span");
+  label.textContent = item.filename;
+
+  const removeBtn = document.createElement("button");
+  removeBtn.type = "button";
+  removeBtn.dataset.action = "remove";
+  removeBtn.textContent = "Remove";
+
+  row.appendChild(img);
+  row.appendChild(label);
+  row.appendChild(removeBtn);
+  return row;
+}
+
 // Render selected input images as a list.
 function renderInputStack() {
   ui.inputStackEl.innerHTML = "";
   state.inputStack.forEach((itemId, index) => {
     const item = state.shelfImages.find((entry) => entry.id === itemId);
     if (!item) return;
-    const row = document.createElement("div");
-    row.className = "stack-item";
-    row.dataset.index = index.toString();
-
-    const img = document.createElement("img");
-    img.src = item.url;
-    img.alt = item.filename;
-    img.dataset.id = item.id;
-
-    const label = document.createElement("span");
-    label.textContent = item.filename;
-
-    const removeBtn = document.createElement("button");
-    removeBtn.type = "button";
-    removeBtn.dataset.action = "remove";
-    removeBtn.textContent = "Remove";
-
-    row.appendChild(img);
-    row.appendChild(label);
-    row.appendChild(removeBtn);
-    ui.inputStackEl.appendChild(row);
+    ui.inputStackEl.appendChild(buildInputRow(item, index));
   });
 }
 
@@ -446,7 +487,9 @@ ui.shelf.addEventListener("click", async (event) => {
     const itemId = row.dataset.id;
     if (!itemId) return;
     state.inputStack.push(itemId);
-    renderInputStack();
+    const item = state.shelfImages.find((entry) => entry.id === itemId);
+    if (!item) return;
+    ui.inputStackEl.appendChild(buildInputRow(item, state.inputStack.length - 1));
     return;
   }
   const saveBtn = event.target.closest('button[data-action="save"]');
@@ -462,7 +505,10 @@ ui.shelf.addEventListener("click", async (event) => {
     if (res.ok) {
       item.saved = true;
       item.error = "";
-      renderShelf();
+      setStatus("");
+      saveBtn.textContent = "Saved";
+      saveBtn.disabled = true;
+      setShelfRowError(row, "");
       return;
     }
     let errorText = "Save failed";
@@ -478,7 +524,8 @@ ui.shelf.addEventListener("click", async (event) => {
       }
     }
     item.error = errorText;
-    renderShelf();
+    setStatus(`Save failed: ${errorText}`, true);
+    setShelfRowError(row, errorText);
     return;
   }
   const renameTarget = event.target.closest('[data-action="rename"]');
@@ -495,12 +542,16 @@ ui.shelf.addEventListener("click", async (event) => {
     if (!item) return;
     try {
       await copyBlobToClipboard(item.blob);
-      item.error = "";
+      setStatus("Copied to clipboard");
+      if (item.error) {
+        item.error = "";
+        setShelfRowError(row, "");
+      }
     } catch (err) {
       item.error = err?.message || "Copy failed";
-      setClipboardStatus(item.error, true);
+      setStatus(item.error, true);
+      setShelfRowError(row, item.error);
     }
-    renderShelf();
     return;
   }
   const deleteBtn = event.target.closest('button[data-action="delete"]');
@@ -514,7 +565,7 @@ ui.shelf.addEventListener("click", async (event) => {
   }
   state.shelfImages = state.shelfImages.filter((entry) => entry.id !== itemId);
   state.inputStack = state.inputStack.filter((entry) => entry !== itemId);
-  renderShelf();
+  row.remove();
   renderInputStack();
 });
 
@@ -532,12 +583,18 @@ ui.inputStackEl.addEventListener("click", (event) => {
   const index = Number(row.dataset.index);
   if (Number.isNaN(index)) return;
   state.inputStack = state.inputStack.filter((_, idx) => idx !== index);
-  renderInputStack();
+  row.remove();
+  Array.from(ui.inputStackEl.querySelectorAll(".stack-item")).forEach((el, idx) => {
+    el.dataset.index = idx.toString();
+  });
 });
 ui.loadUrlBtn.addEventListener("click", async () => {
   if (!ui.urlInput.value) return;
   const res = await fetch(`/proxy?url=${encodeURIComponent(ui.urlInput.value)}`);
-  if (!res.ok) return;
+  if (!res.ok) {
+    setStatus("Load URL failed", true);
+    return;
+  }
   const blob = await res.blob();
   const type = blob.type.split("/")[1] || "webp";
   const ext = type === "jpeg" ? "jpg" : type;
@@ -557,28 +614,6 @@ ui.loadUrlBtn.addEventListener("click", async () => {
   await addShelfItem(blob, name);
   ui.urlInput.value = "";
 });
-ui.pasteBtn.addEventListener("click", async () => {
-  try {
-    if (!navigator.clipboard?.read) {
-      setClipboardStatus("Clipboard paste not supported", true);
-      return;
-    }
-    const items = await navigator.clipboard.read();
-    for (const item of items) {
-      const type = item.types.find((t) => t.startsWith("image/"));
-      if (!type) continue;
-      const blob = await item.getType(type);
-      const ext = type.split("/")[1] || "png";
-      const filename = getUniqueFilename("paste_", ext);
-      await addShelfItem(blob, filename);
-      setClipboardStatus("Image pasted from clipboard");
-      return;
-    }
-    setClipboardStatus("Clipboard has no image", true);
-  } catch (err) {
-    setClipboardStatus(err?.message || "Clipboard paste failed", true);
-  }
-});
 ui.importServerBtn.addEventListener("click", async () => {
   await importFromServer();
 });
@@ -590,9 +625,11 @@ ui.loadModelBtn.addEventListener("click", async () => {
   });
   if (res.ok) {
     ui.modelStatus.textContent = `Loaded: ${ui.modelSelect.value}`;
+    setStatus("");
   } else {
     const text = await res.text();
     ui.modelStatus.textContent = `Load failed: ${text}`;
+    setStatus(`Model load failed: ${text}`, true);
   }
   ui.loadModelBtn.disabled = false;
 });
@@ -616,7 +653,7 @@ document.addEventListener("paste", async (event) => {
   ) {
     return;
   }
-  const items = event.clipboardData?.items || [];
+  const items = event.clipboardData.items || [];
   for (const item of items) {
     if (!item.type.startsWith("image/")) continue;
     const file = item.getAsFile();
@@ -624,7 +661,6 @@ document.addEventListener("paste", async (event) => {
     const ext = file.type.split("/")[1] || "png";
     const filename = getUniqueFilename("paste_", ext);
     await addShelfItem(file, filename);
-    setClipboardStatus("Image pasted from clipboard");
     event.preventDefault();
     return;
   }
@@ -641,7 +677,7 @@ ui.saveOutputBtn.addEventListener("click", async () => {
 ui.generateBtn.addEventListener("click", async () => {
   ui.generateBtn.disabled = true;
   ui.saveOutputBtn.disabled = true;
-  setClipboardStatus("");
+  setStatus("");
   ui.outputMeta.textContent = "Generating...";
   showProgress("Starting...");
   const prompt = ui.promptInput.value || "";
@@ -673,6 +709,7 @@ ui.generateBtn.addEventListener("click", async () => {
   if (!res.ok) {
     const text = await res.text();
     ui.outputMeta.textContent = `Error: ${text}`;
+    setStatus(`Generation failed: ${text}`, true);
     hideProgress();
     ui.generateBtn.disabled = false;
     return;
@@ -680,6 +717,7 @@ ui.generateBtn.addEventListener("click", async () => {
 
   if (!res.body) {
     ui.outputMeta.textContent = "Error: empty response";
+    setStatus("Generation failed: empty response", true);
     hideProgress();
     ui.generateBtn.disabled = false;
     return;
@@ -716,13 +754,16 @@ ui.generateBtn.addEventListener("click", async () => {
         }
         ui.outputImage.src = URL.createObjectURL(blob);
         ui.outputMeta.textContent = `Generated ${msg.width}x${msg.height}`;
+        setStatus("");
         hideProgress();
         ui.saveOutputBtn.disabled = false;
         ui.generateBtn.disabled = false;
         finished = true;
         break;
       } else if (msg.type === "error") {
-        ui.outputMeta.textContent = `Error: ${msg.message || "generation failed"}`;
+        const message = msg.message || "generation failed";
+        ui.outputMeta.textContent = `Error: ${message}`;
+        setStatus(`Generation failed: ${message}`, true);
         hideProgress();
         ui.generateBtn.disabled = false;
         finished = true;
@@ -734,25 +775,21 @@ ui.generateBtn.addEventListener("click", async () => {
 
   if (!finished) {
     ui.outputMeta.textContent = "Error: stream ended unexpectedly";
+    setStatus("Generation failed: stream ended unexpectedly", true);
     hideProgress();
     ui.generateBtn.disabled = false;
   }
 });
 
 ui.copyOutputBtn.addEventListener("click", async () => {
+  if (!state.latestOutputBlob) {
+    setStatus("No output image to copy", true);
+    return;
+  }
   try {
-    let blob = state.latestOutputBlob;
-    if (!blob && ui.outputImage.src) {
-      const res = await fetch(ui.outputImage.src);
-      blob = await res.blob();
-    }
-    if (!blob) {
-      setClipboardStatus("No output image to copy", true);
-      return;
-    }
-    await copyBlobToClipboard(blob);
+    await copyBlobToClipboard(state.latestOutputBlob);
   } catch (err) {
-    setClipboardStatus(err?.message || "Copy failed", true);
+    setStatus(err?.message || "Copy failed", true);
   }
 });
 

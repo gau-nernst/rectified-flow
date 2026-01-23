@@ -188,12 +188,21 @@ textarea {
   background: var(--accent-strong);
 }
 
+.primary:active {
+  transform: translateY(1px);
+  box-shadow: 0 6px 14px rgba(31, 111, 109, 0.2);
+}
+
 .ghost {
   border: 1px solid var(--stroke);
   background: #fff;
   padding: 8px 14px;
   border-radius: 999px;
   cursor: pointer;
+}
+
+.ghost:active {
+  transform: translateY(1px);
 }
 
 .ghost:disabled {
@@ -277,6 +286,10 @@ textarea {
   padding: 4px 10px;
   font-size: 12px;
   cursor: pointer;
+}
+
+.shelf-item button:active {
+  transform: translateY(1px);
 }
 
 .shelf-item button[disabled] {
@@ -494,6 +507,46 @@ button,
 .hint {
   color: var(--muted);
   font-size: 12px;
+}
+
+.status {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  max-width: min(420px, calc(100vw - 48px));
+  padding: 12px 16px;
+  border-radius: 14px;
+  border: 1px solid var(--stroke);
+  background: var(--panel-strong);
+  box-shadow: var(--shadow);
+  font-size: 13px;
+  color: var(--muted);
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.status.error {
+  color: #b42318;
+}
+
+.status.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.status.pop {
+  animation: toastPop 0.2s ease;
+}
+
+@keyframes toastPop {
+  from {
+    transform: translateY(6px) scale(0.98);
+  }
+  to {
+    transform: translateY(0) scale(1);
+  }
 }
 
 @keyframes floatIn {

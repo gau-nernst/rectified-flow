@@ -22,6 +22,7 @@
           </div>
         </div>
     </header>
+    <div id="status" class="status" role="status" aria-live="polite"></div>
 
     <main class="grid">
       <section class="panel panel--prompt">
@@ -98,11 +99,8 @@
       </div>
       <div class="import-row">
         <button id="import_btn" class="ghost">Import image</button>
-        <button id="paste_btn" class="ghost">Paste image</button>
         <input id="file_input" type="file" accept="image/*" multiple hidden />
       </div>
-      <div id="clipboard_status" class="hint"></div>
-
       <div class="url-row">
         <input id="image_url" type="text" placeholder="Paste image URL..." />
         <button id="load_url">Load URL</button>
