@@ -85,6 +85,16 @@ class Flux2Pipeline:
             m.cuda()
         return self
 
+    @staticmethod
+    def load(name: str):
+        text_id = {
+            "klein-4B": "Qwen/Qwen3-4B-FP8",
+            "klein-9B": "Qwen/Qwen3-8B-FP8",
+            "klein-base-4B": "Qwen/Qwen3-4B-FP8",
+            "klein-base-9B": "Qwen/Qwen3-8B-FP8",
+        }[name]
+        return Flux2Pipeline(load_flux2(name), text_id)
+
     # default is for klein
     @torch.no_grad()
     def generate(

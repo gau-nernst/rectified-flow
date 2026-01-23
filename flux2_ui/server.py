@@ -189,14 +189,7 @@ def load_model(model_name: str):
         gc.collect()
         torch.cuda.empty_cache()
 
-    qwen_map = {
-        "klein-4B": "Qwen/Qwen3-4B-FP8",
-        "klein-base-4B": "Qwen/Qwen3-4B-FP8",
-        "klein-9B": "Qwen/Qwen3-8B-FP8",
-        "klein-base-9B": "Qwen/Qwen3-8B-FP8",
-    }
-    qwen_model = qwen_map.get(model_name)
-    PIPELINE = Flux2Pipeline(flux=load_flux2(model_name), text_encoder_id=qwen_model).cuda()
+    PIPELINE = Flux2Pipeline.load(model_name).cuda()
     ACTIVE_MODEL = model_name
 
 
