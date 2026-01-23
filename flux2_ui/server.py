@@ -97,6 +97,17 @@ async def image_import(
     path.write_bytes(data)
 
 
+def _cap_pixels(img: Image.Image, count: int):
+    w, h = img.size
+    if w * h <= count:
+        return img
+
+    scale = (count / (w * h)) ** 0.5
+    new_w = round(w * scale)
+    new_h = round(h * scale)
+    return img.resize((new_w, new_h), resample=Image.Resampling.LANCZOS)
+
+
 @app.post("/generate")
 async def generate(
     prompt: str = Form(...),
@@ -108,10 +119,15 @@ async def generate(
     seed: int | None = Form(None),
     images: list[UploadFile] = File(default=[]),
 ):
+    limit_pixels = 2048 * 2048 if len(images) == 1 else 1024 * 1024
+
     ref_imgs = []
     for image in images:
         data = await image.read()
-        ref_imgs.append(Image.open(io.BytesIO(data)).convert("RGB"))
+        img = Image.open(io.BytesIO(data))
+        img = _cap_pixels(img, limit_pixels)
+        ref_imgs.append(img.convert("RGB"))
+
     if not ref_imgs:
         ref_imgs = None
 
