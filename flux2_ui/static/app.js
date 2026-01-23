@@ -48,9 +48,8 @@ const state = {
 function base64ToBlob(base64, mimeType) {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
+  for (let i = 0; i < binary.length; i += 1)
     bytes[i] = binary.charCodeAt(i);
-  }
   return new Blob([bytes], { type: mimeType });
 }
 
@@ -61,8 +60,7 @@ function showProgress(label) {
 }
 
 function updateProgress(step, total) {
-  const safeTotal = total || 1;
-  const percent = Math.max(0, Math.min(100, Math.round((step / safeTotal) * 100)));
+  const percent = Math.round((step / total) * 100);
   ui.progressWrap.classList.remove("hidden");
   ui.progressFill.style.width = `${percent}%`;
   ui.progressText.textContent = `Step ${step} of ${total} (${percent}%)`;
@@ -171,10 +169,8 @@ async function importFromServer() {
   let data;
   try {
     const res = await fetch("/image");
-    if (!res.ok) {
-      setStatus("Import from server failed", true);
-      return;
-    }
+    if (!res.ok)
+      throw new Error("Import from server failed");
     data = await res.json();
   } catch (err) {
     setStatus(err?.message || "Import from server failed", true);
@@ -225,26 +221,14 @@ function buildShelfRow(item) {
   const actions = document.createElement("div");
   actions.className = "shelf-actions";
 
-  const addBtn = document.createElement("button");
-  addBtn.type = "button";
-  addBtn.dataset.action = "add";
-  addBtn.textContent = "Add";
-
-  const saveBtn = document.createElement("button");
-  saveBtn.type = "button";
-  saveBtn.dataset.action = "save";
-  saveBtn.textContent = item.saved ? "Saved" : "Save";
-  saveBtn.disabled = item.saved;
-
-  const deleteBtn = document.createElement("button");
-  deleteBtn.type = "button";
-  deleteBtn.dataset.action = "delete";
-  deleteBtn.textContent = "Remove";
-
-  const copyBtn = document.createElement("button");
-  copyBtn.type = "button";
-  copyBtn.dataset.action = "copy";
-  copyBtn.textContent = "Copy";
+  const addBtn = makeButton({ label: "Add", action: "add" });
+  const saveBtn = makeButton({
+    label: item.saved ? "Saved" : "Save",
+    action: "save",
+    disabled: item.saved,
+  });
+  const copyBtn = makeButton({ label: "Copy", action: "copy" });
+  const deleteBtn = makeButton({ label: "Remove", action: "delete" });
 
   actions.appendChild(addBtn);
   actions.appendChild(saveBtn);
@@ -263,12 +247,15 @@ function buildShelfRow(item) {
   return row;
 }
 
-// Render shelf as a list with actions.
-function renderShelf() {
-  ui.shelf.innerHTML = "";
-  state.shelfImages.forEach((item) => {
-    ui.shelf.appendChild(buildShelfRow(item));
-  });
+function makeButton({ label, action, disabled = false }) {
+  const button = document.createElement("button");
+  button.type = "button";
+  if (action) {
+    button.dataset.action = action;
+  }
+  button.textContent = label;
+  button.disabled = disabled;
+  return button;
 }
 
 function setShelfRowError(row, message) {
@@ -375,10 +362,7 @@ function buildInputRow(item, index) {
   const label = document.createElement("span");
   label.textContent = item.filename;
 
-  const removeBtn = document.createElement("button");
-  removeBtn.type = "button";
-  removeBtn.dataset.action = "remove";
-  removeBtn.textContent = "Remove";
+  const removeBtn = makeButton({ label: "Remove", action: "remove" });
 
   row.appendChild(img);
   row.appendChild(label);
@@ -401,7 +385,9 @@ ui.modelSelect.addEventListener("change", () => applyDefaults(ui.modelSelect.val
 // Preview large image on click.
 function openPreview(itemId) {
   state.previewItems = getPreviewItems();
-  state.previewIndex = state.previewItems.findIndex((entry) => entry.id === itemId);
+  state.previewIndex = state.previewItems.findIndex(
+    (entry) => entry.id === itemId,
+  );
   if (state.previewIndex === -1) return;
   renderPreview();
 }
@@ -439,13 +425,16 @@ function renderPreview() {
   if (state.previewIndex < 0 || state.previewIndex >= state.previewItems.length) return;
   const current = state.previewItems[state.previewIndex];
   ui.previewImage.src = current.src;
-  ui.previewLabel.textContent = `${current.label || "Image"} (${state.previewIndex + 1}/${state.previewItems.length})`;
+  const label = current.label || "Image";
+  ui.previewLabel.textContent = `${label} (${state.previewIndex + 1}/${state.previewItems.length})`;
   ui.preview.classList.remove("hidden");
 }
 
 function stepPreview(delta) {
   if (state.previewItems.length === 0) return;
-  state.previewIndex = (state.previewIndex + delta + state.previewItems.length) % state.previewItems.length;
+  state.previewIndex =
+    (state.previewIndex + delta + state.previewItems.length) %
+    state.previewItems.length;
   renderPreview();
 }
 
@@ -586,18 +575,25 @@ ui.inputStackEl.addEventListener("click", (event) => {
   if (Number.isNaN(index)) return;
   state.inputStack = state.inputStack.filter((_, idx) => idx !== index);
   row.remove();
-  Array.from(ui.inputStackEl.querySelectorAll(".stack-item")).forEach((el, idx) => {
-    el.dataset.index = idx.toString();
-  });
+  Array.from(ui.inputStackEl.querySelectorAll(".stack-item")).forEach(
+    (el, idx) => {
+      el.dataset.index = idx.toString();
+    },
+  );
 });
 ui.loadUrlBtn.addEventListener("click", async () => {
   if (!ui.urlInput.value) return;
-  const res = await fetch(`/proxy?url=${encodeURIComponent(ui.urlInput.value)}`);
-  if (!res.ok) {
-    setStatus("Load URL failed", true);
+  let blob;
+  try {
+    const res = await fetch(`/proxy?url=${encodeURIComponent(ui.urlInput.value)}`);
+    if (!res.ok) {
+      throw new Error("Load URL failed");
+    }
+    blob = await res.blob();
+  } catch (err) {
+    setStatus(err?.message || "Load URL failed", true);
     return;
   }
-  const blob = await res.blob();
   const type = blob.type.split("/")[1] || "webp";
   const ext = type === "jpeg" ? "jpg" : type;
   let name = "";
@@ -622,18 +618,23 @@ ui.importServerBtn.addEventListener("click", async () => {
 ui.loadModelBtn.addEventListener("click", async () => {
   ui.loadModelBtn.disabled = true;
   ui.modelStatus.textContent = "Loading model...";
-  const res = await fetch(`/model/${encodeURIComponent(ui.modelSelect.value)}`, {
-    method: "POST",
-  });
-  if (res.ok) {
+  try {
+    const res = await fetch(`/model/${encodeURIComponent(ui.modelSelect.value)}`, {
+      method: "POST",
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || "Load failed");
+    }
     ui.modelStatus.textContent = `Loaded: ${ui.modelSelect.value}`;
     setStatus("");
-  } else {
-    const text = await res.text();
-    ui.modelStatus.textContent = `Load failed: ${text}`;
-    setStatus(`Model load failed: ${text}`, true);
+  } catch (err) {
+    const message = err?.message || "Load failed";
+    ui.modelStatus.textContent = `Load failed: ${message}`;
+    setStatus(`Model load failed: ${message}`, true);
+  } finally {
+    ui.loadModelBtn.disabled = false;
   }
-  ui.loadModelBtn.disabled = false;
 });
 ui.importBtn.addEventListener("click", () => ui.fileInput.click());
 ui.fileInput.addEventListener("change", async () => {
@@ -697,88 +698,70 @@ ui.generateBtn.addEventListener("click", async () => {
   form.append("height", String(height));
   form.append("num_steps", String(numSteps));
   form.append("cfg_scale", String(cfgScale));
-  if (seed !== null) {
-    form.append("seed", String(seed));
-  }
+  if (seed !== null) form.append("seed", String(seed));
   state.inputStack.forEach((itemId) => {
     const item = state.shelfImages.find((entry) => entry.id === itemId);
-    if (item) {
-      form.append("images", item.blob, item.filename);
-    }
+    if (item) form.append("images", item.blob, item.filename);
   });
 
-  const res = await fetch("/generate", { method: "POST", body: form });
-  if (!res.ok) {
-    const text = await res.text();
-    ui.outputMeta.textContent = `Error: ${text}`;
-    setStatus(`Generation failed: ${text}`, true);
-    hideProgress();
-    ui.generateBtn.disabled = false;
-    return;
-  }
-
-  if (!res.body) {
-    ui.outputMeta.textContent = "Error: empty response";
-    setStatus("Generation failed: empty response", true);
-    hideProgress();
-    ui.generateBtn.disabled = false;
-    return;
-  }
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
   let finished = false;
+  try {
+    const res = await fetch("/generate", { method: "POST", body: form });
+    if (!res.ok) throw new Error((await res.text()) || "Generation failed");
+    if (!res.body) throw new Error("empty response");
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
     while (true) {
-      const newlineIndex = buffer.indexOf("\n");
-      if (newlineIndex === -1) break;
-      const line = buffer.slice(0, newlineIndex).trim();
-      buffer = buffer.slice(newlineIndex + 1);
-      if (!line) continue;
-      let msg;
-      try {
-        msg = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (msg.type === "progress") {
-        updateProgress(msg.step, msg.total);
-      } else if (msg.type === "done") {
-        const blob = base64ToBlob(msg.image_base64, "image/webp");
-        state.latestOutputBlob = blob;
-        if (ui.outputImage.src.startsWith("blob:")) {
-          URL.revokeObjectURL(ui.outputImage.src);
-        }
-        ui.outputImage.src = URL.createObjectURL(blob);
-        ui.outputMeta.textContent = `Generated ${msg.width}x${msg.height}`;
-        setStatus("");
-        hideProgress();
-        ui.saveOutputBtn.disabled = false;
-        ui.generateBtn.disabled = false;
-        finished = true;
-        break;
-      } else if (msg.type === "error") {
-        const message = msg.message || "generation failed";
-        ui.outputMeta.textContent = `Error: ${message}`;
-        setStatus(`Generation failed: ${message}`, true);
-        hideProgress();
-        ui.generateBtn.disabled = false;
-        finished = true;
-        break;
-      }
-    }
-    if (finished) break;
-  }
+      const { value, done } = await reader.read();
+      if (done) break;
 
-  if (!finished) {
-    ui.outputMeta.textContent = "Error: stream ended unexpectedly";
-    setStatus("Generation failed: stream ended unexpectedly", true);
+      buffer += decoder.decode(value, { stream: true });
+      while (true) {
+        const newlineIndex = buffer.indexOf("\n");
+        if (newlineIndex === -1) break;
+        const line = buffer.slice(0, newlineIndex).trim();
+        buffer = buffer.slice(newlineIndex + 1);
+        if (!line) continue;
+        let msg;
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (msg.type === "progress") {
+          updateProgress(msg.step, msg.total);
+        } else if (msg.type === "done") {
+          const blob = base64ToBlob(msg.image_base64, "image/webp");
+          state.latestOutputBlob = blob;
+          if (ui.outputImage.src.startsWith("blob:")) {
+            URL.revokeObjectURL(ui.outputImage.src);
+          }
+          ui.outputImage.src = URL.createObjectURL(blob);
+          ui.outputMeta.textContent = `Generated ${msg.width}x${msg.height}`;
+          setStatus("");
+          hideProgress();
+          ui.saveOutputBtn.disabled = false;
+          finished = true;
+          break;
+        } else if (msg.type === "error") {
+          throw new Error(msg.message || "generation failed");
+        }
+      }
+      if (finished) break;
+    }
+
+    if (!finished) {
+      throw new Error("stream ended unexpectedly");
+    }
+  } catch (err) {
+    const message = err?.message || "generation failed";
+    ui.outputMeta.textContent = `Error: ${message}`;
+    setStatus(`Generation failed: ${message}`, true);
     hideProgress();
+  } finally {
     ui.generateBtn.disabled = false;
   }
 });
