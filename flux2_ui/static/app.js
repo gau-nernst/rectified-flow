@@ -119,7 +119,9 @@ async function convertBlobToPng(blob) {
   const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
   const ctx = canvas.getContext("2d");
   ctx.drawImage(bitmap, 0, 0);
-  return canvas.convertToBlob({ type: "image/png" });
+  const out = await canvas.convertToBlob({ type: "image/png" });
+  bitmap.close();
+  return out;
 }
 
 // Populate model selector and apply defaults once.
