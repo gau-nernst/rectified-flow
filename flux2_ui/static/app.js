@@ -1,46 +1,50 @@
-const modelSelect = document.getElementById("model");
-const loadModelBtn = document.getElementById("load_model");
-const modelStatus = document.getElementById("model_status");
-const vramStatus = document.getElementById("vram_status");
-const numStepsInput = document.getElementById("num_steps");
-const cfgScaleInput = document.getElementById("cfg_scale");
-const promptInput = document.getElementById("prompt");
-const negPromptInput = document.getElementById("neg_prompt");
-const widthInput = document.getElementById("width");
-const heightInput = document.getElementById("height");
-const seedInput = document.getElementById("seed");
-const generateBtn = document.getElementById("generate");
-const outputImage = document.getElementById("output_image");
-const outputMeta = document.getElementById("output_meta");
-const progressWrap = document.getElementById("progress_wrap");
-const progressFill = document.getElementById("progress_fill");
-const progressText = document.getElementById("progress_text");
-const copyOutputBtn = document.getElementById("copy_output");
-const saveOutputBtn = document.getElementById("save_output");
-const shelf = document.getElementById("image_shelf");
-const inputStackEl = document.getElementById("input_stack");
-const importBtn = document.getElementById("import_btn");
-const fileInput = document.getElementById("file_input");
-const pasteBtn = document.getElementById("paste_btn");
-const clipboardStatus = document.getElementById("clipboard_status");
-const urlInput = document.getElementById("image_url");
-const loadUrlBtn = document.getElementById("load_url");
-const importServerBtn = document.getElementById("import_server");
-const preview = document.getElementById("image_preview");
-const previewImage = document.getElementById("preview_image");
-const previewPrev = document.getElementById("preview_prev");
-const previewNext = document.getElementById("preview_next");
-const previewLabel = document.getElementById("preview_label");
+const ui = {
+  modelSelect: document.getElementById("model"),
+  loadModelBtn: document.getElementById("load_model"),
+  modelStatus: document.getElementById("model_status"),
+  vramStatus: document.getElementById("vram_status"),
+  numStepsInput: document.getElementById("num_steps"),
+  cfgScaleInput: document.getElementById("cfg_scale"),
+  promptInput: document.getElementById("prompt"),
+  negPromptInput: document.getElementById("neg_prompt"),
+  widthInput: document.getElementById("width"),
+  heightInput: document.getElementById("height"),
+  seedInput: document.getElementById("seed"),
+  generateBtn: document.getElementById("generate"),
+  outputImage: document.getElementById("output_image"),
+  outputMeta: document.getElementById("output_meta"),
+  progressWrap: document.getElementById("progress_wrap"),
+  progressFill: document.getElementById("progress_fill"),
+  progressText: document.getElementById("progress_text"),
+  copyOutputBtn: document.getElementById("copy_output"),
+  saveOutputBtn: document.getElementById("save_output"),
+  shelf: document.getElementById("image_shelf"),
+  inputStackEl: document.getElementById("input_stack"),
+  importBtn: document.getElementById("import_btn"),
+  fileInput: document.getElementById("file_input"),
+  pasteBtn: document.getElementById("paste_btn"),
+  clipboardStatus: document.getElementById("clipboard_status"),
+  urlInput: document.getElementById("image_url"),
+  loadUrlBtn: document.getElementById("load_url"),
+  importServerBtn: document.getElementById("import_server"),
+  preview: document.getElementById("image_preview"),
+  previewImage: document.getElementById("preview_image"),
+  previewPrev: document.getElementById("preview_prev"),
+  previewNext: document.getElementById("preview_next"),
+  previewLabel: document.getElementById("preview_label"),
+};
 
-let modelDefaults = {};
-let shelfImages = [];
-let inputStack = [];
-let latestOutputBlob = null;
-let shelfIdCounter = 0;
-let previewItems = [];
-let previewIndex = -1;
-let activeRenameId = null;
-const nameCounters = {};
+const state = {
+  modelDefaults: {},
+  shelfImages: [],
+  inputStack: [],
+  latestOutputBlob: null,
+  shelfIdCounter: 0,
+  previewItems: [],
+  previewIndex: -1,
+  activeRenameId: null,
+  nameCounters: {},
+};
 
 function base64ToBlob(base64, mimeType) {
   const binary = atob(base64);
@@ -52,40 +56,40 @@ function base64ToBlob(base64, mimeType) {
 }
 
 function showProgress(label) {
-  progressWrap.classList.remove("hidden");
-  progressFill.style.width = "0%";
-  progressText.textContent = label || "Preparing...";
+  ui.progressWrap.classList.remove("hidden");
+  ui.progressFill.style.width = "0%";
+  ui.progressText.textContent = label || "Preparing...";
 }
 
 function updateProgress(step, total) {
   const safeTotal = total || 1;
   const percent = Math.max(0, Math.min(100, Math.round((step / safeTotal) * 100)));
-  progressWrap.classList.remove("hidden");
-  progressFill.style.width = `${percent}%`;
-  progressText.textContent = `Step ${step} of ${total} (${percent}%)`;
+  ui.progressWrap.classList.remove("hidden");
+  ui.progressFill.style.width = `${percent}%`;
+  ui.progressText.textContent = `Step ${step} of ${total} (${percent}%)`;
 }
 
 function hideProgress() {
-  progressWrap.classList.add("hidden");
-  progressFill.style.width = "0%";
-  progressText.textContent = "";
+  ui.progressWrap.classList.add("hidden");
+  ui.progressFill.style.width = "0%";
+  ui.progressText.textContent = "";
 }
 
 function setClipboardStatus(message, isError = false) {
-  if (!clipboardStatus) return;
-  clipboardStatus.textContent = message;
-  clipboardStatus.style.color = isError ? "#b42318" : "";
+  if (!ui.clipboardStatus) return;
+  ui.clipboardStatus.textContent = message;
+  ui.clipboardStatus.style.color = isError ? "#b42318" : "";
 }
 
 function getUniqueFilename(prefix, ext) {
-  const existing = new Set(shelfImages.map((item) => item.filename));
-  let counter = nameCounters[prefix] || 0;
+  const existing = new Set(state.shelfImages.map((item) => item.filename));
+  let counter = state.nameCounters[prefix] || 0;
   let candidate = "";
   do {
     counter += 1;
     candidate = `${prefix}${String(counter).padStart(4, "0")}.${ext}`;
   } while (existing.has(candidate));
-  nameCounters[prefix] = counter;
+  state.nameCounters[prefix] = counter;
   return candidate;
 }
 
@@ -110,63 +114,25 @@ async function copyBlobToClipboard(blob) {
 
 async function convertBlobToPng(blob) {
   if (blob.type === "image/png") return blob;
-  if (window.createImageBitmap) {
-    const bitmap = await createImageBitmap(blob);
-    const canvas = document.createElement("canvas");
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(bitmap, 0, 0);
-    return new Promise((resolve, reject) => {
-      canvas.toBlob((out) => {
-        if (!out) {
-          reject(new Error("Failed to convert image"));
-          return;
-        }
-        resolve(out);
-      }, "image/png");
-    });
-  }
-  const imgUrl = URL.createObjectURL(blob);
-  try {
-    const img = new Image();
-    const loaded = new Promise((resolve, reject) => {
-      img.onload = () => resolve();
-      img.onerror = () => reject(new Error("Failed to decode image"));
-    });
-    img.src = imgUrl;
-    await loaded;
-    const canvas = document.createElement("canvas");
-    canvas.width = img.naturalWidth || img.width;
-    canvas.height = img.naturalHeight || img.height;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(img, 0, 0);
-    return new Promise((resolve, reject) => {
-      canvas.toBlob((out) => {
-        if (!out) {
-          reject(new Error("Failed to convert image"));
-          return;
-        }
-        resolve(out);
-      }, "image/png");
-    });
-  } finally {
-    URL.revokeObjectURL(imgUrl);
-  }
+  const bitmap = await createImageBitmap(blob);
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(bitmap, 0, 0);
+  return canvas.convertToBlob({ type: "image/png" });
 }
 
 // Populate model selector and apply defaults once.
 function applyDefaults(modelName) {
-  const defaults = modelDefaults[modelName] || {};
+  const defaults = state.modelDefaults[modelName] || {};
   if (defaults.num_steps !== undefined) {
-    numStepsInput.value = defaults.num_steps;
+    ui.numStepsInput.value = defaults.num_steps;
   }
   if (defaults.cfg_scale !== undefined) {
-    cfgScaleInput.value = defaults.cfg_scale;
+    ui.cfgScaleInput.value = defaults.cfg_scale;
   }
 }
 
-async function addShelfItem(blob, filename, isFlux, saved = false) {
+async function addShelfItem(blob, filename, saved = false) {
   const url = URL.createObjectURL(blob);
   let width = 0;
   let height = 0;
@@ -182,14 +148,13 @@ async function addShelfItem(blob, filename, isFlux, saved = false) {
     img.src = url;
   });
 
-  shelfImages.unshift({
-    id: `item_${++shelfIdCounter}`,
+  state.shelfImages.unshift({
+    id: `item_${++state.shelfIdCounter}`,
     filename,
     blob,
     url,
     width,
     height,
-    isFlux,
     saved,
     error: "",
   });
@@ -202,9 +167,9 @@ async function importFromServer() {
   const res = await fetch("/image");
   if (!res.ok) return;
   const data = await res.json();
-  const existing = new Set(shelfImages.map((item) => item.filename));
+  const existing = new Set(state.shelfImages.map((item) => item.filename));
   const serverSet = new Set((data || []).map((item) => item.filename || item));
-  shelfImages.forEach((item) => {
+  state.shelfImages.forEach((item) => {
     if (item.saved && !serverSet.has(item.filename)) {
       item.saved = false;
     }
@@ -215,15 +180,15 @@ async function importFromServer() {
     const imgRes = await fetch(`/image/${encodeURIComponent(filename)}`);
     if (!imgRes.ok) continue;
     const blob = await imgRes.blob();
-    await addShelfItem(blob, filename, filename.startsWith("flux_"), true);
+    await addShelfItem(blob, filename, true);
   }
   renderShelf();
 }
 
 // Render shelf as a list with actions.
 function renderShelf() {
-  shelf.innerHTML = "";
-  shelfImages.forEach((item) => {
+  ui.shelf.innerHTML = "";
+  state.shelfImages.forEach((item) => {
     const row = document.createElement("div");
     row.className = "shelf-item";
     row.dataset.id = item.id;
@@ -286,7 +251,7 @@ function renderShelf() {
       meta.appendChild(error);
     }
     row.appendChild(actions);
-    shelf.appendChild(row);
+    ui.shelf.appendChild(row);
   });
 }
 
@@ -295,12 +260,12 @@ function startRename(nameEl) {
   if (!row) return;
   const itemId = row.dataset.id;
   if (!itemId) return;
-  const item = shelfImages.find((entry) => entry.id === itemId);
+  const item = state.shelfImages.find((entry) => entry.id === itemId);
   if (!item) return;
-  if (activeRenameId && activeRenameId !== itemId) {
+  if (state.activeRenameId && state.activeRenameId !== itemId) {
     renderShelf();
   }
-  activeRenameId = itemId;
+  state.activeRenameId = itemId;
   nameEl.contentEditable = "true";
   nameEl.spellcheck = false;
   nameEl.dataset.originalName = item.filename;
@@ -318,7 +283,7 @@ function startRename(nameEl) {
     nameEl.removeEventListener("keydown", onKeydown);
     nameEl.contentEditable = "false";
     nameEl.spellcheck = true;
-    activeRenameId = null;
+    state.activeRenameId = null;
 
     const originalName = nameEl.dataset.originalName || item.filename;
     delete nameEl.dataset.originalName;
@@ -327,7 +292,7 @@ function startRename(nameEl) {
       nextName = originalName;
     }
     if (nextName !== item.filename) {
-      const duplicate = shelfImages.some(
+      const duplicate = state.shelfImages.some(
         (entry) => entry.filename === nextName && entry.id !== item.id,
       );
       if (duplicate) {
@@ -360,9 +325,9 @@ function startRename(nameEl) {
 
 // Render selected input images as a list.
 function renderInputStack() {
-  inputStackEl.innerHTML = "";
-  inputStack.forEach((itemId, index) => {
-    const item = shelfImages.find((entry) => entry.id === itemId);
+  ui.inputStackEl.innerHTML = "";
+  state.inputStack.forEach((itemId, index) => {
+    const item = state.shelfImages.find((entry) => entry.id === itemId);
     if (!item) return;
     const row = document.createElement("div");
     row.className = "stack-item";
@@ -384,80 +349,80 @@ function renderInputStack() {
     row.appendChild(img);
     row.appendChild(label);
     row.appendChild(removeBtn);
-    inputStackEl.appendChild(row);
+    ui.inputStackEl.appendChild(row);
   });
 }
 
-modelSelect.addEventListener("change", () => applyDefaults(modelSelect.value));
+ui.modelSelect.addEventListener("change", () => applyDefaults(ui.modelSelect.value));
 
 // Preview large image on click.
 function openPreview(itemId) {
-  previewItems = getPreviewItems();
-  previewIndex = previewItems.findIndex((entry) => entry.id === itemId);
-  if (previewIndex === -1) return;
+  state.previewItems = getPreviewItems();
+  state.previewIndex = state.previewItems.findIndex((entry) => entry.id === itemId);
+  if (state.previewIndex === -1) return;
   renderPreview();
 }
 
 function closePreview() {
-  previewImage.src = "";
-  previewLabel.textContent = "";
-  preview.classList.add("hidden");
-  previewItems = [];
-  previewIndex = -1;
+  ui.previewImage.src = "";
+  ui.previewLabel.textContent = "";
+  ui.preview.classList.add("hidden");
+  state.previewItems = [];
+  state.previewIndex = -1;
 }
-preview.addEventListener("click", (event) => {
-  if (event.target === preview) {
+ui.preview.addEventListener("click", (event) => {
+  if (event.target === ui.preview) {
     closePreview();
   }
 });
 
 function getPreviewItems() {
   const items = [];
-  inputStack.forEach((itemId) => {
-    const item = shelfImages.find((entry) => entry.id === itemId);
+  state.inputStack.forEach((itemId) => {
+    const item = state.shelfImages.find((entry) => entry.id === itemId);
     if (!item) return;
     items.push({ id: item.id, src: item.url, label: item.filename });
   });
-  if (outputImage.src) {
-    items.push({ id: "output", src: outputImage.src, label: "Output" });
+  if (ui.outputImage.src) {
+    items.push({ id: "output", src: ui.outputImage.src, label: "Output" });
   }
-  shelfImages.forEach((item) => {
+  state.shelfImages.forEach((item) => {
     items.push({ id: item.id, src: item.url, label: item.filename });
   });
   return items;
 }
 
 function renderPreview() {
-  if (previewIndex < 0 || previewIndex >= previewItems.length) return;
-  const current = previewItems[previewIndex];
-  previewImage.src = current.src;
-  previewLabel.textContent = `${current.label || "Image"} (${previewIndex + 1}/${previewItems.length})`;
-  preview.classList.remove("hidden");
+  if (state.previewIndex < 0 || state.previewIndex >= state.previewItems.length) return;
+  const current = state.previewItems[state.previewIndex];
+  ui.previewImage.src = current.src;
+  ui.previewLabel.textContent = `${current.label || "Image"} (${state.previewIndex + 1}/${state.previewItems.length})`;
+  ui.preview.classList.remove("hidden");
 }
 
 function stepPreview(delta) {
-  if (previewItems.length === 0) return;
-  previewIndex = (previewIndex + delta + previewItems.length) % previewItems.length;
+  if (state.previewItems.length === 0) return;
+  state.previewIndex = (state.previewIndex + delta + state.previewItems.length) % state.previewItems.length;
   renderPreview();
 }
 
-previewPrev.addEventListener("click", (event) => {
+ui.previewPrev.addEventListener("click", (event) => {
   event.stopPropagation();
   stepPreview(-1);
 });
 
-previewNext.addEventListener("click", (event) => {
+ui.previewNext.addEventListener("click", (event) => {
   event.stopPropagation();
   stepPreview(1);
 });
 
-outputImage.addEventListener("click", () => {
-  if (!outputImage.src) return;
+ui.outputImage.addEventListener("click", () => {
+  if (!ui.outputImage.src) return;
   openPreview("output");
 });
 
 document.addEventListener("keydown", (event) => {
-  if (preview.classList.contains("hidden")) return;
+  if (ui.preview.classList.contains("hidden")) return;
   if (event.key === "ArrowLeft") {
     stepPreview(-1);
   } else if (event.key === "ArrowRight") {
@@ -468,7 +433,7 @@ document.addEventListener("keydown", (event) => {
 });
 
 // Shelf actions (add/delete) via event delegation.
-shelf.addEventListener("click", async (event) => {
+ui.shelf.addEventListener("click", async (event) => {
   const img = event.target.closest("img");
   if (img?.dataset.id) {
     openPreview(img.dataset.id);
@@ -480,7 +445,7 @@ shelf.addEventListener("click", async (event) => {
     if (!row) return;
     const itemId = row.dataset.id;
     if (!itemId) return;
-    inputStack.push(itemId);
+    state.inputStack.push(itemId);
     renderInputStack();
     return;
   }
@@ -489,7 +454,7 @@ shelf.addEventListener("click", async (event) => {
     const row = event.target.closest(".shelf-item");
     if (!row) return;
     const itemId = row.dataset.id;
-    const item = shelfImages.find((entry) => entry.id === itemId);
+    const item = state.shelfImages.find((entry) => entry.id === itemId);
     if (!item || item.saved) return;
     const form = new FormData();
     form.append("file", item.blob, item.filename);
@@ -526,7 +491,7 @@ shelf.addEventListener("click", async (event) => {
     const row = event.target.closest(".shelf-item");
     if (!row) return;
     const itemId = row.dataset.id;
-    const item = shelfImages.find((entry) => entry.id === itemId);
+    const item = state.shelfImages.find((entry) => entry.id === itemId);
     if (!item) return;
     try {
       await copyBlobToClipboard(item.blob);
@@ -543,18 +508,18 @@ shelf.addEventListener("click", async (event) => {
   const row = event.target.closest(".shelf-item");
   if (!row) return;
   const itemId = row.dataset.id;
-  const item = shelfImages.find((entry) => entry.id === itemId);
+  const item = state.shelfImages.find((entry) => entry.id === itemId);
   if (item) {
     URL.revokeObjectURL(item.url);
   }
-  shelfImages = shelfImages.filter((entry) => entry.id !== itemId);
-  inputStack = inputStack.filter((entry) => entry !== itemId);
+  state.shelfImages = state.shelfImages.filter((entry) => entry.id !== itemId);
+  state.inputStack = state.inputStack.filter((entry) => entry !== itemId);
   renderShelf();
   renderInputStack();
 });
 
 // Input list actions via event delegation.
-inputStackEl.addEventListener("click", (event) => {
+ui.inputStackEl.addEventListener("click", (event) => {
   const img = event.target.closest("img");
   if (img?.dataset.id) {
     openPreview(img.dataset.id);
@@ -566,19 +531,19 @@ inputStackEl.addEventListener("click", (event) => {
   if (!row) return;
   const index = Number(row.dataset.index);
   if (Number.isNaN(index)) return;
-  inputStack = inputStack.filter((_, idx) => idx !== index);
+  state.inputStack = state.inputStack.filter((_, idx) => idx !== index);
   renderInputStack();
 });
-loadUrlBtn.addEventListener("click", async () => {
-  if (!urlInput.value) return;
-  const res = await fetch(`/proxy?url=${encodeURIComponent(urlInput.value)}`);
+ui.loadUrlBtn.addEventListener("click", async () => {
+  if (!ui.urlInput.value) return;
+  const res = await fetch(`/proxy?url=${encodeURIComponent(ui.urlInput.value)}`);
   if (!res.ok) return;
   const blob = await res.blob();
   const type = blob.type.split("/")[1] || "webp";
   const ext = type === "jpeg" ? "jpg" : type;
   let name = "";
   try {
-    const parsed = new URL(urlInput.value);
+    const parsed = new URL(ui.urlInput.value);
     name = parsed.pathname.split("/").filter(Boolean).pop() || "";
   } catch {
     name = "";
@@ -589,10 +554,10 @@ loadUrlBtn.addEventListener("click", async () => {
   if (!name.includes(".")) {
     name = `${name}.${ext}`;
   }
-  await addShelfItem(blob, name, false);
-  urlInput.value = "";
+  await addShelfItem(blob, name);
+  ui.urlInput.value = "";
 });
-pasteBtn.addEventListener("click", async () => {
+ui.pasteBtn.addEventListener("click", async () => {
   try {
     if (!navigator.clipboard?.read) {
       setClipboardStatus("Clipboard paste not supported", true);
@@ -605,7 +570,7 @@ pasteBtn.addEventListener("click", async () => {
       const blob = await item.getType(type);
       const ext = type.split("/")[1] || "png";
       const filename = getUniqueFilename("paste_", ext);
-      await addShelfItem(blob, filename, false);
+      await addShelfItem(blob, filename);
       setClipboardStatus("Image pasted from clipboard");
       return;
     }
@@ -614,31 +579,31 @@ pasteBtn.addEventListener("click", async () => {
     setClipboardStatus(err?.message || "Clipboard paste failed", true);
   }
 });
-importServerBtn.addEventListener("click", async () => {
+ui.importServerBtn.addEventListener("click", async () => {
   await importFromServer();
 });
-loadModelBtn.addEventListener("click", async () => {
-  loadModelBtn.disabled = true;
-  modelStatus.textContent = "Loading model...";
-  const res = await fetch(`/model/${encodeURIComponent(modelSelect.value)}`, {
+ui.loadModelBtn.addEventListener("click", async () => {
+  ui.loadModelBtn.disabled = true;
+  ui.modelStatus.textContent = "Loading model...";
+  const res = await fetch(`/model/${encodeURIComponent(ui.modelSelect.value)}`, {
     method: "POST",
   });
   if (res.ok) {
-    modelStatus.textContent = `Loaded: ${modelSelect.value}`;
+    ui.modelStatus.textContent = `Loaded: ${ui.modelSelect.value}`;
   } else {
     const text = await res.text();
-    modelStatus.textContent = `Load failed: ${text}`;
+    ui.modelStatus.textContent = `Load failed: ${text}`;
   }
-  loadModelBtn.disabled = false;
+  ui.loadModelBtn.disabled = false;
 });
-importBtn.addEventListener("click", () => fileInput.click());
-fileInput.addEventListener("change", async () => {
-  const files = Array.from(fileInput.files || []);
+ui.importBtn.addEventListener("click", () => ui.fileInput.click());
+ui.fileInput.addEventListener("change", async () => {
+  const files = Array.from(ui.fileInput.files || []);
   if (!files.length) return;
   for (const file of files) {
-    await addShelfItem(file, file.name || "upload", false);
+    await addShelfItem(file, file.name || "upload");
   }
-  fileInput.value = "";
+  ui.fileInput.value = "";
 });
 
 document.addEventListener("paste", async (event) => {
@@ -658,7 +623,7 @@ document.addEventListener("paste", async (event) => {
     if (!file) continue;
     const ext = file.type.split("/")[1] || "png";
     const filename = getUniqueFilename("paste_", ext);
-    await addShelfItem(file, filename, false);
+    await addShelfItem(file, filename);
     setClipboardStatus("Image pasted from clipboard");
     event.preventDefault();
     return;
@@ -666,41 +631,39 @@ document.addEventListener("paste", async (event) => {
 });
 
 // Save output back into the shelf.
-saveOutputBtn.addEventListener("click", async () => {
-  if (!latestOutputBlob) return;
+ui.saveOutputBtn.addEventListener("click", async () => {
+  if (!state.latestOutputBlob) return;
   const filename = getUniqueFilename("flux_", "webp");
-  await addShelfItem(latestOutputBlob, filename, true);
+  await addShelfItem(state.latestOutputBlob, filename);
 });
 
 // Run generation using current settings and selected inputs.
-generateBtn.addEventListener("click", async () => {
-  generateBtn.disabled = true;
-  saveOutputBtn.disabled = true;
+ui.generateBtn.addEventListener("click", async () => {
+  ui.generateBtn.disabled = true;
+  ui.saveOutputBtn.disabled = true;
   setClipboardStatus("");
-  outputMeta.textContent = "Generating...";
+  ui.outputMeta.textContent = "Generating...";
   showProgress("Starting...");
-  const payload = {
-    prompt: promptInput.value || "",
-    neg_prompt: negPromptInput.value || "",
-    width: Number(widthInput.value) || 512,
-    height: Number(heightInput.value) || 512,
-    num_steps: Number(numStepsInput.value) || 4,
-    cfg_scale: Number(cfgScaleInput.value) || 1.0,
-    seed: seedInput.value ? Number(seedInput.value) : null,
-  };
+  const prompt = ui.promptInput.value || "";
+  const negPrompt = ui.negPromptInput.value || "";
+  const width = Number(ui.widthInput.value) || 512;
+  const height = Number(ui.heightInput.value) || 512;
+  const numSteps = Number(ui.numStepsInput.value) || 4;
+  const cfgScale = Number(ui.cfgScaleInput.value) || 1.0;
+  const seed = ui.seedInput.value ? Number(ui.seedInput.value) : null;
 
   const form = new FormData();
-  form.append("prompt", payload.prompt);
-  form.append("neg_prompt", payload.neg_prompt);
-  form.append("width", String(payload.width));
-  form.append("height", String(payload.height));
-  form.append("num_steps", String(payload.num_steps));
-  form.append("cfg_scale", String(payload.cfg_scale));
-  if (payload.seed !== null) {
-    form.append("seed", String(payload.seed));
+  form.append("prompt", prompt);
+  form.append("neg_prompt", negPrompt);
+  form.append("width", String(width));
+  form.append("height", String(height));
+  form.append("num_steps", String(numSteps));
+  form.append("cfg_scale", String(cfgScale));
+  if (seed !== null) {
+    form.append("seed", String(seed));
   }
-  inputStack.forEach((itemId) => {
-    const item = shelfImages.find((entry) => entry.id === itemId);
+  state.inputStack.forEach((itemId) => {
+    const item = state.shelfImages.find((entry) => entry.id === itemId);
     if (item) {
       form.append("images", item.blob, item.filename);
     }
@@ -709,16 +672,16 @@ generateBtn.addEventListener("click", async () => {
   const res = await fetch("/generate", { method: "POST", body: form });
   if (!res.ok) {
     const text = await res.text();
-    outputMeta.textContent = `Error: ${text}`;
+    ui.outputMeta.textContent = `Error: ${text}`;
     hideProgress();
-    generateBtn.disabled = false;
+    ui.generateBtn.disabled = false;
     return;
   }
 
   if (!res.body) {
-    outputMeta.textContent = "Error: empty response";
+    ui.outputMeta.textContent = "Error: empty response";
     hideProgress();
-    generateBtn.disabled = false;
+    ui.generateBtn.disabled = false;
     return;
   }
 
@@ -747,21 +710,21 @@ generateBtn.addEventListener("click", async () => {
         updateProgress(msg.step, msg.total);
       } else if (msg.type === "done") {
         const blob = base64ToBlob(msg.image_base64, "image/webp");
-        latestOutputBlob = blob;
-        if (outputImage.src.startsWith("blob:")) {
-          URL.revokeObjectURL(outputImage.src);
+        state.latestOutputBlob = blob;
+        if (ui.outputImage.src.startsWith("blob:")) {
+          URL.revokeObjectURL(ui.outputImage.src);
         }
-        outputImage.src = URL.createObjectURL(blob);
-        outputMeta.textContent = `Generated ${msg.width}x${msg.height}`;
+        ui.outputImage.src = URL.createObjectURL(blob);
+        ui.outputMeta.textContent = `Generated ${msg.width}x${msg.height}`;
         hideProgress();
-        saveOutputBtn.disabled = false;
-        generateBtn.disabled = false;
+        ui.saveOutputBtn.disabled = false;
+        ui.generateBtn.disabled = false;
         finished = true;
         break;
       } else if (msg.type === "error") {
-        outputMeta.textContent = `Error: ${msg.message || "generation failed"}`;
+        ui.outputMeta.textContent = `Error: ${msg.message || "generation failed"}`;
         hideProgress();
-        generateBtn.disabled = false;
+        ui.generateBtn.disabled = false;
         finished = true;
         break;
       }
@@ -770,17 +733,17 @@ generateBtn.addEventListener("click", async () => {
   }
 
   if (!finished) {
-    outputMeta.textContent = "Error: stream ended unexpectedly";
+    ui.outputMeta.textContent = "Error: stream ended unexpectedly";
     hideProgress();
-    generateBtn.disabled = false;
+    ui.generateBtn.disabled = false;
   }
 });
 
-copyOutputBtn.addEventListener("click", async () => {
+ui.copyOutputBtn.addEventListener("click", async () => {
   try {
-    let blob = latestOutputBlob;
-    if (!blob && outputImage.src) {
-      const res = await fetch(outputImage.src);
+    let blob = state.latestOutputBlob;
+    if (!blob && ui.outputImage.src) {
+      const res = await fetch(ui.outputImage.src);
       blob = await res.blob();
     }
     if (!blob) {
@@ -797,21 +760,21 @@ copyOutputBtn.addEventListener("click", async () => {
 (async () => {
   const res = await fetch("/models");
   const data = await res.json();
-  modelDefaults = data.defaults || {};
-  modelSelect.innerHTML = "";
+  state.modelDefaults = data.defaults || {};
+  ui.modelSelect.innerHTML = "";
   data.models.forEach((name) => {
     const opt = document.createElement("option");
     opt.value = name;
     opt.textContent = name;
-    modelSelect.appendChild(opt);
+    ui.modelSelect.appendChild(opt);
   });
   if (data.active_model) {
-    modelSelect.value = data.active_model;
-    modelStatus.textContent = `Loaded: ${data.active_model}`;
+    ui.modelSelect.value = data.active_model;
+    ui.modelStatus.textContent = `Loaded: ${data.active_model}`;
   } else {
-    modelStatus.textContent = "No model loaded";
+    ui.modelStatus.textContent = "No model loaded";
   }
-  applyDefaults(modelSelect.value);
+  applyDefaults(ui.modelSelect.value);
   await importFromServer();
 })();
 
@@ -820,14 +783,14 @@ async function refreshVram() {
   try {
     const res = await fetch("/vram");
     if (!res.ok) {
-      vramStatus.textContent = "VRAM: unavailable";
+      ui.vramStatus.textContent = "VRAM: unavailable";
       return;
     }
     const data = await res.json();
     const toGiB = (bytes) => (bytes / (1024 ** 3)).toFixed(2);
-    vramStatus.textContent = `VRAM used: ${toGiB(data.used_bytes)} / ${toGiB(data.total_bytes)} GiB`;
+    ui.vramStatus.textContent = `VRAM used: ${toGiB(data.used_bytes)} / ${toGiB(data.total_bytes)} GiB`;
   } catch {
-    vramStatus.textContent = "VRAM: unavailable";
+    ui.vramStatus.textContent = "VRAM: unavailable";
   }
 }
 
