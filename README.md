@@ -17,6 +17,7 @@ Supported features:
 - INT8 matmul (2x inference speedup for consumer cards).
 - Single-GPU model offloading for inference and training.
 - Solvers: Euler, [DPM-Solver++(2M)](https://arxiv.org/abs/2211.01095), [UniPC](https://arxiv.org/abs/2302.04867)
+- Web UI: `uvicorn flux2_ui.server:app --host 0.0.0.0 --port 8000`
 
 ```bash
 uv sync
