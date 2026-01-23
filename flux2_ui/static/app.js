@@ -53,19 +53,6 @@ function base64ToBlob(base64, mimeType) {
   return new Blob([bytes], { type: mimeType });
 }
 
-function showProgress(label) {
-  ui.progressWrap.classList.remove("hidden");
-  ui.progressFill.style.width = "0%";
-  ui.progressText.textContent = label || "Preparing...";
-}
-
-function updateProgress(step, total) {
-  const percent = Math.round((step / total) * 100);
-  ui.progressWrap.classList.remove("hidden");
-  ui.progressFill.style.width = `${percent}%`;
-  ui.progressText.textContent = `Step ${step} of ${total} (${percent}%)`;
-}
-
 function hideProgress() {
   ui.progressWrap.classList.add("hidden");
   ui.progressFill.style.width = "0%";
@@ -261,6 +248,7 @@ function makeButton({ label, action, disabled = false }) {
 function setShelfRowError(row, message) {
   const meta = row.querySelector(".shelf-meta");
   if (!meta) return;
+
   let errorEl = meta.querySelector(".shelf-error");
   if (!message) {
     if (errorEl) {
@@ -268,6 +256,7 @@ function setShelfRowError(row, message) {
     }
     return;
   }
+
   if (!errorEl) {
     errorEl = document.createElement("span");
     errorEl.className = "shelf-error";
@@ -279,10 +268,13 @@ function setShelfRowError(row, message) {
 function startRename(nameEl) {
   const row = nameEl.closest(".shelf-item");
   if (!row) return;
+
   const itemId = row.dataset.id;
   if (!itemId) return;
+
   const item = state.shelfImages.find((entry) => entry.id === itemId);
   if (!item) return;
+
   if (state.activeRenameId && state.activeRenameId !== itemId) {
     const existing = ui.shelf.querySelector(
       `.shelf-item[data-id="${state.activeRenameId}"] [data-action="rename"]`,
@@ -412,9 +404,11 @@ function getPreviewItems() {
     if (!item) return;
     items.push({ id: item.id, src: item.url, label: item.filename });
   });
+
   if (ui.outputImage.src) {
     items.push({ id: "output", src: ui.outputImage.src, label: "Output" });
   }
+
   state.shelfImages.forEach((item) => {
     items.push({ id: item.id, src: item.url, label: item.filename });
   });
@@ -432,21 +426,12 @@ function renderPreview() {
 
 function stepPreview(delta) {
   if (state.previewItems.length === 0) return;
-  state.previewIndex =
-    (state.previewIndex + delta + state.previewItems.length) %
-    state.previewItems.length;
+  state.previewIndex = (state.previewIndex + delta + state.previewItems.length) % state.previewItems.length;
   renderPreview();
 }
 
-ui.previewPrev.addEventListener("click", (event) => {
-  event.stopPropagation();
-  stepPreview(-1);
-});
-
-ui.previewNext.addEventListener("click", (event) => {
-  event.stopPropagation();
-  stepPreview(1);
-});
+ui.previewPrev.addEventListener("click", (event) => { event.stopPropagation(); stepPreview(-1); });
+ui.previewNext.addEventListener("click", (event) => { event.stopPropagation(); stepPreview(1); });
 
 ui.outputImage.addEventListener("click", () => {
   if (!ui.outputImage.src) return;
@@ -455,13 +440,10 @@ ui.outputImage.addEventListener("click", () => {
 
 document.addEventListener("keydown", (event) => {
   if (ui.preview.classList.contains("hidden")) return;
-  if (event.key === "ArrowLeft") {
-    stepPreview(-1);
-  } else if (event.key === "ArrowRight") {
-    stepPreview(1);
-  } else if (event.key === "Escape") {
-    closePreview();
-  }
+
+  if (event.key === "ArrowLeft") stepPreview(-1);
+  else if (event.key === "ArrowRight") stepPreview(1);
+  else if (event.key === "Escape") closePreview();
 });
 
 // Shelf actions (add/delete) via event delegation.
@@ -471,14 +453,18 @@ ui.shelf.addEventListener("click", async (event) => {
     openPreview(img.dataset.id);
     return;
   }
+
   const addBtn = event.target.closest('button[data-action="add"]');
   if (addBtn) {
     const row = event.target.closest(".shelf-item");
     if (!row) return;
+
     const itemId = row.dataset.id;
     if (!itemId) return;
+
     state.inputStack.push(itemId);
     const item = state.shelfImages.find((entry) => entry.id === itemId);
+
     if (!item) return;
     ui.inputStackEl.appendChild(buildInputRow(item, state.inputStack.length - 1));
     return;
@@ -487,9 +473,11 @@ ui.shelf.addEventListener("click", async (event) => {
   if (saveBtn) {
     const row = event.target.closest(".shelf-item");
     if (!row) return;
+
     const itemId = row.dataset.id;
     const item = state.shelfImages.find((entry) => entry.id === itemId);
     if (!item || item.saved) return;
+
     const form = new FormData();
     form.append("file", item.blob, item.filename);
     const res = await fetch("/image", { method: "POST", body: form });
@@ -528,9 +516,11 @@ ui.shelf.addEventListener("click", async (event) => {
   if (copyBtn) {
     const row = event.target.closest(".shelf-item");
     if (!row) return;
+
     const itemId = row.dataset.id;
     const item = state.shelfImages.find((entry) => entry.id === itemId);
     if (!item) return;
+
     try {
       await copyBlobToClipboard(item.blob);
       setStatus("Copied to clipboard");
@@ -547,8 +537,10 @@ ui.shelf.addEventListener("click", async (event) => {
   }
   const deleteBtn = event.target.closest('button[data-action="delete"]');
   if (!deleteBtn) return;
+
   const row = event.target.closest(".shelf-item");
   if (!row) return;
+
   const itemId = row.dataset.id;
   const item = state.shelfImages.find((entry) => entry.id === itemId);
   if (item) {
@@ -569,8 +561,10 @@ ui.inputStackEl.addEventListener("click", (event) => {
   }
   const removeBtn = event.target.closest('button[data-action="remove"]');
   if (!removeBtn) return;
+
   const row = event.target.closest(".stack-item");
   if (!row) return;
+
   const index = Number(row.dataset.index);
   if (Number.isNaN(index)) return;
   state.inputStack = state.inputStack.filter((_, idx) => idx !== index);
@@ -586,14 +580,13 @@ ui.loadUrlBtn.addEventListener("click", async () => {
   let blob;
   try {
     const res = await fetch(`/proxy?url=${encodeURIComponent(ui.urlInput.value)}`);
-    if (!res.ok) {
-      throw new Error("Load URL failed");
-    }
+    if (!res.ok) throw new Error("Load URL failed");
     blob = await res.blob();
   } catch (err) {
     setStatus(err?.message || "Load URL failed", true);
     return;
   }
+
   const type = blob.type.split("/")[1] || "webp";
   const ext = type === "jpeg" ? "jpg" : type;
   let name = "";
@@ -612,16 +605,14 @@ ui.loadUrlBtn.addEventListener("click", async () => {
   await addShelfItem(blob, name);
   ui.urlInput.value = "";
 });
-ui.importServerBtn.addEventListener("click", async () => {
-  await importFromServer();
-});
+
+ui.importServerBtn.addEventListener("click", async () => { await importFromServer(); });
+
 ui.loadModelBtn.addEventListener("click", async () => {
   ui.loadModelBtn.disabled = true;
   ui.modelStatus.textContent = "Loading model...";
   try {
-    const res = await fetch(`/model/${encodeURIComponent(ui.modelSelect.value)}`, {
-      method: "POST",
-    });
+    const res = await fetch(`/model/${encodeURIComponent(ui.modelSelect.value)}`, { method: "POST" });
     if (!res.ok) {
       const text = await res.text();
       throw new Error(text || "Load failed");
@@ -636,6 +627,7 @@ ui.loadModelBtn.addEventListener("click", async () => {
     ui.loadModelBtn.disabled = false;
   }
 });
+
 ui.importBtn.addEventListener("click", () => ui.fileInput.click());
 ui.fileInput.addEventListener("change", async () => {
   const files = Array.from(ui.fileInput.files || []);
@@ -682,13 +674,17 @@ ui.generateBtn.addEventListener("click", async () => {
   ui.saveOutputBtn.disabled = true;
   setStatus("");
   ui.outputMeta.textContent = "Generating...";
-  showProgress("Starting...");
+
+  ui.progressWrap.classList.remove("hidden");
+  ui.progressFill.style.width = "0%";
+  ui.progressText.textContent = "Starting...";
+
   const prompt = ui.promptInput.value || "";
   const negPrompt = ui.negPromptInput.value || "";
-  const width = Number(ui.widthInput.value) || 512;
-  const height = Number(ui.heightInput.value) || 512;
-  const numSteps = Number(ui.numStepsInput.value) || 4;
-  const cfgScale = Number(ui.cfgScaleInput.value) || 1.0;
+  const width = Number(ui.widthInput.value);
+  const height = Number(ui.heightInput.value);
+  const numSteps = Number(ui.numStepsInput.value);
+  const cfgScale = Number(ui.cfgScaleInput.value);
   const seed = ui.seedInput.value ? Number(ui.seedInput.value) : null;
 
   const form = new FormData();
@@ -699,6 +695,7 @@ ui.generateBtn.addEventListener("click", async () => {
   form.append("num_steps", String(numSteps));
   form.append("cfg_scale", String(cfgScale));
   if (seed !== null) form.append("seed", String(seed));
+
   state.inputStack.forEach((itemId) => {
     const item = state.shelfImages.find((entry) => entry.id === itemId);
     if (item) form.append("images", item.blob, item.filename);
@@ -722,17 +719,19 @@ ui.generateBtn.addEventListener("click", async () => {
       while (true) {
         const newlineIndex = buffer.indexOf("\n");
         if (newlineIndex === -1) break;
+
         const line = buffer.slice(0, newlineIndex).trim();
         buffer = buffer.slice(newlineIndex + 1);
         if (!line) continue;
+
         let msg;
-        try {
-          msg = JSON.parse(line);
-        } catch {
-          continue;
-        }
+        try { msg = JSON.parse(line); } catch { continue; }
+
         if (msg.type === "progress") {
-          updateProgress(msg.step, msg.total);
+          const percent = Math.round((msg.step / msg.total) * 100);
+          ui.progressWrap.classList.remove("hidden");
+          ui.progressFill.style.width = `${percent}%`;
+          ui.progressText.textContent = `Step ${msg.step} of ${msg.total} (${percent}%)`;
         } else if (msg.type === "done") {
           const blob = base64ToBlob(msg.image_base64, "image/webp");
           state.latestOutputBlob = blob;
