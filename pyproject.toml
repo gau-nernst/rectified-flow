@@ -14,6 +14,8 @@ dependencies = [
     "sentencepiece>=0.2.1",
     "protobuf>=6.33.4",
     "accelerate>=1.12.0",
+    "fastapi[standard]>=0.115.0",
+    "requests>=2.32.3",
 ]
 
 [tool.ruff]

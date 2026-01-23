@@ -14,3 +14,4 @@ torchinductor/
 *.tar
 *.tsv
 *.log
+uv.lock

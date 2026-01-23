@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Flux.2 UI</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <div>
+        <h1>Flux.2 UI</h1>
+      </div>
+        <div class="hero-card">
+          <div>
+            <span class="label">Model</span>
+            <select id="model"></select>
+            <button id="load_model" class="ghost">Load model</button>
+            <div id="model_status" class="hint"></div>
+            <div id="vram_status" class="hint"></div>
+          </div>
+        </div>
+    </header>
+    <div id="status" class="status" role="status" aria-live="polite"></div>
+
+    <main class="grid">
+      <section class="panel panel--prompt">
+        <div class="panel-header">
+          <h2>Prompt</h2>
+          <button id="generate" class="primary">Generate</button>
+        </div>
+        <label class="label">Prompt</label>
+        <textarea id="prompt" rows="4" placeholder="Describe the image..."></textarea>
+        <label class="label">Negative prompt</label>
+        <textarea id="neg_prompt" rows="2" placeholder="What should be avoided?"></textarea>
+
+        <div class="row">
+          <div>
+            <label class="label">Width</label>
+            <input id="width" type="number" value="512" min="128" step="16" />
+          </div>
+          <div>
+            <label class="label">Height</label>
+            <input id="height" type="number" value="512" min="128" step="16" />
+          </div>
+          <div>
+            <label class="label">Seed</label>
+            <input id="seed" type="number" placeholder="Random" />
+          </div>
+          <div>
+            <label class="label">Steps</label>
+            <input id="num_steps" type="number" min="1" max="100" value="4" />
+          </div>
+          <div>
+            <label class="label">CFG</label>
+            <input id="cfg_scale" type="number" step="0.1" value="1.0" />
+          </div>
+        </div>
+
+      </section>
+
+      <section class="panel panel--inputs">
+        <div class="panel-header">
+          <h2>Input Images</h2>
+          <span class="hint">Add images as input from the shelf below</span>
+        </div>
+        <div id="input_stack" class="stack"></div>
+      </section>
+
+      <section class="panel panel--output">
+        <div class="panel-header">
+          <h2>Output</h2>
+          <div class="panel-actions">
+            <button id="copy_output" class="ghost">Copy</button>
+            <button id="save_output" class="ghost" disabled>Save to shelf</button>
+          </div>
+        </div>
+        <div class="output-card">
+          <img id="output_image" alt="Generated" />
+          <div id="progress_wrap" class="progress-wrap hidden" aria-live="polite">
+            <div class="progress-track">
+              <div id="progress_fill" class="progress-fill"></div>
+            </div>
+            <div id="progress_text" class="progress-text"></div>
+          </div>
+          <div id="output_meta" class="meta"></div>
+        </div>
+      </section>
+    </main>
+
+    <section class="panel panel--shelf">
+      <div class="panel-header">
+        <h2>Image Shelf</h2>
+        <div class="panel-actions">
+          <span class="hint">Import images and reuse across generations</span>
+          <button id="import_server" class="ghost">Import from server</button>
+        </div>
+      </div>
+      <div class="import-row">
+        <button id="import_btn" class="ghost">Import image</button>
+        <input id="file_input" type="file" accept="image/*" multiple hidden />
+      </div>
+      <div class="url-row">
+        <input id="image_url" type="text" placeholder="Paste image URL..." />
+        <button id="load_url">Load URL</button>
+      </div>
+      <div class="shelf" id="image_shelf"></div>
+    </section>
+  </div>
+
+  <div id="image_preview" class="preview hidden" role="dialog" aria-modal="true">
+    <button id="preview_prev" class="preview-nav preview-nav--left" type="button" aria-label="Previous image">
+      &#8592;
+    </button>
+    <img id="preview_image" alt="Preview" />
+    <div id="preview_label" class="preview-label"></div>
+    <button id="preview_next" class="preview-nav preview-nav--right" type="button" aria-label="Next image">
+      &#8594;
+    </button>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
