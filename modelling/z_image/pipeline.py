@@ -11,6 +11,9 @@ from .model import ZImage, load_zimage
 
 
 class ZImagePipeline:
+    BASE_DEFAULTS = dict(num_steps=28, cfg_scale=3.0, time_shift=6.0)
+    TURBO_DEFAULTS = dict(num_steps=8, cfg_scale=1.0, time_shift=3.0)
+
     def __init__(self, zimage: ZImage | None = None) -> None:
         self.zimage = zimage or load_zimage().bfloat16()
         self.ae = load_autoencoder("flux1").bfloat16()
@@ -76,6 +79,7 @@ class ZImagePipeline:
         denoise: float = 1.0,
         cfg_scale: float = 1.0,
         num_steps: int = 8,
+        time_shift: float = 3.0,
         seed: int | None = None,
         solver: str = "euler",
         pbar: bool = False,
@@ -103,7 +107,7 @@ class ZImagePipeline:
         # static shift
         # Z-Image uses t=0 as noise, and t=1 as data
         timesteps = torch.linspace(1.0, 0.0, num_steps + 1)
-        timesteps = 3.0 / (3.0 + 1 / timesteps - 1)
+        timesteps = time_shift / (time_shift + 1 / timesteps - 1)
         timesteps = 1 - timesteps
         timesteps = timesteps.tolist()
 

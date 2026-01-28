@@ -175,13 +175,16 @@ class ZImage(nn.Module):
         return img
 
 
-def load_zimage():
+def load_zimage(name: str = "turbo"):
+    repo_id = {
+        "turbo": "Tongyi-MAI/Z-Image-Turbo",
+        "base": "Tongyi-MAI/Z-Image",
+    }[name]
+    filename = "transformer/diffusion_pytorch_model.safetensors.index.json"
+    state_dict = load_hf_state_dict(repo_id, filename)
+
     with torch.device("meta"):
         model = ZImage()
 
-    state_dict = load_hf_state_dict(
-        "Tongyi-MAI/Z-Image-Turbo",
-        "transformer/diffusion_pytorch_model.safetensors.index.json",
-    )
     model.load_state_dict(state_dict, assign=True)
     return model
