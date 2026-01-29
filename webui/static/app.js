@@ -224,6 +224,10 @@ function buildShelfRow(item) {
   });
   const copyBtn = makeButton({ label: "Copy", action: "copy" });
   const deleteBtn = makeButton({ label: "Remove", action: "delete" });
+  addBtn.dataset.id = item.id;
+  saveBtn.dataset.id = item.id;
+  copyBtn.dataset.id = item.id;
+  deleteBtn.dataset.id = item.id;
 
   actions.appendChild(addBtn);
   actions.appendChild(saveBtn);
@@ -467,7 +471,7 @@ ui.shelf.addEventListener("click", async (event) => {
 
   const addBtn = event.target.closest('button[data-action="add"]');
   if (addBtn) {
-    const itemId = event.target.closest(".shelf-item")?.dataset.id;
+    const itemId = addBtn.dataset.id;
     if (!itemId) return;
 
     state.inputStack.push(itemId);
@@ -480,7 +484,7 @@ ui.shelf.addEventListener("click", async (event) => {
   const saveBtn = event.target.closest('button[data-action="save"]');
   if (saveBtn) {
     const row = event.target.closest(".shelf-item");
-    const itemId = row?.dataset.id;
+    const itemId = saveBtn.dataset.id;
     if (!itemId) return;
     const item = state.shelfImages.find((entry) => entry.id === itemId);
     if (!item || item.saved) return;
@@ -522,7 +526,7 @@ ui.shelf.addEventListener("click", async (event) => {
   const copyBtn = event.target.closest('button[data-action="copy"]');
   if (copyBtn) {
     const row = event.target.closest(".shelf-item");
-    const itemId = row?.dataset.id;
+    const itemId = copyBtn.dataset.id;
     if (!itemId) return;
     const item = state.shelfImages.find((entry) => entry.id === itemId);
     if (!item) return;
@@ -545,7 +549,7 @@ ui.shelf.addEventListener("click", async (event) => {
   if (!deleteBtn) return;
 
   const row = event.target.closest(".shelf-item");
-  const itemId = row?.dataset.id;
+  const itemId = deleteBtn.dataset.id;
   if (!itemId) return;
   const item = state.shelfImages.find((entry) => entry.id === itemId);
   if (item) {
@@ -642,34 +646,23 @@ ui.fileInput.addEventListener("change", async () => {
 });
 
 document.addEventListener("paste", async (event) => {
-  const target = event.target;
-  if (
-    target &&
-    (target.tagName === "INPUT" ||
-      target.tagName === "TEXTAREA" ||
-      target.isContentEditable)
-  ) {
-    return;
-  }
+  const items = event.clipboardData?.items || [];
+  const imageItem = Array.from(items).find((item) => item.type.startsWith("image/"));
+  if (!imageItem) return;
 
-  const items = event.clipboardData.items || [];
-  for (const item of items) {
-    if (!item.type.startsWith("image/")) continue;
-    const file = item.getAsFile();
-    if (!file) continue;
+  const file = imageItem.getAsFile();
+  if (!file) return;
 
-    const ext = file.type.split("/")[1] || "png";
-    const filename = getUniqueFilename("paste_", ext);
-    await addShelfItem(file, filename);
-    event.preventDefault();
-    return;
-  }
+  const ext = file.type.split("/")[1] || "png";
+  const filename = getUniqueFilename("paste_", ext);
+  await addShelfItem(file, filename);
+  event.preventDefault();
 });
 
 // Save output back into the shelf.
 ui.saveOutputBtn.addEventListener("click", async () => {
   if (!state.latestOutputBlob) return;
-  const filename = getUniqueFilename("flux_", "webp");
+  const filename = getUniqueFilename("generated_", "webp");
   await addShelfItem(state.latestOutputBlob, filename);
 });
 
