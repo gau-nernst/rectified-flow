@@ -13,22 +13,23 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from modelling import Flux2Pipeline, load_flux2
+from modelling import Flux2Pipeline, ZImagePipeline, load_zimage
 
 APP_ROOT = Path(__file__).resolve().parent
 STATIC_DIR = APP_ROOT / "static"
 IMAGE_DIR = APP_ROOT / "images"
 IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
-MODELS = ["klein-4B", "klein-9B", "klein-base-4B", "klein-base-9B"]
 MODEL_DEFAULTS = {
-    "klein-4B": dict(cfg_scale=1.0, num_steps=4),
-    "klein-9B": dict(cfg_scale=1.0, num_steps=4),
-    "klein-base-4B": dict(cfg_scale=4.0, num_steps=50),
-    "klein-base-9B": dict(cfg_scale=4.0, num_steps=50),
+    "FLUX.2-klein-4B": Flux2Pipeline.KLEIN_DEFAULTS,
+    "FLUX.2-klein-9B": Flux2Pipeline.KLEIN_DEFAULTS,
+    "FLUX.2-klein-base-4B": Flux2Pipeline.KLEIN_BASE_DEFAULTS,
+    "FLUX.2-klein-base-9B": Flux2Pipeline.KLEIN_BASE_DEFAULTS,
+    "Z-Image-Turbo": ZImagePipeline.TURBO_DEFAULTS,
+    "Z-Image-Base": ZImagePipeline.BASE_DEFAULTS,
 }
 
-PIPELINE: Flux2Pipeline | None = None
+PIPELINE: Flux2Pipeline | ZImagePipeline | None = None
 ACTIVE_MODEL: str | None = None
 THREAD_POOL = ThreadPoolExecutor(max_workers=1)
 
@@ -48,7 +49,7 @@ def index():
 
 @app.get("/models")
 def list_models():
-    return {"models": MODELS, "defaults": MODEL_DEFAULTS, "active_model": ACTIVE_MODEL}
+    return {"models": list(MODEL_DEFAULTS.keys()), "defaults": MODEL_DEFAULTS, "active_model": ACTIVE_MODEL}
 
 
 @app.get("/proxy")
@@ -114,13 +115,23 @@ async def generate(
     neg_prompt: str = Form(""),
     width: int = Form(512),
     height: int = Form(512),
-    num_steps: int = Form(4),
     cfg_scale: float = Form(1.0),
+    num_steps: int = Form(4),
     seed: int | None = Form(None),
     images: list[UploadFile] = File(default=[]),
 ):
-    limit_pixels = 2048 * 2048 if len(images) == 1 else 1024 * 1024
+    kwargs = dict(
+        prompt=prompt,
+        neg_prompt=neg_prompt,
+        img_size=(height, width),
+        cfg_scale=cfg_scale,
+        num_steps=num_steps,
+        seed=seed,
+        pbar=False,
+    )
 
+    # Flux2-klein specific logic
+    limit_pixels = 2048 * 2048 if len(images) == 1 else 1024 * 1024
     ref_imgs = []
     for image in images:
         data = await image.read()
@@ -128,8 +139,8 @@ async def generate(
         img = _cap_pixels(img, limit_pixels)
         ref_imgs.append(img.convert("RGB"))
 
-    if not ref_imgs:
-        ref_imgs = None
+    if ref_imgs:
+        kwargs.update(ref_imgs=ref_imgs)
 
     stream_queue: queue.Queue[str | None] = queue.Queue()
 
@@ -142,17 +153,7 @@ async def generate(
             def progress_cb(step: int, total: int) -> None:
                 emit({"type": "progress", "step": step, "total": total})
 
-            img_pt = PIPELINE.generate(
-                prompt=prompt,
-                neg_prompt=neg_prompt,
-                ref_imgs=ref_imgs,
-                img_size=(height, width),
-                cfg_scale=cfg_scale,
-                num_steps=num_steps,
-                seed=seed,
-                pbar=False,
-                progress_cb=progress_cb,
-            )
+            img_pt = PIPELINE.generate(**kwargs, progress_cb=progress_cb)
             img_np = img_pt.squeeze(0).permute(1, 2, 0).cpu().numpy()
             pil_img = Image.fromarray(img_np)
 
@@ -189,7 +190,17 @@ def load_model(model_name: str):
         gc.collect()
         torch.cuda.empty_cache()
 
-    PIPELINE = Flux2Pipeline.load(model_name).cuda()
+    if model_name.startswith("FLUX.2-"):
+        PIPELINE = Flux2Pipeline.load(model_name.removeprefix("FLUX.2-"))
+
+    elif model_name.startswith("Z-Image-"):
+        zimage = load_zimage(model_name.removeprefix("Z-Image-").lower()).bfloat16()
+        PIPELINE = ZImagePipeline(zimage)
+
+    else:
+        raise ValueError(f"Unsupported model {model_name}")
+
+    PIPELINE.cuda()
     ACTIVE_MODEL = model_name
 
 
