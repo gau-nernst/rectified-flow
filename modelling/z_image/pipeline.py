@@ -1,5 +1,7 @@
 # https://github.com/Tongyi-MAI/Z-Image/blob/2151737e/src/zimage/pipeline.py
 
+from typing import Callable
+
 import torch
 from torch import Tensor, nn
 from tqdm import tqdm
@@ -83,6 +85,7 @@ class ZImagePipeline:
         seed: int | None = None,
         solver: str = "euler",
         pbar: bool = False,
+        progress_cb: Callable[[int, int], None] | None = None,
     ) -> Tensor:
         txt_embeds = self.embed_text(self.tokenizer, self.qwen3, prompt)
         neg_txt_embeds = self.embed_text(self.tokenizer, self.qwen3, neg_prompt) if cfg_scale != 1.0 else None
@@ -120,6 +123,7 @@ class ZImagePipeline:
             cfg_scale=cfg_scale,
             solver=solver,
             pbar=pbar,
+            progress_cb=progress_cb,
         )
         return self.ae.decode(latents, uint8=True)
 
@@ -134,6 +138,7 @@ def zimage_generate(
     cfg_scale: float = 1.0,
     solver: str = "euler",
     pbar: bool = False,
+    progress_cb: Callable[[int, int], None] | None = None,
 ) -> Tensor:
     num_steps = len(timesteps) - 1
     solver_ = get_solver(solver, timesteps)
@@ -149,5 +154,7 @@ def zimage_generate(
             v = neg_v.lerp(v, cfg_scale)
 
         latents = solver_.step(latents, v, i)
+        if progress_cb is not None:
+            progress_cb(i + 1, num_steps)
 
     return latents
