@@ -220,7 +220,11 @@ def load_flux2(name: str = "klein-4B"):
     repo_id, filename = {
         "dev": ("black-forest-labs/FLUX.2-dev", "flux2-dev.safetensors"),
         "klein-4B": ("black-forest-labs/FLUX.2-klein-4B", "flux-2-klein-4b.safetensors"),
+        "klein-4B-fp8": ("black-forest-labs/FLUX.2-klein-4b-fp8", "flux-2-klein-4b-fp8.safetensors"),
+        "klein-4B-nvfp4": ("black-forest-labs/FLUX.2-klein-4b-nvfp4", "flux-2-klein-4b-nvfp4.safetensors"),
         "klein-9B": ("black-forest-labs/FLUX.2-klein-9B", "flux-2-klein-9b.safetensors"),
+        "klein-9B-fp8": ("black-forest-labs/FLUX.2-klein-9b-fp8", "flux-2-klein-9b-fp8.safetensors"),
+        "klein-9B-nvfp4": ("black-forest-labs/FLUX.2-klein-9b-nvfp4", "flux-2-klein-9b-nvfp4.safetensors"),
         "klein-base-4B": ("black-forest-labs/FLUX.2-klein-base-4B", "flux-2-klein-base-4b.safetensors"),
         "klein-base-9B": ("black-forest-labs/FLUX.2-klein-base-9B", "flux-2-klein-base-9b.safetensors"),
     }[name]

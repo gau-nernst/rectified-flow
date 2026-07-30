@@ -1,7 +1,7 @@
 import torch
+from gn_kernels import quantize_nvfp4_triton
+from gn_kernels.cutedsl import sm120_mm_nvfp4
 from torch import Tensor, nn
-
-from gn_kernels import cutlass_nvfp4_mm, quantize_nvfp4_triton
 
 
 def nvfp4_calibration_hook(module: nn.Module, args):
@@ -26,36 +26,39 @@ class NVFP4Linear(nn.Module):
             NVFP4Linear.install_calibration_hook(child)
 
     @staticmethod
-    def convert(model: nn.Module):
+    def convert(m: nn.Module):
         # pre-order traversal
         # assuming Linear is a leaf node
-        if isinstance(model, nn.Linear):
-            input_amax_list = getattr(model, "input_amax_list", None)
+        if isinstance(m, nn.Linear):
+            input_amax_list = getattr(m, "input_amax_list", None)
             if not input_amax_list:
                 return
 
-            x_tensor_scale = torch.stack(input_amax_list).amax().float() / (448.0 * 6.0)
-            model.nvfp4_handle.remove()
-            del model.input_amax_list
-            del model.nvfp4_handle
+            input_scale = torch.stack(input_amax_list).amax().float() / (448.0 * 6.0)
+            m.nvfp4_handle.remove()
+            del m.input_amax_list
+            del m.nvfp4_handle
 
-            model.__class__ = NVFP4Linear
-            w = model.weight.detach()
+            m.__class__ = NVFP4Linear
+            w = m.weight.detach()
+            del m.weight
             w_tensor_scale = w.abs().amax().float() / (448.0 * 6.0)
             wq, ws = quantize_nvfp4_triton(w, w_tensor_scale)
-            model.register_buffer("wq", wq)
-            model.register_buffer("ws", ws)
-            model.register_buffer("x_tensor_scale", x_tensor_scale)
-            model.register_buffer("output_scale", x_tensor_scale * w_tensor_scale)
-            del model.weight
+            m.register_buffer("weight", wq)
+            m.register_buffer("weight_scale", ws)
+            m.register_buffer("input_scale", input_scale)
+            m.output_scale = input_scale.item() * w_tensor_scale.item()
 
             return
 
-        for child in model.children():
+        for child in m.children():
             NVFP4Linear.convert(child)
 
     def forward(self, x: Tensor):
         x_2d = x.reshape(-1, x.shape[-1])
-        xq, xs = quantize_nvfp4_triton(x_2d, self.x_tensor_scale)
-        out = cutlass_nvfp4_mm(xq, self.wq.T, xs, self.ws, self.output_scale, self.bias)
+        xq, xs = quantize_nvfp4_triton(x_2d, self.input_scale)
+        out = sm120_mm_nvfp4.mm(xq, self.weight, xs, self.weight_scale, self.output_scale)
+        # TODO: support bias
+        if self.bias is not None:
+            out += self.bias
         return out.view(*x.shape[:-1], out.shape[-1])
