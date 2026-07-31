@@ -22,7 +22,11 @@ IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 MODEL_DEFAULTS = {
     "FLUX.2-klein-4B": Flux2Pipeline.KLEIN_DEFAULTS,
+    "FLUX.2-klein-4B-fp8": Flux2Pipeline.KLEIN_DEFAULTS,
+    "FLUX.2-klein-4B-nvfp4": Flux2Pipeline.KLEIN_DEFAULTS,
     "FLUX.2-klein-9B": Flux2Pipeline.KLEIN_DEFAULTS,
+    "FLUX.2-klein-9B-fp8": Flux2Pipeline.KLEIN_DEFAULTS,
+    "FLUX.2-klein-9B-nvfp4": Flux2Pipeline.KLEIN_DEFAULTS,
     "FLUX.2-klein-base-4B": Flux2Pipeline.KLEIN_BASE_DEFAULTS,
     "FLUX.2-klein-base-9B": Flux2Pipeline.KLEIN_BASE_DEFAULTS,
     "Z-Image-Turbo": ZImagePipeline.TURBO_DEFAULTS,

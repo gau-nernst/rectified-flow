@@ -87,12 +87,12 @@ class Flux2Pipeline:
 
     @staticmethod
     def load(name: str):
-        text_id = {
-            "klein-4B": "Qwen/Qwen3-4B-FP8",
-            "klein-9B": "Qwen/Qwen3-8B-FP8",
-            "klein-base-4B": "Qwen/Qwen3-4B-FP8",
-            "klein-base-9B": "Qwen/Qwen3-8B-FP8",
-        }[name]
+        if "4B" in name:
+            text_id = "Qwen/Qwen3-4B-FP8"
+        elif "9B" in name:
+            text_id = "Qwen/Qwen3-8B-FP8"
+        else:
+            raise ValueError
         return Flux2Pipeline(load_flux2(name), text_id)
 
     # default is for klein

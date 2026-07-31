@@ -359,6 +359,9 @@ function buildInputRow(item, index) {
   const img = document.createElement("img");
   img.alt = item.filename;
   img.dataset.id = item.id;
+  const size = document.createElement("span");
+  size.className = "stack-size";
+  size.textContent = "—";
   const updateSize = () => {
     size.textContent = `${img.naturalWidth}x${img.naturalHeight}`;
   };
@@ -375,6 +378,7 @@ function buildInputRow(item, index) {
 
   row.appendChild(img);
   row.appendChild(label);
+  row.appendChild(size);
   row.appendChild(removeBtn);
   return row;
 }
