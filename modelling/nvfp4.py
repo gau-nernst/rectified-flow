@@ -1,6 +1,5 @@
 import torch
-from gn_kernels import quantize_nvfp4_triton
-from gn_kernels.cutedsl import sm120_mm_nvfp4
+from gn_kernels import quantize_nvfp4_triton, cublas_nvfp4_mm
 from torch import Tensor, nn
 
 
@@ -57,8 +56,5 @@ class NVFP4Linear(nn.Module):
     def forward(self, x: Tensor):
         x_2d = x.reshape(-1, x.shape[-1])
         xq, xs = quantize_nvfp4_triton(x_2d, self.input_scale)
-        out = sm120_mm_nvfp4.mm(xq, self.weight, xs, self.weight_scale, self.output_scale)
-        # TODO: support bias
-        if self.bias is not None:
-            out += self.bias
+        out = cublas_nvfp4_mm(xq, self.weight, xs, self.weight_scale, self.output_scale, self.bias)
         return out.view(*x.shape[:-1], out.shape[-1])
