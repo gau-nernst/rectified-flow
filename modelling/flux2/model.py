@@ -8,6 +8,7 @@ from torch import Tensor, nn
 
 from ..attn import dispatch_attn
 from ..flux1.model import LastLayer, MLPEmbedder, Modulation, SelfAttention, modulate, timestep_embedding
+from ..nvfp4 import NVFP4Linear
 from ..rope import RopeND, apply_rope
 from ..utils import create_name_map_hook, load_hf_state_dict
 
@@ -202,6 +203,23 @@ def _load_flux2(repo_id: str, filename: str):
     dim, txt_dim = state_dict["txt_in.weight"].shape
     guidance_embed = "guidance_in.in_layer.weight" in state_dict
 
+    def maybe_quantize(m: nn.Module, name: str):
+        if isinstance(m, nn.Linear):
+            if f"{name}.input_scale" not in state_dict:
+                return
+
+            m.__class__ = NVFP4Linear
+            del m.weight
+            N, K = m.out_features, m.in_features
+            m.register_buffer("weight", torch.empty(N, K // 2, dtype=torch.uint8))
+            m.register_buffer("weight_scale", torch.empty(N, K // 16, dtype=torch.float8_e4m3fn))
+            m.register_buffer("input_scale", torch.empty((), dtype=torch.float32))
+            m.register_buffer("weight_scale_2", torch.empty((), dtype=torch.float32))
+
+        for child_name, child in m.named_children():
+            full_name = f"{name}.{child_name}" if name else child_name
+            maybe_quantize(child, full_name)
+
     cfg = Flux2Config(
         txt_dim=txt_dim,
         dim=dim,
@@ -211,8 +229,16 @@ def _load_flux2(repo_id: str, filename: str):
     )
     with torch.device("meta"):
         model = Flux2(cfg)
+        maybe_quantize(model, "")
 
     model.load_state_dict(state_dict, assign=True)
+
+    # post-load processing
+    for m in model.modules():
+        if hasattr(m, "weight_scale_2"):
+            # repack the nibbles
+            m.weight = ((m.weight << 4) | (m.weight >> 4)).view(torch.float4_e2m1fn_x2)
+
     return model
 
 

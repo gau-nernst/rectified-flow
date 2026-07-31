@@ -1,6 +1,6 @@
 # https://github.com/Tongyi-MAI/Z-Image/blob/2151737e/src/zimage/pipeline.py
 
-from typing import Callable
+from collections.abc import Callable
 
 import torch
 from torch import Tensor, nn

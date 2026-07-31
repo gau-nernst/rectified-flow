@@ -1,5 +1,5 @@
+from collections.abc import Iterable
 from contextlib import contextmanager
-from typing import Iterable
 
 import torch
 from torch import Tensor, nn

@@ -1,5 +1,6 @@
 import torch
-from gn_kernels import quantize_nvfp4_triton, cublas_nvfp4_mm
+import torch.nn.functional as F
+from gn_kernels import quantize_nvfp4_triton
 from torch import Tensor, nn
 
 
@@ -45,8 +46,8 @@ class NVFP4Linear(nn.Module):
             wq, ws = quantize_nvfp4_triton(w, w_tensor_scale)
             m.register_buffer("weight", wq)
             m.register_buffer("weight_scale", ws)
+            m.register_buffer("weight_scale_2", w_tensor_scale)
             m.register_buffer("input_scale", input_scale)
-            m.output_scale = input_scale.item() * w_tensor_scale.item()
 
             return
 
@@ -56,5 +57,14 @@ class NVFP4Linear(nn.Module):
     def forward(self, x: Tensor):
         x_2d = x.reshape(-1, x.shape[-1])
         xq, xs = quantize_nvfp4_triton(x_2d, self.input_scale)
-        out = cublas_nvfp4_mm(xq, self.weight, xs, self.weight_scale, self.output_scale, self.bias)
+        out = F.scaled_mm(
+            xq,
+            self.weight.T,
+            [xs, self.input_scale],
+            [F.ScalingType.BlockWise1x16, F.ScalingType.TensorWise],
+            [self.weight_scale, self.weight_scale_2],
+            [F.ScalingType.BlockWise1x16, F.ScalingType.TensorWise],
+            [F.SwizzleType.SWIZZLE_32_4_4, F.SwizzleType.NO_SWIZZLE],
+            [F.SwizzleType.SWIZZLE_32_4_4, F.SwizzleType.NO_SWIZZLE],
+        )
         return out.view(*x.shape[:-1], out.shape[-1])

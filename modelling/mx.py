@@ -1,5 +1,5 @@
 import torch
-from gn_kernels import quantize_mx, permute_nv_sf
+from gn_kernels import permute_nv_sf, quantize_mx
 from torch import Tensor, nn
 
 
