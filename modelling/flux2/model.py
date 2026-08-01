@@ -54,12 +54,14 @@ class DoubleStreamBlock(nn.Module):
         img_q, img_k, img_v = self.img_attn.forward_qkv(modulate(img, img_shift1, img_scale1))
         txt_q, txt_k, txt_v = self.txt_attn.forward_qkv(modulate(txt, txt_shift1, txt_scale1))
 
+        # TODO: remove cat?
         q = apply_rope(torch.cat((txt_q, img_q), dim=1), pe)
         k = apply_rope(torch.cat((txt_k, img_k), dim=1), pe)
         v = torch.cat((txt_v, img_v), dim=1)
         attn = dispatch_attn(q, k, v, impl=self.attn_impl).flatten(2)
         txt_attn, img_attn = attn.split([txt.shape[1], img.shape[1]], dim=1)
 
+        # TODO: fused residual add + modulate
         img = img + img_gate1 * self.img_attn.proj(img_attn)
         img = img + img_gate2 * self.img_mlp(modulate(img, img_shift2, img_scale2))
 
@@ -93,15 +95,17 @@ class SingleStreamBlock(nn.Module):
 
     def forward(self, x: Tensor, pe: Tensor, mod: tuple[Tensor, ...]) -> Tensor:
         shift, scale, gate = mod
+        # TODO: fused modulate (potentially with previous residual)
         x_mod = modulate(x, shift, scale, eps=self.eps)
         qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.dim, self.mlp_dim * 2], dim=-1)
 
         q, k, v = qkv.unflatten(2, (-1, self.head_dim)).chunk(3, dim=2)
-        q = apply_rope(self.q_norm(q), pe)
-        k = apply_rope(self.k_norm(k), pe)
+        q = apply_rope(q, pe, self.q_norm.weight, self.q_norm.eps)
+        k = apply_rope(k, pe, self.k_norm.weight, self.k_norm.eps)
         attn = dispatch_attn(q, k, v, impl=self.attn_impl).flatten(2)
 
         # compute activation in mlp stream, cat again and run second linear layer
+        # TODO: pre-allocate attn+mlp buffer
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
         return x + gate * output
 

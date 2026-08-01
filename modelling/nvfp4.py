@@ -54,6 +54,7 @@ class NVFP4Linear(nn.Module):
         for child in m.children():
             NVFP4Linear.convert(child)
 
+    @torch.compiler.disable
     def forward(self, x: Tensor):
         x_2d = x.reshape(-1, x.shape[-1])
         xq, xs = quantize_nvfp4_triton(x_2d, self.input_scale)
@@ -66,5 +67,6 @@ class NVFP4Linear(nn.Module):
             [F.ScalingType.BlockWise1x16, F.ScalingType.TensorWise],
             [F.SwizzleType.SWIZZLE_32_4_4, F.SwizzleType.NO_SWIZZLE],
             [F.SwizzleType.SWIZZLE_32_4_4, F.SwizzleType.NO_SWIZZLE],
+            self.bias,
         )
         return out.view(*x.shape[:-1], out.shape[-1])
