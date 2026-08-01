@@ -6,12 +6,12 @@ import math
 from typing import NamedTuple
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..attn import dispatch_attn
 from ..rope import RopeND, apply_rope
 from ..utils import create_name_map_hook, load_hf_state_dict
+from .modulate import modulate
 
 
 def timestep_embedding(t: Tensor, dim: int, max_period: float = 10_000.0, time_factor: float = 1000.0):
@@ -57,11 +57,6 @@ class SelfAttention(nn.Module):
     def forward_qkv(self, x: Tensor):
         q, k, v = self.qkv(x).unflatten(2, (-1, self.head_dim)).chunk(3, dim=2)
         return self.q_norm(q), self.k_norm(k), v
-
-
-def modulate(x: Tensor, shift: Tensor, scale: Tensor, eps: float = 1e-6) -> Tensor:
-    x = F.layer_norm(x, x.shape[-1:], eps=eps)
-    return (1.0 + scale) * x + shift
 
 
 class Modulation(nn.Module):

@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 from torch import Tensor, nn
@@ -29,26 +30,22 @@ def _rope_kernel(
     stride_xl,
     stride_ob,
     stride_ol,
-    H: tl.constexpr,
     D: tl.constexpr,
-    BLOCK_DIM: tl.constexpr,
     eps=1e-6,
 ):
     pid_l = tl.program_id(0)
     pid_h = tl.program_id(1)
     pid_b = tl.program_id(2)
 
+    BLOCK_DIM: tl.constexpr = triton.next_power_of_2(D)
     offs = tl.arange(0, BLOCK_DIM)
     mask = offs < D
-    x = tl.load(
-        x_ptr + (pid_b * stride_xb + pid_l * stride_xl + pid_h * D + offs),
-        mask,
-        other=0.0,
-    ).to(tl.float32)
+    x_ptrs = x_ptr + (pid_b * stride_xb + pid_l * stride_xl + pid_h * D + offs)
+    x = tl.load(x_ptrs, mask, other=0.0).to(tl.float32)
 
     if norm_ptr is not None:
         norm = tl.load(norm_ptr + offs, mask)
-        rrms = tl.extra.libdevice.rsqrt(tl.sum(x * x) * (1 / D) + eps)
+        rrms = tl.rsqrt(tl.sum(x * x) * (1.0 / D) + eps)
         x *= rrms * norm.to(tl.float32)
         x = x.to(tl.bfloat16).to(tl.float32)
 
@@ -61,11 +58,8 @@ def _rope_kernel(
     r_hi = x_lo * rope_hi + x_hi * rope_lo
     r = tl.join(r_lo, r_hi).reshape(BLOCK_DIM)
 
-    tl.store(
-        o_ptr + (pid_b * stride_ob + pid_l * stride_ol + pid_h * D + offs),
-        r,
-        mask,
-    )
+    o_ptrs = o_ptr + (pid_b * stride_ob + pid_l * stride_ol + pid_h * D + offs)
+    tl.store(o_ptrs, r, mask)
 
 
 def apply_rope(
@@ -83,11 +77,11 @@ def apply_rope(
     rope_real = torch.view_as_real(rope)
     out = x if in_place else torch.empty_like(x)
     B, L, H, D = x.shape
-    BLOCK_DIM = triton.next_power_of_2(D)
-    grid = (L, H, B)
-    _rope_kernel[grid](x, rope_real, norm, out, *x.stride()[:2], *out.stride()[:2], H, D, BLOCK_DIM, eps)
+    _rope_kernel[(L, H, B)](x, rope_real, norm, out, *x.stride()[:2], *out.stride()[:2], D, eps)
     return out
 
+    if norm is not None:
+        x = F.rms_norm(x, x.shape[-1:], norm, eps)
     dtype = rope.dtype.to_real()
     x_ = torch.view_as_complex(x.to(dtype).unflatten(-1, (-1, 2)))  # [B, L, nH, D/2]
     out = torch.view_as_real(x_ * rope.unsqueeze(-2)).flatten(-2)  # [B, L, nH, D]

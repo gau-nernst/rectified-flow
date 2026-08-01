@@ -7,7 +7,8 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..attn import dispatch_attn
-from ..flux1.model import LastLayer, MLPEmbedder, Modulation, SelfAttention, modulate, timestep_embedding
+from ..flux1.model import LastLayer, MLPEmbedder, Modulation, SelfAttention, timestep_embedding
+from ..flux1.modulate import modulate
 from ..nvfp4 import NVFP4Linear
 from ..rope import RopeND, apply_rope
 from ..utils import create_name_map_hook, load_hf_state_dict
@@ -43,17 +44,23 @@ class DoubleStreamBlock(nn.Module):
     def forward(
         self,
         img: Tensor,
+        img_res: Tensor | None,
         txt: Tensor,
+        txt_res: Tensor | None,
         pe: Tensor,
         mod_img: tuple[Tensor, ...],
         mod_txt: tuple[Tensor, ...],
     ) -> tuple[Tensor, Tensor]:
+        """NOTE: img and txt are modified in-place"""
         img_shift1, img_scale1, img_gate1, img_shift2, img_scale2, img_gate2 = mod_img
         txt_shift1, txt_scale1, txt_gate1, txt_shift2, txt_scale2, txt_gate2 = mod_txt
 
-        img_q, img_k, img_v = self.img_attn.forward_qkv(modulate(img, img_shift1, img_scale1))
-        txt_q, txt_k, txt_v = self.txt_attn.forward_qkv(modulate(txt, txt_shift1, txt_scale1))
+        img_res = modulate(img, img_shift1, img_scale1, img_res, img_gate2)
+        txt_res = modulate(txt, txt_shift1, txt_scale1, txt_res, txt_gate2)
+        img_q, img_k, img_v = self.img_attn.forward_qkv(img_res)
+        txt_q, txt_k, txt_v = self.txt_attn.forward_qkv(txt_res)
 
+        # TODO: fuse QK-norm inside forward_qkv() with RoPE
         # TODO: remove cat?
         q = apply_rope(torch.cat((txt_q, img_q), dim=1), pe)
         k = apply_rope(torch.cat((txt_k, img_k), dim=1), pe)
@@ -61,14 +68,11 @@ class DoubleStreamBlock(nn.Module):
         attn = dispatch_attn(q, k, v, impl=self.attn_impl).flatten(2)
         txt_attn, img_attn = attn.split([txt.shape[1], img.shape[1]], dim=1)
 
-        # TODO: fused residual add + modulate
-        img = img + img_gate1 * self.img_attn.proj(img_attn)
-        img = img + img_gate2 * self.img_mlp(modulate(img, img_shift2, img_scale2))
-
-        txt = txt + txt_gate1 * self.txt_attn.proj(txt_attn)
-        txt = txt + txt_gate2 * self.txt_mlp(modulate(txt, txt_shift2, txt_scale2))
-
-        return img, txt
+        img_res = self.img_attn.proj(img_attn)
+        txt_res = self.txt_attn.proj(txt_attn)
+        img_res = self.img_mlp(modulate(img, img_shift2, img_scale2, img_res, img_gate1))
+        txt_res = self.txt_mlp(modulate(txt, txt_shift2, txt_scale2, txt_res, txt_gate1))
+        return img_res, txt_res
 
 
 class SingleStreamBlock(nn.Module):
@@ -93,10 +97,10 @@ class SingleStreamBlock(nn.Module):
         ]
         self.register_load_state_dict_pre_hook(create_name_map_hook(remap_pairs))
 
-    def forward(self, x: Tensor, pe: Tensor, mod: tuple[Tensor, ...]) -> Tensor:
+    def forward(self, x: Tensor, res: Tensor | None, pe: Tensor, mod: tuple[Tensor, ...]) -> Tensor:
+        """NOTE: x is modified in-place"""
         shift, scale, gate = mod
-        # TODO: fused modulate (potentially with previous residual)
-        x_mod = modulate(x, shift, scale, eps=self.eps)
+        x_mod = modulate(x, shift, scale, res, gate)
         qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.dim, self.mlp_dim * 2], dim=-1)
 
         q, k, v = qkv.unflatten(2, (-1, self.head_dim)).chunk(3, dim=2)
@@ -106,8 +110,7 @@ class SingleStreamBlock(nn.Module):
 
         # compute activation in mlp stream, cat again and run second linear layer
         # TODO: pre-allocate attn+mlp buffer
-        output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
-        return x + gate * output
+        return self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
 
 
 # default is klein-4B
@@ -171,6 +174,9 @@ class Flux2(nn.Module):
         rope: Tensor,
         guidance: Tensor | None = None,
     ) -> Tensor:
+        B, Limg, _ = img.shape
+        _, Ltxt, _ = txt.shape
+
         img = self.img_in(img.to(self.img_in.weight.dtype))
         txt = self.txt_in(txt)
         vec = self.time_in(timestep_embedding(time, 256).to(img.dtype))
@@ -180,14 +186,19 @@ class Flux2(nn.Module):
 
         mod_img = self.double_stream_modulation_img(vec)
         mod_txt = self.double_stream_modulation_txt(vec)
+        img_res = txt_res = None
         for block in self.double_blocks:
-            img, txt = block(img, txt, rope, mod_img, mod_txt)
+            img_res, txt_res = block(img, img_res, txt, txt_res, rope, mod_img, mod_txt)
 
-        joint = torch.cat([txt, img], dim=1)
+        joint = img.new_empty(B, Ltxt + Limg, self.cfg.dim)
+        torch.addcmul(img, mod_img[-1], img_res, out=joint[:, Ltxt:])
+        torch.addcmul(txt, mod_txt[-1], txt_res, out=joint[:, :Ltxt])
+
         mod = self.single_stream_modulation(vec)
+        res = None
         for block in self.single_blocks:
-            joint = block(joint, rope, mod)
-        img = joint[:, txt.shape[1] :]
+            res = block(joint, res, rope, mod)
+        img = torch.addcmul(joint[:, Ltxt:], mod[-1], res[:, Ltxt:])
 
         return self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
 
