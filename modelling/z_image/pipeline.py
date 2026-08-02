@@ -125,6 +125,7 @@ class ZImagePipeline:
             pbar=pbar,
             progress_cb=progress_cb,
         )
+        latents = latents.permute(0, 2, 3, 1)  # NCHW -> NHWC
         return self.ae.decode(latents, uint8=True)
 
 

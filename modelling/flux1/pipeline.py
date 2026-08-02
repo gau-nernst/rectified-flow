@@ -125,6 +125,7 @@ class Flux1Pipeline:
             solver=solver,
             pbar=pbar,
         )
+        latents = latents.permute(0, 2, 3, 1)  # NCHW -> NHWC
         return self.ae.decode(latents, uint8=True)
 
 

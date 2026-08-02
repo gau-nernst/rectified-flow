@@ -127,7 +127,7 @@ class Flux2Pipeline:
             height, width = img_size
 
         ae = self.ae
-        shape = (bsize, self.ae.cfg.z_dim * 4, height // ae.downsample // 2, width // ae.downsample // 2)
+        shape = (bsize, height // ae.downsample // 2, width // ae.downsample // 2, self.ae.cfg.z_dim * 4)
         device = ae.encoder.conv_in.weight.device
 
         # keep latents in FP32 for accurate .lerp()
@@ -135,15 +135,14 @@ class Flux2Pipeline:
         noise = torch.randn(shape, device=device, dtype=torch.float32, generator=rng)
 
         timesteps = torch.linspace(1.0, 0.0, num_steps + 1)
-        timesteps = flux2_time_shift(timesteps, num_steps, shape[2] * shape[3])
+        timesteps = flux2_time_shift(timesteps, num_steps, shape[1] * shape[2])
         timesteps = timesteps.tolist()
 
         if ref_imgs is not None:
             ref_latents = []
             for img in ref_imgs:
                 img = crop_to_multiple(img).convert("RGB")
-                img = torch.from_numpy(np.asarray(img))
-                img = img.permute(2, 0, 1).to(device)  # HWC->CHW
+                img = torch.from_numpy(np.asarray(img)).to(device)
                 ref_latents.append(self.ae.encode(img.unsqueeze(0)).squeeze(0))
         else:
             ref_latents = None
@@ -208,7 +207,7 @@ def flux2_generate(
     pbar: bool = False,
     progress_cb: Callable[[int, int], None] | None = None,
 ) -> Tensor:
-    B, _, H, W = latents.shape
+    B, H, W, _ = latents.shape
     img_len = H * W
 
     if isinstance(guidance, (int, float)):
@@ -225,9 +224,9 @@ def flux2_generate(
         flat_latents = []
 
         for i, ref_lat in enumerate(ref_latents):
-            _, h, w = ref_lat.shape
+            h, w, _ = ref_lat.shape
             ref_ropes.append(flux.make_img_rope(h, w, t=10 * (i + 1)))
-            flat_latents.append(ref_lat.flatten(-2).transpose(0, 1))
+            flat_latents.append(ref_lat.flatten(1, 2))
 
         rope = torch.cat([txt_rope, img_rope, *ref_ropes], dim=0)
         ref_imgs = torch.cat(flat_latents, dim=0).unsqueeze(0).expand(B, -1, -1)
@@ -235,7 +234,7 @@ def flux2_generate(
     else:
         rope = torch.cat([txt_rope, img_rope], dim=0)
 
-    latents = latents.flatten(-2).transpose(1, 2)  # (B, C, H, W) -> (B, H*W, C)
+    latents = latents.flatten(1, 2)  # (B,H,W,C) -> (B,H*W,C)
 
     for i in tqdm(range(num_steps), disable=not pbar, dynamic_ncols=True):
         # concat reference latents (images) if needed.
@@ -258,5 +257,4 @@ def flux2_generate(
         if progress_cb is not None:
             progress_cb(i + 1, num_steps)
 
-    latents = latents.transpose(1, 2).unflatten(-1, (H, W))
-    return latents
+    return latents.unflatten(1, (H, W))

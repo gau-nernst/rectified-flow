@@ -158,7 +158,7 @@ async def generate(
                 emit({"type": "progress", "step": step, "total": total})
 
             img_pt = PIPELINE.generate(**kwargs, progress_cb=progress_cb)
-            img_np = img_pt.squeeze(0).permute(1, 2, 0).cpu().numpy()
+            img_np = img_pt.squeeze(0).cpu().numpy()
             pil_img = Image.fromarray(img_np)
 
             # for the last event, emit the image in base64

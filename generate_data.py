@@ -37,9 +37,9 @@ if __name__ == "__main__":
 
     for offset in tqdm(range(0, N, args.batch_size), "Generate", dynamic_ncols=True):
         prompts = all_prompts[offset : offset + args.batch_size]
-        imgs = gen.generate(prompts, img_size=args.img_size, compile=True, **extra_kwargs)
+        imgs = gen.generate(prompts, img_size=args.img_size, **extra_kwargs)
 
-        imgs = imgs.permute(0, 2, 3, 1).cpu().contiguous()
+        imgs = imgs.cpu()
         for sub_idx in range(imgs.shape[0]):
             save_path = args.save_dir / f"{offset + sub_idx:06d}.webp"
             Image.fromarray(imgs[sub_idx].numpy()).save(save_path, lossless=True)

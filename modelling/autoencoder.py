@@ -7,13 +7,14 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from .ops import BatchNorm2d, Conv2d, GroupNorm
 from .utils import load_hf_state_dict
 
 
 class AttnBlock(nn.Module):
     def __init__(self, dim: int) -> None:
         super().__init__()
-        self.norm = nn.GroupNorm(32, dim, eps=1e-6)
+        self.norm = GroupNorm(32, dim, eps=1e-6)
         self.q = nn.Linear(dim, dim)
         self.k = nn.Linear(dim, dim)
         self.v = nn.Linear(dim, dim)
@@ -28,10 +29,10 @@ class AttnBlock(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         # F.sdpa's memory-efficient impl requires ndim=4
-        B, C, H, W = x.shape
-        h = self.norm(x).view(B, 1, C, H * W).transpose(-1, -2)  # (N, C, H, W) -> (N, 1, HW, C)
+        B, H, W, C = x.shape
+        h = self.norm(x).view(B, 1, H * W, C)
         h = F.scaled_dot_product_attention(self.q(h), self.k(h), self.v(h))
-        h = self.proj_out(h).transpose(-1, -2).view(B, C, H, W)
+        h = self.proj_out(h).view(B, H, W, C)
         return x + h
 
 
@@ -40,16 +41,16 @@ class ResnetBlock(nn.Module):
         super().__init__()
         out_dim = out_dim or in_dim
 
-        self.norm1 = nn.GroupNorm(32, in_dim, eps=1e-6)
+        self.norm1 = GroupNorm(32, in_dim, eps=1e-6)
         self.swish1 = nn.SiLU()
-        self.conv1 = nn.Conv2d(in_dim, out_dim, 3, 1, 1)
+        self.conv1 = Conv2d(in_dim, out_dim, 3, 1, 1)
 
-        self.norm2 = nn.GroupNorm(32, out_dim, eps=1e-6)
+        self.norm2 = GroupNorm(32, out_dim, eps=1e-6)
         self.swish2 = nn.SiLU()
-        self.conv2 = nn.Conv2d(out_dim, out_dim, 3, 1, 1)
+        self.conv2 = Conv2d(out_dim, out_dim, 3, 1, 1)
 
         if in_dim != out_dim:
-            self.nin_shortcut = nn.Conv2d(in_dim, out_dim, 1)
+            self.nin_shortcut = Conv2d(in_dim, out_dim, 1)
         else:
             self.nin_shortcut = nn.Identity()
 
@@ -59,19 +60,24 @@ class ResnetBlock(nn.Module):
         return self.nin_shortcut(x) + h
 
 
+# no asymmetric padding in torch conv, must do it ourselves
 class Downsample(nn.Sequential):
     def __init__(self, dim: int) -> None:
         super().__init__()
-        # no asymmetric padding in torch conv, must do it ourselves
-        self.pad = nn.ZeroPad2d((0, 1, 0, 1))
-        self.conv = nn.Conv2d(dim, dim, 3, 2, 0)
+        self.conv = Conv2d(dim, dim, 3, 2, 0)
+
+    def forward(self, x: Tensor):
+        return self.conv(F.pad(x, (0, 0, 0, 1, 0, 1)))
 
 
 class Upsample(nn.Sequential):
     def __init__(self, in_dim: int, out_dim: int | None = None) -> None:
         super().__init__()
-        self.upsample = nn.Upsample(scale_factor=2.0, mode="nearest")
-        self.conv = nn.Conv2d(in_dim, out_dim or in_dim, 3, 1, 1)
+        self.conv = Conv2d(in_dim, out_dim or in_dim, 3, 1, 1)
+
+    def forward(self, x: Tensor):
+        x = F.upsample(x.permute(0, 3, 1, 2), scale_factor=2.0, mode="nearest")
+        return self.conv(x.permute(0, 2, 3, 1))
 
 
 class Encoder(nn.Module):
@@ -88,7 +94,7 @@ class Encoder(nn.Module):
         self.num_resolutions = len(dim_mult)
         self.num_res_blocks = num_res_blocks
         # downsampling
-        self.conv_in = nn.Conv2d(in_dim, dim, 3, 1, 1)
+        self.conv_in = Conv2d(in_dim, dim, 3, 1, 1)
 
         in_ch_mult = (1,) + tuple(dim_mult)
         self.down = nn.ModuleList()
@@ -114,9 +120,9 @@ class Encoder(nn.Module):
         self.mid.block_2 = ResnetBlock(block_in, block_in)
 
         # end
-        self.norm_out = nn.GroupNorm(32, block_in, eps=1e-6)
-        self.conv_out = nn.Conv2d(block_in, 2 * z_dim, 3, 1, 1)
-        self.quant_conv = nn.Conv2d(2 * z_dim, 2 * z_dim, 1) if quant_conv else nn.Identity()
+        self.norm_out = GroupNorm(32, block_in, eps=1e-6)
+        self.conv_out = Conv2d(block_in, 2 * z_dim, 3, 1, 1)
+        self.quant_conv = Conv2d(2 * z_dim, 2 * z_dim, 1) if quant_conv else nn.Identity()
 
     def forward(self, x: Tensor) -> Tensor:
         # downsampling
@@ -158,8 +164,8 @@ class Decoder(nn.Module):
         block_in = dim * dim_mult[self.num_resolutions - 1]
 
         # z to block_in
-        self.post_quant_conv = nn.Conv2d(z_dim, z_dim, 1) if quant_conv else nn.Identity()
-        self.conv_in = nn.Conv2d(z_dim, block_in, 3, 1, 1)
+        self.post_quant_conv = Conv2d(z_dim, z_dim, 1) if quant_conv else nn.Identity()
+        self.conv_in = Conv2d(z_dim, block_in, 3, 1, 1)
 
         # middle
         self.mid = nn.Sequential()
@@ -184,8 +190,8 @@ class Decoder(nn.Module):
             self.up.insert(0, up)  # prepend to get consistent order
 
         # end
-        self.norm_out = nn.GroupNorm(32, block_in, eps=1e-6)
-        self.conv_out = nn.Conv2d(block_in, out_dim, 3, 1, 1)
+        self.norm_out = GroupNorm(32, block_in, eps=1e-6)
+        self.conv_out = Conv2d(block_in, out_dim, 3, 1, 1)
 
     def forward(self, z: Tensor) -> Tensor:
         # z to block_in
@@ -210,7 +216,7 @@ class Decoder(nn.Module):
 
 
 def diagonal_gaussian(z: Tensor, sample: bool) -> Tensor:
-    mean, logvar = torch.chunk(z, 2, dim=1)
+    mean, logvar = torch.chunk(z, 2, dim=-1)
     if sample:
         # SD clamps logvar to [-30,20]
         std = (0.5 * logvar).exp()
@@ -242,7 +248,7 @@ class AutoEncoder(nn.Module):
 
         # Flux.2
         if cfg.use_bn:
-            self.bn = nn.BatchNorm2d(4 * cfg.z_dim, eps=1e-4, affine=False)
+            self.bn = BatchNorm2d(4 * cfg.z_dim, eps=1e-4, affine=False)
 
     def encode(self, x: Tensor, sample: bool = False) -> Tensor:
         if x.dtype == torch.uint8:
@@ -255,12 +261,12 @@ class AutoEncoder(nn.Module):
             # Flux.2 does patchify in AE, before BN. right now for other models, we patchify inside the model
             # we should consolidate this some how
             # patchify
-            B, C, H, W = z.shape
+            B, H, W, C = z.shape
             nH = H // 2
             nW = W // 2
-            z = z.view(B, C, nH, 2, nW, 2)
+            z = z.view(B, nH, 2, nW, 2, C)
             z = z.permute(0, 1, 3, 5, 2, 4)
-            z = z.reshape(B, -1, nH, nW)
+            z = z.reshape(B, nH, nW, C * 4)
 
             # normalize
             z = self.bn(z)
@@ -274,18 +280,19 @@ class AutoEncoder(nn.Module):
     def decode(self, z: Tensor, uint8: bool = False) -> Tensor:
         if self.cfg.use_bn:
             # inverse normalize
-            mean = self.bn.running_mean.view(-1, 1, 1)
-            var = self.bn.running_var.view(-1, 1, 1)
+            mean = self.bn.running_mean
+            var = self.bn.running_var
             eps = self.bn.eps
             z = z.float() * (var + eps).sqrt() + mean
 
             # unpatchify
-            B, _, nH, nW = z.shape
+            B, nH, nW, nC = z.shape
             H = nH * 2
             W = nW * 2
-            z = z.view(B, -1, 2, 2, nH, nW)
+            C = nC // 4
+            z = z.view(B, nH, nW, C, 2, 2)
             z = z.permute(0, 1, 4, 2, 5, 3)
-            z = z.reshape(B, -1, H, W)
+            z = z.reshape(B, H, W, C)
 
         else:
             scale, shift = self.cfg.scale_shift

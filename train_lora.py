@@ -145,7 +145,8 @@ def save_images(
                     guidance=guidance,
                     cfg_scale=cfg_scale,
                 )
-                imgs = ae.decode(latents, uint8=True).permute(0, 2, 3, 1).cpu()
+                latents = latents.permute(0, 2, 3, 1)  # NCHW -> NHWC
+                imgs = ae.decode(latents, uint8=True).cpu()
                 for img_idx in range(imgs.shape[0]):
                     save_path = save_dir / f"{offset + img_idx:04d}_{guidance}-{cfg_scale}.webp"
                     Image.fromarray(imgs[img_idx].numpy()).save(save_path, lossless=True)
@@ -256,7 +257,8 @@ if __name__ == "__main__":
                 prompts = prompts + distill_prompts
 
             with torch.no_grad():
-                latents = ae.encode(imgs.cuda(), sample=True)
+                # NCHW -> NHWC
+                latents = ae.encode(imgs.permute(0, 2, 3, 1).cuda(), sample=True)
 
             if args.model == "flux-dev":
                 # finetune at guidance=1.0 is better than at 3.5
