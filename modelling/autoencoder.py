@@ -40,13 +40,9 @@ class ResnetBlock(nn.Module):
     def __init__(self, in_dim: int, out_dim: int | None = None) -> None:
         super().__init__()
         out_dim = out_dim or in_dim
-
         self.norm1 = GroupNorm(32, in_dim, eps=1e-6)
-        self.swish1 = nn.SiLU()
-        self.conv1 = Conv2d(in_dim, out_dim, 3, 1, 1)
-
         self.norm2 = GroupNorm(32, out_dim, eps=1e-6)
-        self.swish2 = nn.SiLU()
+        self.conv1 = Conv2d(in_dim, out_dim, 3, 1, 1)
         self.conv2 = Conv2d(out_dim, out_dim, 3, 1, 1)
 
         if in_dim != out_dim:
@@ -55,8 +51,8 @@ class ResnetBlock(nn.Module):
             self.nin_shortcut = nn.Identity()
 
     def forward(self, x: Tensor) -> Tensor:
-        h = self.conv1(self.swish1(self.norm1(x)))
-        h = self.conv2(self.swish2(self.norm2(h)))
+        h = self.conv1(self.norm1(x, act="silu"))
+        h = self.conv2(self.norm2(h, act="silu"))
         return self.nin_shortcut(x) + h
 
 
@@ -140,7 +136,7 @@ class Encoder(nn.Module):
         h = self.mid(hs[-1])
 
         # end
-        h = self.conv_out(F.silu(self.norm_out(h)))
+        h = self.conv_out(self.norm_out(h, act="silu"))
         h = self.quant_conv(h)
         return h
 
@@ -211,7 +207,7 @@ class Decoder(nn.Module):
                 h = self.up[i_level].upsample(h)
 
         # end
-        h = self.conv_out(F.silu(self.norm_out(h)))
+        h = self.conv_out(self.norm_out(h, act="silu"))
         return h
 
 
