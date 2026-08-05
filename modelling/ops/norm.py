@@ -6,82 +6,123 @@ from torch import Tensor, nn
 
 
 @triton.jit(do_not_specialize=["L"])
-def _group_norm_kernel(
+def _group_norm_kernel1(
     x_ptr,  # [B, L, num_groups, DIM]
+    mean_ptr,  # [B, num_groups, num_tiles]
+    M2_ptr,
+    L,
+    stride,
+    NUM_GROUPS: tl.constexpr,
+    DIM: tl.constexpr,
+    BLOCK_L: tl.constexpr,
+):
+    group_id = tl.program_id(0)
+    tile_id = tl.program_id(1)
+    batch_id = tl.program_id(2)
+
+    offs_l = tile_id * BLOCK_L + tl.arange(0, BLOCK_L)[:, None, None]
+    offs_d = tl.arange(0, DIM)
+    mask = offs_l < L
+    x_ptrs = x_ptr + (batch_id * L + offs_l) * NUM_GROUPS * DIM + group_id * DIM + offs_d
+    x = tl.load(x_ptrs, mask, other=0.0).to(tl.float32)  # [BLOCK_L, DIM]
+
+    cnt = tl.minimum(L - tile_id * BLOCK_L, BLOCK_L) * DIM
+    mean = tl.sum(x) / cnt
+    xc = tl.where(mask, x - mean, 0.0)
+    M2 = tl.sum(xc * xc)
+
+    offs = (batch_id * NUM_GROUPS + group_id) * stride + tile_id
+    tl.store(mean_ptr + offs, mean)
+    tl.store(M2_ptr + offs, M2)
+
+
+@triton.jit(do_not_specialize=["L"])
+def _group_norm_kernel2(
+    mean_ptr,  # [B, num_groups, num_tiles]
+    M2_ptr,
+    L,
+    stride,
+    NUM_GROUPS: tl.constexpr,
+    DIM: tl.constexpr,
+    BLOCK: tl.constexpr,
+    BLOCK_L: tl.constexpr,
+    eps: float = 1e-6,
+):
+    group_id = tl.program_id(0)
+    batch_id = tl.program_id(1)
+
+    offs = tl.arange(0, BLOCK)
+    mean_ptrs = mean_ptr + (batch_id * NUM_GROUPS + group_id) * stride + offs
+    M2_ptrs = M2_ptr + (batch_id * NUM_GROUPS + group_id) * stride + offs
+
+    cnt = tl.zeros((BLOCK,), tl.int32)
+    mean = tl.zeros((BLOCK,), tl.float32)
+    M2 = tl.zeros((BLOCK,), tl.float32)
+
+    num_tiles = tl.cdiv(L, BLOCK_L)
+
+    for i in range(tl.cdiv(num_tiles, BLOCK)):
+        offs = i * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < num_tiles
+        other_cnt = tl.where(mask, tl.minimum(L - offs * BLOCK_L, BLOCK_L), 0)
+        other_mean = tl.load(mean_ptrs, mask, other=0.0)
+        other_M2 = tl.load(M2_ptrs, mask, other=0.0)
+
+        delta = other_mean - mean
+        cnt += other_cnt
+        mean += delta * other_cnt / tl.maximum(cnt, 1)
+        M2 += other_M2 + delta * (other_mean - mean) * other_cnt
+
+        mean_ptrs += BLOCK
+        M2_ptrs += BLOCK
+
+    final_cnt = L * DIM
+    final_mean = tl.sum(mean * cnt) / final_cnt
+    delta = mean - final_mean
+    final_M2 = tl.sum(M2 + cnt * delta * delta)
+    rrms = tl.rsqrt(final_M2 / final_cnt + eps)
+
+    tl.store(mean_ptr + (batch_id * NUM_GROUPS + group_id) * stride, final_mean)
+    tl.store(M2_ptr + (batch_id * NUM_GROUPS + group_id) * stride, rrms)
+
+
+@triton.jit(do_not_specialize=["L"])
+def _group_norm_kernel3(
+    x_ptr,  # [B, L, num_groups, DIM]
+    mean_ptr,  # [B, num_groups, num_tiles]
+    M2_ptr,
     w_ptr,  # [num_groups, DIM]
     b_ptr,  # [num_groups, DIM]
     y_ptr,  # [B, L, num_groups, DIM]
     L,
+    stride,
     NUM_GROUPS: tl.constexpr,
     DIM: tl.constexpr,
     BLOCK_L: tl.constexpr,
-    eps: float = 1e-6,
-    act: tl.constexpr = "none",
-    num_stages: tl.constexpr = 1,
+    act: tl.constexpr,
 ):
-    pid = tl.program_id(0)
-    group_id = pid % NUM_GROUPS
-    batch_id = pid // NUM_GROUPS
+    group_id = tl.program_id(0)
+    tile_id = tl.program_id(1)
+    batch_id = tl.program_id(2)
 
-    x_ptr += (batch_id * L * NUM_GROUPS + group_id) * DIM
-    w_ptr += group_id * DIM
-    b_ptr += group_id * DIM
-    y_ptr += (batch_id * L * NUM_GROUPS + group_id) * DIM
-
-    count = tl.zeros((BLOCK_L, 1), tl.int32)
-    mean = tl.zeros((BLOCK_L, 1), tl.float32)
-    M2 = tl.zeros((BLOCK_L, 1), tl.float32)
-
-    offs_l = tl.arange(0, BLOCK_L)[:, None]
+    offs_l = tile_id * BLOCK_L + tl.arange(0, BLOCK_L)[:, None, None]
     offs_d = tl.arange(0, DIM)
-    x_ptrs = x_ptr + offs_l * NUM_GROUPS * DIM + offs_d
+    mask = offs_l < L
+    x_ptrs = x_ptr + (batch_id * L + offs_l) * NUM_GROUPS * DIM + group_id * DIM + offs_d
+    x = tl.load(x_ptrs, mask)  # [BLOCK_L, DIM]
 
-    for i in tl.range(tl.cdiv(L, BLOCK_L), num_stages=num_stages):
-        mask = offs_l < L - i * BLOCK_L
-        x = tl.load(x_ptrs, mask, other=0.0).to(tl.float32)
+    w = tl.load(w_ptr + group_id * DIM + offs_d)
+    b = tl.load(b_ptr + group_id * DIM + offs_d)
+    mean = tl.load(mean_ptr + (batch_id * NUM_GROUPS + group_id) * stride)
+    rrms = tl.load(M2_ptr + (batch_id * NUM_GROUPS + group_id) * stride)
 
-        # state of the new tile
-        new_count = mask * DIM
-        new_mean = tl.sum(x, axis=1, keep_dims=True) / DIM
-        x2 = tl.where(mask, (x - new_mean) * (x - new_mean), 0.0)
-        new_M2 = tl.sum(x2, axis=1, keep_dims=True)
-
-        # welford update
-        count += new_count
-        delta = new_mean - mean
-        mean += delta * new_count / tl.maximum(count, 1)
-        delta2 = new_mean - mean
-        M2 += new_M2 + delta * delta2 * new_count
-
-        x_ptrs += BLOCK_L * NUM_GROUPS * DIM
-
-    count_all = tl.sum(count)
-    mean_all = tl.sum(mean * count) / count_all
-    delta_all = mean - mean_all
-    M2_all = tl.sum(M2 + delta_all * delta_all * count)
-    rrms = tl.rsqrt(M2_all / count_all + eps)
-
-    w = tl.load(w_ptr + offs_d).to(tl.float32)
-    b = tl.load(b_ptr + offs_d).to(tl.float32)
-
-    offs_l = tl.arange(0, BLOCK_L)[:, None]
-    offs_d = tl.arange(0, DIM)
-    x_ptrs = x_ptr + offs_l * NUM_GROUPS * DIM + offs_d
-    y_ptrs = y_ptr + offs_l * NUM_GROUPS * DIM + offs_d
-
-    for i in tl.range(tl.cdiv(L, BLOCK_L), num_stages=num_stages):
-        mask = offs_l < L - i * BLOCK_L
-        x = tl.load(x_ptrs, mask).to(tl.float32)
-        y = (x - mean_all) * rrms * w + b
-
-        if act == "silu":
-            y *= tl.sigmoid(y)
-        else:
-            assert act == "none"
-        tl.store(y_ptrs, y, mask)
-
-        x_ptrs += BLOCK_L * NUM_GROUPS * DIM
-        y_ptrs += BLOCK_L * NUM_GROUPS * DIM
+    y = (x.to(tl.float32) - mean) * rrms * w.to(tl.float32) + b.to(tl.float32)
+    if act == "silu":
+        y *= tl.sigmoid(y)
+    else:
+        assert act == "none"
+    y_ptrs = y_ptr + (batch_id * L + offs_l) * NUM_GROUPS * DIM + group_id * DIM + offs_d
+    tl.store(y_ptrs, y, mask)
 
 
 def group_norm(x: Tensor, w: Tensor, b: Tensor, num_groups: int, eps: float = 1e-6, act: str = "none"):
@@ -90,17 +131,20 @@ def group_norm(x: Tensor, w: Tensor, b: Tensor, num_groups: int, eps: float = 1e
     B, H, W, C = x.shape
     assert C % num_groups == 0
     DIM = C // num_groups
+    G = num_groups
 
-    # heuristic
-    if DIM == 4:
-        BLOCK_L, num_stages = 128, 4
-    elif DIM == 8:
-        BLOCK_L, num_stages = 512, 4
-    else:
-        BLOCK_L, num_stages = 256, 6
-    _group_norm_kernel[(B * num_groups,)](
-        x, w, b, y, H * W, num_groups, DIM, BLOCK_L, eps, act, num_stages, num_warps=8
-    )
+    BLOCK_L = 256
+    BLOCK = 128
+    L = H * W
+    num_tiles = triton.cdiv(L, BLOCK_L)
+    num_tiles_pad = triton.cdiv(num_tiles, 16) * 16
+
+    tmp_mean = x.new_empty(B, G, num_tiles_pad, dtype=torch.float32)
+    tmp_M2 = torch.empty_like(tmp_mean)
+
+    _group_norm_kernel1[(G, num_tiles, B)](x, tmp_mean, tmp_M2, L, num_tiles_pad, G, DIM, BLOCK_L)
+    _group_norm_kernel2[(G, B)](tmp_mean, tmp_M2, L, num_tiles_pad, G, DIM, BLOCK, BLOCK_L, eps)
+    _group_norm_kernel3[(G, num_tiles, B)](x, tmp_mean, tmp_M2, w, b, y, L, num_tiles_pad, G, DIM, BLOCK_L, act)
     return y
 
 
