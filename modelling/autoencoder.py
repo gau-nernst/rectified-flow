@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from .ops import BatchNorm2d, Conv2d, GroupNorm
+from .ops import BatchNorm2d, Conv2d, GroupNorm, upsample_nn2x
 from .utils import load_hf_state_dict
 
 
@@ -72,8 +72,7 @@ class Upsample(nn.Sequential):
         self.conv = Conv2d(in_dim, out_dim or in_dim, 3, 1, 1)
 
     def forward(self, x: Tensor):
-        x = F.interpolate(x.permute(0, 3, 1, 2), scale_factor=2.0, mode="nearest")
-        return self.conv(x.permute(0, 2, 3, 1))
+        return self.conv(upsample_nn2x(x))
 
 
 class Encoder(nn.Module):
