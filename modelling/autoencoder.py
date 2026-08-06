@@ -72,7 +72,7 @@ class Upsample(nn.Sequential):
         self.conv = Conv2d(in_dim, out_dim or in_dim, 3, 1, 1)
 
     def forward(self, x: Tensor):
-        x = F.upsample(x.permute(0, 3, 1, 2), scale_factor=2.0, mode="nearest")
+        x = F.interpolate(x.permute(0, 3, 1, 2), scale_factor=2.0, mode="nearest")
         return self.conv(x.permute(0, 2, 3, 1))
 
 
