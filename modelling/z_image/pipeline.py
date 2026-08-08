@@ -97,7 +97,7 @@ class ZImagePipeline:
             height, width = img_size
 
         ae = self.ae
-        shape = (bsize, self.ae.cfg.z_dim, height // ae.downsample, width // ae.downsample)
+        shape = (bsize, height // ae.downsample, width // ae.downsample, self.ae.cfg.z_dim)
         device = ae.encoder.conv_in.weight.device
 
         # keep latents in FP32 for accurate .lerp()
@@ -125,7 +125,6 @@ class ZImagePipeline:
             pbar=pbar,
             progress_cb=progress_cb,
         )
-        latents = latents.permute(0, 2, 3, 1)  # NCHW -> NHWC
         return self.ae.decode(latents, uint8=True)
 
 

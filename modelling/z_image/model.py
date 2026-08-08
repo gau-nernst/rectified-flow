@@ -9,7 +9,8 @@ from torch import Tensor, nn
 from ..attn import dispatch_attn
 from ..flux1.model import timestep_embedding
 from ..rope import RopeND, apply_rope
-from ..utils import Linear, load_hf_state_dict, make_merge_hook
+from ..utils import Linear, load_hf_state_dict, make_merge_hook, maybe_quantize
+from .gated_norm import gated_norm
 
 
 class FinalLayer(nn.Module):
@@ -32,12 +33,14 @@ class Attention(nn.Module):
         self.norm_q = nn.RMSNorm(self.head_dim, eps=eps)
         self.norm_k = nn.RMSNorm(self.head_dim, eps=eps)
         self.to_out = nn.Sequential(nn.Linear(dim, dim, bias=False))
+        self.eps = eps
+
         self.register_load_state_dict_pre_hook(make_merge_hook(["to_q", "to_k", "to_v"], "qkv"))
 
     def forward(self, x: Tensor, pe: Tensor):
         q, k, v = self.qkv(x).unflatten(2, (-1, self.head_dim)).chunk(3, dim=2)
-        q = apply_rope(self.norm_q(q), pe)
-        k = apply_rope(self.norm_k(k), pe)
+        q = apply_rope(q, pe, self.norm_q.weight, self.eps)
+        k = apply_rope(k, pe, self.norm_k.weight, self.eps)
         out = dispatch_attn(q, k, v).flatten(2)
         return self.to_out(out)
 
@@ -63,19 +66,25 @@ class Block(nn.Module):
         self.attention_norm2 = nn.RMSNorm(dim, eps=eps)
         self.ffn_norm1 = nn.RMSNorm(dim, eps=eps)
         self.ffn_norm2 = nn.RMSNorm(dim, eps=eps)
+        self.eps = eps
 
     def forward(self, x: Tensor, adaln_input: Tensor | None, pe: Tensor) -> Tensor:
         if self.adaLN_modulation is not None:
             scale_msa, gate_msa, scale_mlp, gate_mlp = self.adaLN_modulation(adaln_input).unsqueeze(1).chunk(4, dim=2)
 
-            res = self.attention(self.attention_norm1(x) * (1.0 + scale_msa), pe)
-            x = x + self.attention_norm2(res) * gate_msa.tanh()
+            attn = self.attention(gated_norm(x, self.attention_norm1.weight, gate=scale_msa, eps=self.eps), pe)
+            x = gated_norm(attn, self.attention_norm2.weight, gate=gate_msa, res=x, gate_type="tanh", eps=self.eps)
 
-            res = self.feed_forward(self.ffn_norm1(x) * (1.0 + scale_mlp))
-            x = x + self.ffn_norm2(res) * gate_mlp.tanh()
+            ffn = self.feed_forward(gated_norm(x, self.ffn_norm1.weight, gate=scale_mlp, eps=self.eps))
+            x = gated_norm(ffn, self.ffn_norm2.weight, gate=gate_mlp, res=x, gate_type="tanh", eps=self.eps)
+
         else:
-            x = x + self.attention_norm2(self.attention(self.attention_norm1(x), pe))
-            x = x + self.ffn_norm2(self.feed_forward(self.ffn_norm1(x)))
+            attn = self.attention(self.attention_norm1(x), pe)
+            x = gated_norm(attn, self.attention_norm2.weight, res=x, eps=self.eps)
+
+            ffn = self.feed_forward(self.ffn_norm1(x))
+            x = gated_norm(ffn, self.ffn_norm2.weight, res=x, eps=self.eps)
+
         return x
 
 
@@ -129,15 +138,15 @@ class ZImage(nn.Module):
         return torch.cat([x, pad_tokens], dim=1)
 
     def forward(self, img: Tensor, timesteps: Tensor, txt: Tensor) -> Tensor:
-        B, C, H, W = img.shape
+        B, H, W, C = img.shape
         t_embeds = self.t_embedder(timestep_embedding(timesteps, 256))
 
         # patchify
         patch_size = self.cfg.patch_size
         nH = H // patch_size
         nW = W // patch_size
-        img = img.view(B, C, nH, patch_size, nW, patch_size)
-        img = img.permute(0, 2, 4, 3, 5, 1)  # (B, nH, nW, 2, 2, C)
+        img = img.view(B, nH, patch_size, nW, patch_size, C)
+        img = img.transpose(2, 3)  # (B, nH, nW, 2, 2, C)
         img = img.reshape(B, nH * nW, patch_size * patch_size * C)
 
         # RoPE embedding has 3 components:
@@ -170,21 +179,45 @@ class ZImage(nn.Module):
 
         # unpatchify
         img = unified.view(B, nH, nW, patch_size, patch_size, C)
-        img = img.permute(0, 5, 1, 3, 2, 4)  # (B, C, nH, 2, nW, 2)
-        img = img.reshape(B, C, H, W)
+        img = img.transpose(2, 3)  # (B, nH, 2, nW, 2, C)
+        img = img.reshape(B, H, W, C)
         return img
 
 
 def load_zimage(name: str = "turbo"):
-    repo_id = {
-        "turbo": "Tongyi-MAI/Z-Image-Turbo",
-        "base": "Tongyi-MAI/Z-Image",
+    (
+        repo_id,
+        filename,
+    ) = {
+        "turbo": (
+            "Tongyi-MAI/Z-Image-Turbo",
+            "transformer/diffusion_pytorch_model.safetensors.index.json",
+        ),
+        "base": (
+            "Tongyi-MAI/Z-Image",
+            "transformer/diffusion_pytorch_model.safetensors.index.json",
+        ),
+        "turbo-nvfp4": (
+            "Comfy-Org/z_image_turbo",
+            "split_files/diffusion_models/z_image_turbo_nvfp4.safetensors",
+        ),
     }[name]
-    filename = "transformer/diffusion_pytorch_model.safetensors.index.json"
     state_dict = load_hf_state_dict(repo_id, filename)
+
+    # remap comfy ckpt
+    if repo_id.startswith("Comfy-Org/"):
+        state_dict = {
+            k.replace("q_norm", "norm_q")
+            .replace("k_norm", "norm_k")
+            .replace("out", "to_out.0")
+            .replace("x_embedder", "all_x_embedder.2-1")
+            .replace("final_layer", "all_final_layer.2-1"): v
+            for k, v in state_dict.items()
+        }
 
     with torch.device("meta"):
         model = ZImage()
+        maybe_quantize(model, state_dict)
 
     model.load_state_dict(state_dict, assign=True)
     return model

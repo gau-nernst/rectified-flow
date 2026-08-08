@@ -60,7 +60,7 @@ class NVFP4Linear(nn.Module):
         xq, xs = quantize_nvfp4_triton(x_2d, self.input_scale)
         out = F.scaled_mm(
             xq,
-            self.weight.T,
+            self.weight.view(torch.float4_e2m1fn_x2).T,
             [xs, self.input_scale],
             [F.ScalingType.BlockWise1x16, F.ScalingType.TensorWise],
             [self.weight_scale, self.weight_scale_2],

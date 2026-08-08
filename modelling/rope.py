@@ -71,6 +71,14 @@ def apply_rope(
 ) -> Tensor:
     # x: [B, L, nH, D] in real
     # rope: [L, D/2] in complex
+    if torch.is_grad_enabled():
+        if norm is not None:
+            x = F.rms_norm(x, x.shape[-1:], norm, eps)
+        dtype = rope.dtype.to_real()
+        x_ = torch.view_as_complex(x.to(dtype).unflatten(-1, (-1, 2)))  # [B, L, nH, D/2]
+        out = torch.view_as_real(x_ * rope.unsqueeze(-2)).flatten(-2)  # [B, L, nH, D]
+        return out.type_as(x)
+
     assert x[0, 0].is_contiguous() and rope.is_contiguous()
     if norm is not None:
         assert norm.is_contiguous()
@@ -79,13 +87,6 @@ def apply_rope(
     B, L, H, D = x.shape
     _rope_kernel[(L, H, B)](x, rope_real, norm, out, *x.stride()[:2], *out.stride()[:2], D, eps)
     return out
-
-    if norm is not None:
-        x = F.rms_norm(x, x.shape[-1:], norm, eps)
-    dtype = rope.dtype.to_real()
-    x_ = torch.view_as_complex(x.to(dtype).unflatten(-1, (-1, 2)))  # [B, L, nH, D/2]
-    out = torch.view_as_real(x_ * rope.unsqueeze(-2)).flatten(-2)  # [B, L, nH, D]
-    return out.type_as(x)
 
 
 class RopeND(nn.Module):

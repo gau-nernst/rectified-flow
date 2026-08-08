@@ -51,16 +51,17 @@ def modulate(
     gate: Tensor | None = None,
     eps: float = 1e-6,
 ) -> Tensor:
+    if torch.is_grad_enabled():
+        if res is not None:
+            torch.addcmul(x, gate, res, out=x)
+        x = F.layer_norm(x, x.shape[-1:], eps=eps)
+        return (1.0 + scale) * x + shift
+
     assert x.is_contiguous() and shift.is_contiguous() and scale.is_contiguous()
     if res is not None:
         assert gate is not None
         assert res.is_contiguous() and gate.is_contiguous()
     B, L, D = x.shape
     out = torch.empty_like(x)
-    _modulate_kernel[(L, B)](x, shift, scale, res, gate, out, L, D)
+    _modulate_kernel[(L, B)](x, shift, scale, res, gate, out, L, D, eps)
     return out
-
-    if res is not None:
-        torch.addcmul(x, gate, res, out=x)
-    x = F.layer_norm(x, x.shape[-1:], eps=eps)
-    return (1.0 + scale) * x + shift
