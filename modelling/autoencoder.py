@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from .ops import BatchNorm2d, Conv2d, GroupNorm, upsample_nn2x
+from .ops import BatchNorm2d, Conv2d, GroupNorm, upsample_nn2x, vae_attn
 from .utils import load_hf_state_dict
 
 
@@ -28,10 +28,9 @@ class AttnBlock(nn.Module):
         self.register_load_state_dict_pre_hook(hook)
 
     def forward(self, x: Tensor) -> Tensor:
-        # F.sdpa's memory-efficient impl requires ndim=4
         B, H, W, C = x.shape
-        h = self.norm(x).view(B, 1, H * W, C)
-        h = F.scaled_dot_product_attention(self.q(h), self.k(h), self.v(h))
+        h = self.norm(x).view(B, H * W, C)
+        h = vae_attn(self.q(h), self.k(h), self.v(h))
         h = self.proj_out(h).view(B, H, W, C)
         return x + h
 
