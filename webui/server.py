@@ -30,6 +30,7 @@ MODEL_DEFAULTS = {
     "FLUX.2-klein-base-4B": Flux2Pipeline.KLEIN_BASE_DEFAULTS,
     "FLUX.2-klein-base-9B": Flux2Pipeline.KLEIN_BASE_DEFAULTS,
     "Z-Image-Turbo": ZImagePipeline.TURBO_DEFAULTS,
+    "Z-Image-Turbo-nvfp4": ZImagePipeline.TURBO_DEFAULTS,
     "Z-Image-Base": ZImagePipeline.BASE_DEFAULTS,
 }
 

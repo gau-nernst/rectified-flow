@@ -4,19 +4,48 @@ from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
+from gn_kernels.cutedsl.sm120 import sm120_gated_gemm_nvfp4
+from gn_kernels.quant_utils import quantize_nvfp4_triton
 from torch import Tensor, nn
 
 from ..attn import dispatch_attn
 from ..flux1.model import LastLayer, MLPEmbedder, Modulation, SelfAttention, timestep_embedding
 from ..flux1.modulate import modulate
+from ..nvfp4 import NVFP4Linear, nvfp4_mm
 from ..rope import RopeND, apply_rope
 from ..utils import create_name_map_hook, load_hf_state_dict, maybe_quantize
 
 
-class SwiGLU(nn.Module):
-    def forward(self, x: Tensor):
-        x1, x2 = x.chunk(2, dim=-1)
-        return F.silu(x1) * x2
+class MLP(nn.ModuleList):
+    def __init__(self, dim: int, mlp_dim: int) -> None:
+        super().__init__()
+        self.append(nn.Linear(dim, mlp_dim * 2, bias=False))
+        self.append(nn.Module())
+        self.append(nn.Linear(mlp_dim, dim, bias=False))
+
+    def forward(self, x: Tensor) -> Tensor:
+        if isinstance(self[0], NVFP4Linear):
+            B, L, C = x.shape
+            xq, xs = quantize_nvfp4_triton(x.view(B * L, C), self[0].input_scale)
+            w1, w3 = self[0].weight.view(torch.float4_e2m1fn_x2).chunk(2, dim=0)
+            w1_sf, w3_sf = self[0].weight_scale.chunk(2, dim=0)
+            out = sm120_gated_gemm_nvfp4.mm(
+                xq,
+                xs,
+                self[0].input_scale,
+                w1,
+                w1_sf,
+                self[0].weight_scale_2,
+                w3,
+                w3_sf,
+                self[0].weight_scale_2,
+            ).unflatten(0, (B, L))
+
+        else:
+            up, gate = self[0](x).chunk(2, dim=-1)
+            out = F.silu(up) * gate
+
+        return self[2](out)
 
 
 # compared to Flux.1
@@ -29,16 +58,10 @@ class DoubleStreamBlock(nn.Module):
         self.head_dim = 128
         mlp_dim = int(dim * mlp_ratio)
         self.attn_impl = attn_impl
-
         self.img_attn = SelfAttention(dim, bias=False, eps=eps)
         self.txt_attn = SelfAttention(dim, bias=False, eps=eps)
-
-        self.img_mlp = nn.Sequential(
-            nn.Linear(dim, mlp_dim * 2, bias=False), SwiGLU(), nn.Linear(mlp_dim, dim, bias=False)
-        )
-        self.txt_mlp = nn.Sequential(
-            nn.Linear(dim, mlp_dim * 2, bias=False), SwiGLU(), nn.Linear(mlp_dim, dim, bias=False)
-        )
+        self.img_mlp = MLP(dim, mlp_dim)
+        self.txt_mlp = MLP(dim, mlp_dim)
 
     def forward(
         self,
@@ -88,7 +111,6 @@ class SingleStreamBlock(nn.Module):
 
         self.q_norm = nn.RMSNorm(self.head_dim, eps=eps)
         self.k_norm = nn.RMSNorm(self.head_dim, eps=eps)
-        self.mlp_act = SwiGLU()
 
         remap_pairs = [
             ("norm.query_norm.scale", "q_norm.weight"),
@@ -98,9 +120,27 @@ class SingleStreamBlock(nn.Module):
 
     def forward(self, x: Tensor, res: Tensor | None, pe: Tensor, mod: tuple[Tensor, ...]) -> Tensor:
         """NOTE: x is modified in-place"""
+        # TODO: fuse quantize with modulate
         shift, scale, gate = mod
         x_mod = modulate(x, shift, scale, res, gate)
-        qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.dim, self.mlp_dim * 2], dim=-1)
+
+        if isinstance(self.linear1, NVFP4Linear):
+            xs_2 = self.linear1.input_scale
+            ws_2 = self.linear1.weight_scale_2
+            split_sizes = [self.dim * 3, self.mlp_dim, self.mlp_dim]
+            wa, w1, w3 = self.linear1.weight.view(torch.float4_e2m1fn_x2).split_with_sizes(split_sizes, dim=0)
+            wa_sf, w1_sf, w3_sf = self.linear1.weight_scale.split_with_sizes(split_sizes, dim=0)
+
+            B, L, C = x_mod.shape
+            xq, xs = quantize_nvfp4_triton(x_mod.view(B * L, C), xs_2)
+
+            qkv = nvfp4_mm(xq, xs, xs_2, wa, wa_sf, ws_2).unflatten(0, (B, L))
+            mlp = sm120_gated_gemm_nvfp4.mm(xq, xs, xs_2, w1, w1_sf, ws_2, w3, w3_sf, ws_2).unflatten(0, (B, L))
+
+        else:
+            qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.dim, self.mlp_dim * 2], dim=-1)
+            up, gate = mlp.chunk(2, dim=-1)
+            mlp = F.silu(up) * gate
 
         q, k, v = qkv.unflatten(2, (-1, self.head_dim)).chunk(3, dim=2)
         q = apply_rope(q, pe, self.q_norm.weight, self.q_norm.eps)
@@ -109,7 +149,7 @@ class SingleStreamBlock(nn.Module):
 
         # compute activation in mlp stream, cat again and run second linear layer
         # TODO: pre-allocate attn+mlp buffer
-        return self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
+        return self.linear2(torch.cat([attn, mlp], 2))
 
 
 # default is klein-4B
