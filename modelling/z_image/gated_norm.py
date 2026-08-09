@@ -10,7 +10,7 @@ def _gated_norm_kernel(
     x_ptr,  # [B, L, D]
     w_ptr,  # [D]
     gate_ptr,  # [B, D]
-    res_ptr,  # [B, L, D]
+    add_ptr,  # [B, L, D]
     o_ptr,  # [B, L, D]
     L: tl.constexpr,
     D: tl.constexpr,
@@ -41,9 +41,9 @@ def _gated_norm_kernel(
         else:
             assert False
 
-    if res_ptr is not None:
-        res = tl.load(res_ptr + (pid_b * L * D + pid_l * D + offs), mask, other=0.0)
-        x += res.to(tl.float32)
+    if add_ptr is not None:
+        add = tl.load(add_ptr + (pid_b * L * D + pid_l * D + offs), mask, other=0.0)
+        x += add.to(tl.float32)
 
     tl.store(o_ptr + (pid_b * L * D + pid_l * D + offs), x, mask)
 
@@ -52,7 +52,7 @@ def gated_norm(
     x: Tensor,
     w: Tensor,
     gate: Tensor | None = None,
-    res: Tensor | None = None,
+    add: Tensor | None = None,
     gate_type: str = "plus_one",
     eps: float = 1e-6,
 ) -> Tensor:
@@ -66,16 +66,16 @@ def gated_norm(
                 x = x * gate.tanh()
             else:
                 raise ValueError(f"Unsupported {gate_type=}")
-        if res is not None:
-            x = x + res
+        if add is not None:
+            x = x + add
         return x
 
     assert x.is_contiguous() and w.is_contiguous()
     if gate is not None:
         assert gate.is_contiguous()
-    if res is not None:
-        assert res.is_contiguous()
+    if add is not None:
+        assert add.is_contiguous()
     B, L, D = x.shape
     out = torch.empty_like(x)
-    _gated_norm_kernel[(L, B)](x, w, gate, res, out, L, D, gate_type, eps)
+    _gated_norm_kernel[(L, B)](x, w, gate, add, out, L, D, gate_type, eps)
     return out

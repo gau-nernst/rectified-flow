@@ -11,35 +11,28 @@ from torch import Tensor, nn
 from ..attn import dispatch_attn
 from ..flux1.model import LastLayer, MLPEmbedder, Modulation, SelfAttention, timestep_embedding
 from ..flux1.modulate import modulate
-from ..nvfp4 import NVFP4Linear, nvfp4_mm
+from ..linear import Linear, nvfp4_mm
 from ..rope import RopeND, apply_rope
-from ..utils import create_name_map_hook, load_hf_state_dict, maybe_quantize
+from ..utils import create_name_map_hook, load_hf_state_dict
 
 
 class MLP(nn.ModuleList):
     def __init__(self, dim: int, mlp_dim: int) -> None:
         super().__init__()
-        self.append(nn.Linear(dim, mlp_dim * 2, bias=False))
+        self.append(Linear(dim, mlp_dim * 2, bias=False))
         self.append(nn.Module())
-        self.append(nn.Linear(mlp_dim, dim, bias=False))
+        self.append(Linear(mlp_dim, dim, bias=False))
 
     def forward(self, x: Tensor) -> Tensor:
-        if isinstance(self[0], NVFP4Linear):
-            B, L, C = x.shape
-            xq, xs = quantize_nvfp4_triton(x.view(B * L, C), self[0].input_scale)
+        if hasattr(self[0], "weight_scale_2"):
             w1, w3 = self[0].weight.view(torch.float4_e2m1fn_x2).chunk(2, dim=0)
             w1_sf, w3_sf = self[0].weight_scale.chunk(2, dim=0)
-            out = sm120_gated_gemm_nvfp4.mm(
-                xq,
-                xs,
-                self[0].input_scale,
-                w1,
-                w1_sf,
-                self[0].weight_scale_2,
-                w3,
-                w3_sf,
-                self[0].weight_scale_2,
-            ).unflatten(0, (B, L))
+            xs_2 = self[0].input_scale
+            ws_2 = self[0].weight_scale_2
+
+            B, L, C = x.shape
+            xq, xs = quantize_nvfp4_triton(x.view(B * L, C), xs_2)
+            out = sm120_gated_gemm_nvfp4.mm(xq, xs, xs_2, w1, w1_sf, ws_2, w3, w3_sf, ws_2).unflatten(0, (B, L))
 
         else:
             up, gate = self[0](x).chunk(2, dim=-1)
@@ -106,8 +99,8 @@ class SingleStreamBlock(nn.Module):
         self.attn_impl = attn_impl
         self.eps = eps
 
-        self.linear1 = nn.Linear(dim, dim * 3 + self.mlp_dim * 2, bias=False)  # qkv and mlp_in
-        self.linear2 = nn.Linear(dim + self.mlp_dim, dim, bias=False)  # proj and mlp_out
+        self.linear1 = Linear(dim, dim * 3 + self.mlp_dim * 2, bias=False)  # qkv and mlp_in
+        self.linear2 = Linear(dim + self.mlp_dim, dim, bias=False)  # proj and mlp_out
 
         self.q_norm = nn.RMSNorm(self.head_dim, eps=eps)
         self.k_norm = nn.RMSNorm(self.head_dim, eps=eps)
@@ -124,7 +117,7 @@ class SingleStreamBlock(nn.Module):
         shift, scale, gate = mod
         x_mod = modulate(x, shift, scale, res, gate)
 
-        if isinstance(self.linear1, NVFP4Linear):
+        if hasattr(self.linear1, "weight_scale_2"):
             xs_2 = self.linear1.input_scale
             ws_2 = self.linear1.weight_scale_2
             split_sizes = [self.dim * 3, self.mlp_dim, self.mlp_dim]
@@ -170,8 +163,8 @@ class Flux2(nn.Module):
         self.cfg = cfg
 
         # input projections
-        self.img_in = nn.Linear(cfg.img_dim, cfg.dim, bias=False)
-        self.txt_in = nn.Linear(cfg.txt_dim, cfg.dim, bias=False)
+        self.img_in = Linear(cfg.img_dim, cfg.dim, bias=False)
+        self.txt_in = Linear(cfg.txt_dim, cfg.dim, bias=False)
         self.time_in = MLPEmbedder(256, cfg.dim, bias=False)
         if cfg.guidance_embed:
             self.guidance_in = MLPEmbedder(256, cfg.dim, bias=False)
@@ -266,7 +259,6 @@ def _load_flux2(repo_id: str, filename: str):
     )
     with torch.device("meta"):
         model = Flux2(cfg)
-        maybe_quantize(model, state_dict)
 
     model.load_state_dict(state_dict, assign=True)
     return model

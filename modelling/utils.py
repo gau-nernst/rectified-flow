@@ -6,8 +6,6 @@ import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
 from torch import Tensor, nn
 
-from .nvfp4 import NVFP4Linear
-
 
 def load_hf_state_dict(repo_id: str, filename: str, prefix: str | None = None):
     local_path = hf_hub_download(repo_id, filename)
@@ -35,24 +33,6 @@ def load_hf_state_dict(repo_id: str, filename: str, prefix: str | None = None):
     return state_dict
 
 
-def maybe_quantize(m: nn.Module, state_dict: dict[str, Tensor], name: str = ""):
-    if isinstance(m, nn.Linear):
-        if f"{name}.input_scale" not in state_dict:
-            return
-
-        m.__class__ = NVFP4Linear
-        del m.weight
-        N, K = m.out_features, m.in_features
-        m.register_buffer("weight", torch.empty(N, K // 2, dtype=torch.uint8))
-        m.register_buffer("weight_scale", torch.empty(N, K // 16, dtype=torch.float8_e4m3fn))
-        m.register_buffer("input_scale", torch.empty((), dtype=torch.float32))
-        m.register_buffer("weight_scale_2", torch.empty((), dtype=torch.float32))
-
-    for child_name, child in m.named_children():
-        full_name = f"{name}.{child_name}" if name else child_name
-        maybe_quantize(child, state_dict, full_name)
-
-
 def create_name_map_hook(pairs: list[tuple[str, str]]):
     def hook(module, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
         for old, new in pairs:
@@ -70,13 +50,6 @@ def make_merge_hook(old_keys: list[str], new_key: str):
         state_dict[f"{prefix}{new_key}.weight"] = torch.cat(w_list, dim=0)
 
     return hook
-
-
-class Linear(nn.Linear):
-    """Mimic autocast logic (kinda)"""
-
-    def forward(self, x: Tensor) -> Tensor:
-        return F.linear(x.to(self.weight.dtype), self.weight, self.bias)
 
 
 class FP32Linear(nn.Linear):

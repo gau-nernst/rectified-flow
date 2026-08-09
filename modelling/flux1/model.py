@@ -9,6 +9,7 @@ import torch
 from torch import Tensor, nn
 
 from ..attn import dispatch_attn
+from ..linear import Linear
 from ..rope import RopeND, apply_rope
 from ..utils import create_name_map_hook, load_hf_state_dict
 from .modulate import modulate
@@ -44,10 +45,10 @@ class SelfAttention(nn.Module):
     def __init__(self, dim: int, bias: bool = True, eps: float = 1e-6) -> None:
         super().__init__()
         self.head_dim = 128
-        self.qkv = nn.Linear(dim, dim * 3, bias=bias)
+        self.qkv = Linear(dim, dim * 3, bias=bias)
         self.q_norm = nn.RMSNorm(self.head_dim, eps=eps)
         self.k_norm = nn.RMSNorm(self.head_dim, eps=eps)
-        self.proj = nn.Linear(dim, dim, bias=bias)
+        self.proj = Linear(dim, dim, bias=bias)
         remap_pairs = [
             ("norm.query_norm.scale", "q_norm.weight"),
             ("norm.key_norm.scale", "k_norm.weight"),

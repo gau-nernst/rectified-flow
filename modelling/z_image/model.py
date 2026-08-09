@@ -8,16 +8,17 @@ from torch import Tensor, nn
 
 from ..attn import dispatch_attn
 from ..flux1.model import timestep_embedding
+from ..linear import Linear
 from ..rope import RopeND, apply_rope
-from ..utils import Linear, load_hf_state_dict, make_merge_hook, maybe_quantize
+from ..utils import load_hf_state_dict, make_merge_hook
 from .gated_norm import gated_norm
 
 
 class FinalLayer(nn.Module):
     def __init__(self, hidden_size: int, out_channels):
         super().__init__()
-        self.linear = nn.Linear(hidden_size, out_channels)
-        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(256, hidden_size))
+        self.linear = Linear(hidden_size, out_channels)
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), Linear(256, hidden_size))
 
     def forward(self, x: Tensor, c: Tensor) -> Tensor:
         scale = self.adaLN_modulation(c).unsqueeze(1)
@@ -29,10 +30,10 @@ class Attention(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-5) -> None:
         super().__init__()
         self.head_dim = 128
-        self.qkv = nn.Linear(dim, dim * 3, bias=False)
+        self.qkv = Linear(dim, dim * 3, bias=False)
         self.norm_q = nn.RMSNorm(self.head_dim, eps=eps)
         self.norm_k = nn.RMSNorm(self.head_dim, eps=eps)
-        self.to_out = nn.Sequential(nn.Linear(dim, dim, bias=False))
+        self.to_out = nn.Sequential(Linear(dim, dim, bias=False))
         self.eps = eps
 
         self.register_load_state_dict_pre_hook(make_merge_hook(["to_q", "to_k", "to_v"], "qkv"))
@@ -48,9 +49,9 @@ class Attention(nn.Module):
 class FeedForward(nn.Module):
     def __init__(self, dim: int, hidden_dim: int) -> None:
         super().__init__()
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
+        self.w1 = Linear(dim, hidden_dim, bias=False)
+        self.w3 = Linear(dim, hidden_dim, bias=False)
+        self.w2 = Linear(hidden_dim, dim, bias=False)
 
     def forward(self, x: Tensor) -> Tensor:
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
@@ -59,7 +60,7 @@ class FeedForward(nn.Module):
 class Block(nn.Module):
     def __init__(self, dim: int, mod_dim: int, mlp_ratio: float, eps: float = 1e-5) -> None:
         super().__init__()
-        self.adaLN_modulation = nn.Sequential(nn.Linear(mod_dim, 4 * dim)) if mod_dim > 0 else None
+        self.adaLN_modulation = nn.Sequential(Linear(mod_dim, 4 * dim)) if mod_dim > 0 else None
         self.attention = Attention(dim)
         self.feed_forward = FeedForward(dim, int(dim * mlp_ratio))
         self.attention_norm1 = nn.RMSNorm(dim, eps=eps)
@@ -73,17 +74,17 @@ class Block(nn.Module):
             scale_msa, gate_msa, scale_mlp, gate_mlp = self.adaLN_modulation(adaln_input).unsqueeze(1).chunk(4, dim=2)
 
             attn = self.attention(gated_norm(x, self.attention_norm1.weight, gate=scale_msa, eps=self.eps), pe)
-            x = gated_norm(attn, self.attention_norm2.weight, gate=gate_msa, res=x, gate_type="tanh", eps=self.eps)
+            x = gated_norm(attn, self.attention_norm2.weight, gate=gate_msa, add=x, gate_type="tanh", eps=self.eps)
 
             ffn = self.feed_forward(gated_norm(x, self.ffn_norm1.weight, gate=scale_mlp, eps=self.eps))
-            x = gated_norm(ffn, self.ffn_norm2.weight, gate=gate_mlp, res=x, gate_type="tanh", eps=self.eps)
+            x = gated_norm(ffn, self.ffn_norm2.weight, gate=gate_mlp, add=x, gate_type="tanh", eps=self.eps)
 
         else:
             attn = self.attention(self.attention_norm1(x), pe)
-            x = gated_norm(attn, self.attention_norm2.weight, res=x, eps=self.eps)
+            x = gated_norm(attn, self.attention_norm2.weight, add=x, eps=self.eps)
 
             ffn = self.feed_forward(self.ffn_norm1(x))
-            x = gated_norm(ffn, self.ffn_norm2.weight, res=x, eps=self.eps)
+            x = gated_norm(ffn, self.ffn_norm2.weight, add=x, eps=self.eps)
 
         return x
 
@@ -108,7 +109,7 @@ class ZImage(nn.Module):
         self.cfg = cfg
 
         self.t_embedder = nn.Sequential()
-        self.t_embedder.mlp = nn.Sequential(Linear(256, 1024), nn.SiLU(), nn.Linear(1024, cfg.mod_dim))
+        self.t_embedder.mlp = nn.Sequential(Linear(256, 1024), nn.SiLU(), Linear(1024, cfg.mod_dim))
         self.pos_embed = RopeND(cfg.rope_dims, (1536, 512, 512), theta=256.0)
         self.x_pad_token = nn.Parameter(torch.zeros(1, cfg.dim))
         self.cap_pad_token = nn.Parameter(torch.zeros(1, cfg.dim))
@@ -122,7 +123,7 @@ class ZImage(nn.Module):
         )
 
         # text-only processing
-        self.cap_embedder = nn.Sequential(nn.RMSNorm(cfg.txt_dim, eps=1e-5), nn.Linear(cfg.txt_dim, cfg.dim))
+        self.cap_embedder = nn.Sequential(nn.RMSNorm(cfg.txt_dim, eps=1e-5), Linear(cfg.txt_dim, cfg.dim))
         self.context_refiner = nn.ModuleList([Block(cfg.dim, 0, cfg.mlp_ratio) for _ in range(cfg.n_refiner_layers)])
 
         # joint processing
@@ -139,7 +140,8 @@ class ZImage(nn.Module):
 
     def forward(self, img: Tensor, timesteps: Tensor, txt: Tensor) -> Tensor:
         B, H, W, C = img.shape
-        t_embeds = self.t_embedder(timestep_embedding(timesteps, 256))
+        t_embeds = timestep_embedding(timesteps, 256)
+        t_embeds = self.t_embedder(t_embeds.to(self.t_embedder[0][0].weight.dtype))
 
         # patchify
         patch_size = self.cfg.patch_size
@@ -162,6 +164,7 @@ class ZImage(nn.Module):
             txt = layer(txt, None, txt_rope)
 
         # image-only processing
+        img = img.to(self.all_x_embedder["2-1"].weight.dtype)
         img = self.all_x_embedder["2-1"](img)
         img = self._pad_tokens(img, self.x_pad_token)
         img_rope = self.pos_embed.create((txt.shape[1] + 1, 0, 0), (1, nH, nW))
@@ -217,7 +220,6 @@ def load_zimage(name: str = "turbo"):
 
     with torch.device("meta"):
         model = ZImage()
-        maybe_quantize(model, state_dict)
 
     model.load_state_dict(state_dict, assign=True)
     return model

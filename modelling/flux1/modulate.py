@@ -53,7 +53,7 @@ def modulate(
 ) -> Tensor:
     if torch.is_grad_enabled():
         if res is not None:
-            torch.addcmul(x, gate, res, out=x)
+            x = torch.addcmul(x, gate, res)
         x = F.layer_norm(x, x.shape[-1:], eps=eps)
         return (1.0 + scale) * x + shift
 
