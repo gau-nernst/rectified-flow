@@ -9,7 +9,7 @@ from gn_kernels.quant_utils import quantize_nvfp4_triton
 from torch import Tensor, nn
 
 from ..attn import dispatch_attn
-from ..flux1.model import LastLayer, MLPEmbedder, Modulation, SelfAttention, timestep_embedding
+from ..flux1.model import LastLayer, MLPEmbedder, Modulation, timestep_embedding
 from ..flux1.modulate import modulate
 from ..linear import Linear, nvfp4_mm
 from ..rope import RopeND, apply_rope
@@ -49,12 +49,29 @@ class DoubleStreamBlock(nn.Module):
     def __init__(self, dim: int, mlp_ratio: float, attn_impl: str = "pt", eps: float = 1e-6) -> None:
         super().__init__()
         self.head_dim = 128
+        self.eps = eps
         mlp_dim = int(dim * mlp_ratio)
         self.attn_impl = attn_impl
-        self.img_attn = SelfAttention(dim, bias=False, eps=eps)
-        self.txt_attn = SelfAttention(dim, bias=False, eps=eps)
+
+        self.img_attn = nn.Module()
+        self.txt_attn = nn.Module()
+
+        for m in [self.img_attn, self.txt_attn]:
+            m.qkv = Linear(dim, dim * 3, bias=False)
+            m.proj = Linear(dim, dim, bias=False)
+            m.q_norm = nn.Parameter(torch.empty(self.head_dim))
+            m.k_norm = nn.Parameter(torch.empty(self.head_dim))
+
         self.img_mlp = MLP(dim, mlp_dim)
         self.txt_mlp = MLP(dim, mlp_dim)
+
+        remap_pairs = [
+            ("img_attn.norm.query_norm.scale", "img_attn.q_norm"),
+            ("img_attn.norm.key_norm.scale", "img_attn.k_norm"),
+            ("txt_attn.norm.query_norm.scale", "txt_attn.q_norm"),
+            ("txt_attn.norm.key_norm.scale", "txt_attn.k_norm"),
+        ]
+        self.register_load_state_dict_pre_hook(create_name_map_hook(remap_pairs))
 
     def forward(
         self,
@@ -67,18 +84,27 @@ class DoubleStreamBlock(nn.Module):
         mod_txt: tuple[Tensor, ...],
     ) -> tuple[Tensor, Tensor]:
         """NOTE: img and txt are modified in-place"""
+        B, Limg, _ = img.shape
+        _, Ltxt, _ = txt.shape
+
         img_shift1, img_scale1, img_gate1, img_shift2, img_scale2, img_gate2 = mod_img
         txt_shift1, txt_scale1, txt_gate1, txt_shift2, txt_scale2, txt_gate2 = mod_txt
 
         img_res = modulate(img, img_shift1, img_scale1, img_res, img_gate2)
         txt_res = modulate(txt, txt_shift1, txt_scale1, txt_res, txt_gate2)
-        img_q, img_k, img_v = self.img_attn.forward_qkv(img_res)
-        txt_q, txt_k, txt_v = self.txt_attn.forward_qkv(txt_res)
+        img_q, img_k, img_v = self.img_attn.qkv(img_res).unflatten(2, (-1, self.head_dim)).chunk(3, dim=2)
+        txt_q, txt_k, txt_v = self.txt_attn.qkv(txt_res).unflatten(2, (-1, self.head_dim)).chunk(3, dim=2)
 
-        # TODO: fuse QK-norm inside forward_qkv() with RoPE
+        # pre-allocate buffer to avoid torch.cat()
+        q = img.new_empty(B, Ltxt + Limg, *img_q.shape[2:])
+        apply_rope(txt_q, pe[:Ltxt], self.txt_attn.q_norm, self.eps, out=q[:, :Ltxt])
+        apply_rope(img_q, pe[Ltxt:], self.img_attn.q_norm, self.eps, out=q[:, Ltxt:])
+
+        k = torch.empty_like(q)
+        apply_rope(txt_k, pe[:Ltxt], self.txt_attn.k_norm, self.eps, out=k[:, :Ltxt])
+        apply_rope(img_k, pe[Ltxt:], self.img_attn.k_norm, self.eps, out=k[:, Ltxt:])
+
         # TODO: remove cat?
-        q = apply_rope(torch.cat((txt_q, img_q), dim=1), pe)
-        k = apply_rope(torch.cat((txt_k, img_k), dim=1), pe)
         v = torch.cat((txt_v, img_v), dim=1)
         attn = dispatch_attn(q, k, v, impl=self.attn_impl).flatten(2)
         txt_attn, img_attn = attn.split([txt.shape[1], img.shape[1]], dim=1)
@@ -102,12 +128,12 @@ class SingleStreamBlock(nn.Module):
         self.linear1 = Linear(dim, dim * 3 + self.mlp_dim * 2, bias=False)  # qkv and mlp_in
         self.linear2 = Linear(dim + self.mlp_dim, dim, bias=False)  # proj and mlp_out
 
-        self.q_norm = nn.RMSNorm(self.head_dim, eps=eps)
-        self.k_norm = nn.RMSNorm(self.head_dim, eps=eps)
+        self.q_norm = nn.Parameter(torch.empty(self.head_dim))
+        self.k_norm = nn.Parameter(torch.empty(self.head_dim))
 
         remap_pairs = [
-            ("norm.query_norm.scale", "q_norm.weight"),
-            ("norm.key_norm.scale", "k_norm.weight"),
+            ("norm.query_norm.scale", "q_norm"),
+            ("norm.key_norm.scale", "k_norm"),
         ]
         self.register_load_state_dict_pre_hook(create_name_map_hook(remap_pairs))
 
@@ -136,11 +162,10 @@ class SingleStreamBlock(nn.Module):
             mlp = F.silu(up) * gate
 
         q, k, v = qkv.unflatten(2, (-1, self.head_dim)).chunk(3, dim=2)
-        q = apply_rope(q, pe, self.q_norm.weight, self.q_norm.eps)
-        k = apply_rope(k, pe, self.k_norm.weight, self.k_norm.eps)
+        q = apply_rope(q, pe, self.q_norm, self.eps)
+        k = apply_rope(k, pe, self.k_norm, self.eps)
         attn = dispatch_attn(q, k, v, impl=self.attn_impl).flatten(2)
 
-        # compute activation in mlp stream, cat again and run second linear layer
         # TODO: pre-allocate attn+mlp buffer
         return self.linear2(torch.cat([attn, mlp], 2))
 

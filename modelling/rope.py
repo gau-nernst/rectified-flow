@@ -67,7 +67,8 @@ def apply_rope(
     rope: Tensor,
     norm: Tensor | None = None,
     eps: float = 1e-6,
-    in_place: bool = True,
+    *,
+    out: Tensor | None = None,
 ) -> Tensor:
     # x: [B, L, nH, D] in real
     # rope: [L, D/2] in complex
@@ -76,14 +77,21 @@ def apply_rope(
             x = F.rms_norm(x, x.shape[-1:], norm, eps)
         dtype = rope.dtype.to_real()
         x_ = torch.view_as_complex(x.to(dtype).unflatten(-1, (-1, 2)))  # [B, L, nH, D/2]
-        out = torch.view_as_real(x_ * rope.unsqueeze(-2)).flatten(-2)  # [B, L, nH, D]
-        return out.type_as(x)
+        x_ = torch.view_as_real(x_ * rope.unsqueeze(-2)).flatten(-2)  # [B, L, nH, D]
+        if out is not None:
+            out.copy_(x_)
+        else:
+            out = x_.type_as(x)
+        return out
 
     assert x[0, 0].is_contiguous() and rope.is_contiguous()
     if norm is not None:
         assert norm.is_contiguous()
     rope_real = torch.view_as_real(rope)
-    out = x if in_place else torch.empty_like(x)
+    if out is not None:
+        assert out[0, 0].is_contiguous()
+    else:
+        out = torch.empty_like(x)
     B, L, H, D = x.shape
     _rope_kernel[(L, H, B)](x, rope_real, norm, out, *x.stride()[:2], *out.stride()[:2], D, eps)
     return out

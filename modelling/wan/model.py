@@ -10,7 +10,7 @@ from torch import Tensor, nn
 
 from ..attn import dispatch_attn
 from ..rope import RopeND, apply_rope
-from ..utils import FP32LayerNorm, FP32Linear, Linear, load_hf_state_dict
+from ..utils import FP32LayerNorm, FP32Linear, load_hf_state_dict
 
 
 def sinusoidal_embedding_1d(dim: int, position: Tensor, theta: float = 1e4) -> Tensor:
@@ -30,10 +30,10 @@ class WanSelfAttention(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6) -> None:
         super().__init__()
         self.head_dim = 128
-        self.q = Linear(dim, dim)
-        self.k = Linear(dim, dim)
-        self.v = Linear(dim, dim)
-        self.o = Linear(dim, dim)
+        self.q = nn.Linear(dim, dim)
+        self.k = nn.Linear(dim, dim)
+        self.v = nn.Linear(dim, dim)
+        self.o = nn.Linear(dim, dim)
         self.norm_q = nn.RMSNorm(dim, eps=eps)
         self.norm_k = nn.RMSNorm(dim, eps=eps)
 
@@ -74,7 +74,7 @@ class WanAttentionBlock(nn.Module):
         self.self_attn = WanSelfAttention(dim, eps=eps)
         self.norm3 = FP32LayerNorm(dim, eps=eps)
         self.cross_attn = WanCrossAttention(dim, eps=eps)
-        self.ffn = nn.Sequential(Linear(dim, ffn_dim), nn.GELU(approximate="tanh"), Linear(ffn_dim, dim))
+        self.ffn = nn.Sequential(nn.Linear(dim, ffn_dim), nn.GELU(approximate="tanh"), nn.Linear(ffn_dim, dim))
 
     def forward(self, x: Tensor, e: Tensor, rope: Tensor, c: Tensor) -> Tensor:
         # x: [B, L, C]
@@ -130,7 +130,7 @@ class WanModel(nn.Module):
         self.pos_embed = RopeND(cfg.rope_dims, (128, 512, 512), theta=1e4, dtype=torch.float64)
 
         self.text_embedding = nn.Sequential(
-            Linear(cfg.text_dim, cfg.dim), nn.GELU(approximate="tanh"), Linear(cfg.dim, cfg.dim)
+            nn.Linear(cfg.text_dim, cfg.dim), nn.GELU(approximate="tanh"), nn.Linear(cfg.dim, cfg.dim)
         )
         self.time_embedding = nn.Sequential(FP32Linear(cfg.freq_dim, cfg.dim), nn.SiLU(), FP32Linear(cfg.dim, cfg.dim))
         self.time_projection = nn.Sequential(nn.SiLU(), FP32Linear(cfg.dim, cfg.dim * 6))
