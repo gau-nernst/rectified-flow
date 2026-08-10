@@ -28,12 +28,13 @@ def _conv2d_kernel(
     Kh: tl.constexpr,
     Kw: tl.constexpr,
     PADDING: tl.constexpr,
+    UPSAMPLE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    Hout = Hin + PADDING * 2 - (Kh - 1)
-    Wout = Win + PADDING * 2 - (Kw - 1)
+    Hout = Hin * UPSAMPLE + PADDING * 2 - (Kh - 1)
+    Wout = Win * UPSAMPLE + PADDING * 2 - (Kw - 1)
 
     pid_n = tl.program_id(0)
     pid_m = tl.program_id(1)
@@ -68,8 +69,8 @@ def _conv2d_kernel(
         offs_w = -PADDING + w_tile + pid_w * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
         off_h = -PADDING + h_tile + hout
         offs_cin = cin_tile * BLOCK_K + tl.arange(0, BLOCK_K)
-        x_ptrs = x_ptr + offs_w * stride_xw + off_h * stride_xh + offs_cin
-        mask = (0 <= offs_w) & (offs_w < Win) & (0 <= off_h) & (off_h < Hin)
+        x_ptrs = x_ptr + (offs_w // UPSAMPLE) * stride_xw + (off_h // UPSAMPLE) * stride_xh + offs_cin
+        mask = (0 <= offs_w) & (offs_w < Win * UPSAMPLE) & (0 <= off_h) & (off_h < Hin * UPSAMPLE)
 
         x = tl.load(x_ptrs, mask, other=0.0)  # [BLOCK_M, BLOCK_K]
         w = tl.load(w_ptrs)  # [BLOCK_K, BLOCK_N]
@@ -92,7 +93,15 @@ def _conv2d_kernel(
     tl.store(o_ptrs, acc, mask)
 
 
-def conv2d_triton(x: Tensor, w: Tensor, b: Tensor | None = None, add: Tensor | None = None, padding: int = 0):
+def conv2d_triton(
+    x: Tensor,
+    w: Tensor,
+    b: Tensor | None = None,
+    add: Tensor | None = None,
+    padding: int = 0,
+    upsample: int = 1,
+):
+    """When upsample>1, the input is upsampled with nearest-neighbor before performing convolution."""
     assert x.stride(-1) == 1
     assert w.is_contiguous()
     if b is not None:
@@ -102,11 +111,11 @@ def conv2d_triton(x: Tensor, w: Tensor, b: Tensor | None = None, add: Tensor | N
 
     N, Hin, Win, Cin = x.shape
     Cout, Kh, Kw, _ = w.shape
-    Hout = Hin + padding * 2 - (Kh - 1)
-    Wout = Win + padding * 2 - (Kw - 1)
+    Hout = Hin * upsample + padding * 2 - (Kh - 1)
+    Wout = Win * upsample + padding * 2 - (Kw - 1)
 
     out = x.new_empty(N, Hout, Wout, Cout)
-    BLOCK_M = 64 if Hin * Win <= 256 * 256 else 128
+    BLOCK_M = 64 if Hout * Wout <= 256 * 256 else 128
     BLOCK_N = 128
     BLOCK_K = 32
 
@@ -127,6 +136,7 @@ def conv2d_triton(x: Tensor, w: Tensor, b: Tensor | None = None, add: Tensor | N
         Kh,
         Kw,
         padding,
+        upsample,
         BLOCK_M,
         BLOCK_N,
         BLOCK_K,

@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from .ops import BatchNorm2d, Conv2d, GroupNorm, upsample_nn2x, vae_attn
+from .ops import BatchNorm2d, Conv2d, GroupNorm, conv2d_triton, vae_attn
 from .utils import load_hf_state_dict
 
 
@@ -75,7 +75,7 @@ class Upsample(nn.Sequential):
         self.conv = Conv2d(in_dim, out_dim or in_dim, 3, 1, 1)
 
     def forward(self, x: Tensor):
-        return self.conv(upsample_nn2x(x))
+        return conv2d_triton(x, self.conv.weight, self.conv.bias, padding=1, upsample=2)
 
 
 class Encoder(nn.Module):
