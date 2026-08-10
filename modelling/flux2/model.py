@@ -24,7 +24,7 @@ class MLP(nn.ModuleList):
         self.append(Linear(mlp_dim, dim, bias=False))
 
     def forward(self, x: Tensor) -> Tensor:
-        if hasattr(self[0], "weight_scale_2"):
+        if hasattr(self[0], "weight_scale_2") and hasattr(self[2], "weight_scale_2"):
             w1, w3 = self[0].weight.view(torch.float4_e2m1fn_x2).chunk(2, dim=0)
             w1_sf, w3_sf = self[0].weight_scale.chunk(2, dim=0)
             xs_2 = self[0].input_scale
@@ -32,13 +32,15 @@ class MLP(nn.ModuleList):
 
             B, L, C = x.shape
             xq, xs = quantize_nvfp4_triton(x.view(B * L, C), xs_2)
-            out = sm120_gated_gemm_nvfp4.mm(xq, xs, xs_2, w1, w1_sf, ws_2, w3, w3_sf, ws_2).unflatten(0, (B, L))
+            xq, xs = sm120_gated_gemm_nvfp4.mm(xq, xs, xs_2, w1, w1_sf, ws_2, w3, w3_sf, ws_2, self[2].input_scale)
+            out = nvfp4_mm(xq, xs, self[2].input_scale, self[2].weight, self[2].weight_scale, self[2].weight_scale_2)
+            out = out.unflatten(0, (B, L))
 
         else:
             up, gate = self[0](x).chunk(2, dim=-1)
-            out = F.silu(up) * gate
+            out = self[2](F.silu(up) * gate)
 
-        return self[2](out)
+        return out
 
 
 # compared to Flux.1
