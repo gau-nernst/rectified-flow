@@ -47,12 +47,16 @@ class ResnetBlock(nn.Module):
         if in_dim != out_dim:
             self.nin_shortcut = Conv2d(in_dim, out_dim, 1)
         else:
-            self.nin_shortcut = nn.Identity()
+            self.nin_shortcut = None
 
     def forward(self, x: Tensor) -> Tensor:
         h = self.conv1(self.norm1(x, act="silu"))
-        h = self.conv2(self.norm2(h, act="silu"))
-        return self.nin_shortcut(x) + h
+        h = self.norm2(h, act="silu")
+
+        if self.nin_shortcut is not None:
+            return self.conv2(h) + self.nin_shortcut(x)
+        else:
+            return self.conv2(h, x)
 
 
 # no asymmetric padding in torch conv, must do it ourselves
