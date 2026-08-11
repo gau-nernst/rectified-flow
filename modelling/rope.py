@@ -69,6 +69,7 @@ def apply_rope(
     eps: float = 1e-6,
     *,
     out: Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
 ) -> Tensor:
     # x: [B, L, nH, D] in real
     # rope: [L, D/2] in complex
@@ -91,7 +92,7 @@ def apply_rope(
     if out is not None:
         assert out[0, 0].is_contiguous()
     else:
-        out = torch.empty_like(x)
+        out = torch.empty_like(x, dtype=out_dtype)
     B, L, H, D = x.shape
     _rope_kernel[(L, H, B)](x, rope_real, norm, out, *x.stride()[:2], *out.stride()[:2], D, eps)
     return out

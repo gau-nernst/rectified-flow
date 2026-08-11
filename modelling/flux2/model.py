@@ -98,7 +98,8 @@ class DoubleStreamBlock(nn.Module):
         txt_q, txt_k, txt_v = self.txt_attn.qkv(txt_res).unflatten(2, (-1, self.head_dim)).chunk(3, dim=2)
 
         # pre-allocate buffer to avoid torch.cat()
-        q = img.new_empty(B, Ltxt + Limg, *img_q.shape[2:])
+        qk_dtype = torch.float8_e4m3fn if self.attn_impl == "qk-fp8" else img.dtype
+        q = img.new_empty(B, Ltxt + Limg, *img_q.shape[2:], dtype=qk_dtype)
         apply_rope(txt_q, pe[:Ltxt], self.txt_attn.q_norm, self.eps, out=q[:, :Ltxt])
         apply_rope(img_q, pe[Ltxt:], self.img_attn.q_norm, self.eps, out=q[:, Ltxt:])
 
@@ -163,9 +164,10 @@ class SingleStreamBlock(nn.Module):
             up, gate = mlp.chunk(2, dim=-1)
             mlp = F.silu(up) * gate
 
+        qk_dtype = torch.float8_e4m3fn if self.attn_impl == "qk-fp8" else x.dtype
         q, k, v = qkv.unflatten(2, (-1, self.head_dim)).chunk(3, dim=2)
-        q = apply_rope(q, pe, self.q_norm, self.eps)
-        k = apply_rope(k, pe, self.k_norm, self.eps)
+        q = apply_rope(q, pe, self.q_norm, self.eps, out_dtype=qk_dtype)
+        k = apply_rope(k, pe, self.k_norm, self.eps, out_dtype=qk_dtype)
         attn = dispatch_attn(q, k, v, impl=self.attn_impl).flatten(2)
 
         # TODO: pre-allocate attn+mlp buffer
