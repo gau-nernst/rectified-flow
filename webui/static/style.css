@@ -85,6 +85,28 @@ h1 {
   width: 100%;
 }
 
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  margin: 14px 0 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.checkbox-row input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.checkbox-row:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .label {
   display: block;
   font-size: 11px;

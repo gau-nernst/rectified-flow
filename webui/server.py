@@ -36,6 +36,7 @@ MODEL_DEFAULTS = {
 
 PIPELINE: Flux2Pipeline | ZImagePipeline | None = None
 ACTIVE_MODEL: str | None = None
+ATTENTION_IMPL = "pt"
 THREAD_POOL = ThreadPoolExecutor(max_workers=1)
 
 app = FastAPI()
@@ -54,7 +55,35 @@ def index():
 
 @app.get("/models")
 def list_models():
-    return {"models": list(MODEL_DEFAULTS.keys()), "defaults": MODEL_DEFAULTS, "active_model": ACTIVE_MODEL}
+    return {
+        "models": list(MODEL_DEFAULTS.keys()),
+        "defaults": MODEL_DEFAULTS,
+        "active_model": ACTIVE_MODEL,
+        "attention_impl": ATTENTION_IMPL,
+    }
+
+
+def _set_attention_impl(attention_impl: str) -> int:
+    if PIPELINE is None:
+        return 0
+
+    model = PIPELINE.flux if isinstance(PIPELINE, Flux2Pipeline) else PIPELINE.zimage
+    updated = 0
+    for module in model.modules():
+        if hasattr(module, "attn_impl"):
+            module.attn_impl = attention_impl
+            updated += 1
+    return updated
+
+
+@app.post("/attention/{attention_impl}")
+def set_attention_impl(attention_impl: str):
+    global ATTENTION_IMPL
+    if attention_impl not in {"pt", "qk-fp8"}:
+        raise HTTPException(status_code=400, detail="Unsupported attention implementation")
+
+    ATTENTION_IMPL = attention_impl
+    return {"attention_impl": attention_impl, "updated_modules": _set_attention_impl(attention_impl)}
 
 
 @app.get("/proxy")
@@ -199,12 +228,16 @@ def load_model(model_name: str):
         PIPELINE = Flux2Pipeline.load(model_name.removeprefix("FLUX.2-"))
 
     elif model_name.startswith("Z-Image-"):
-        zimage = load_zimage(model_name.removeprefix("Z-Image-").lower()).bfloat16()
+        zimage_name = model_name.removeprefix("Z-Image-").lower()
+        zimage = load_zimage(zimage_name)
+        if "nvfp4" not in zimage_name:
+            zimage.bfloat16()
         PIPELINE = ZImagePipeline(zimage)
 
     else:
         raise ValueError(f"Unsupported model {model_name}")
 
+    _set_attention_impl(ATTENTION_IMPL)
     PIPELINE.cuda()
     ACTIVE_MODEL = model_name
 

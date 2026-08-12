@@ -1,6 +1,7 @@
 const ui = {
   modelSelect: document.getElementById("model"),
   loadModelBtn: document.getElementById("load_model"),
+  qkFp8Input: document.getElementById("qk_fp8"),
   modelStatus: document.getElementById("model_status"),
   vramStatus: document.getElementById("vram_status"),
   numStepsInput: document.getElementById("num_steps"),
@@ -623,6 +624,7 @@ ui.importServerBtn.addEventListener("click", async () => { await importFromServe
 
 ui.loadModelBtn.addEventListener("click", async () => {
   ui.loadModelBtn.disabled = true;
+  ui.qkFp8Input.disabled = true;
   ui.modelStatus.textContent = "Loading model...";
   try {
     const res = await fetch(`/model/${encodeURIComponent(ui.modelSelect.value)}`, { method: "POST" });
@@ -638,6 +640,30 @@ ui.loadModelBtn.addEventListener("click", async () => {
     setStatus(`Model load failed: ${message}`, true);
   } finally {
     ui.loadModelBtn.disabled = false;
+    ui.qkFp8Input.disabled = false;
+  }
+});
+
+ui.qkFp8Input.addEventListener("change", async () => {
+  const enabled = ui.qkFp8Input.checked;
+  const attentionImpl = enabled ? "qk-fp8" : "pt";
+  ui.qkFp8Input.disabled = true;
+  try {
+    const res = await fetch(`/attention/${attentionImpl}`, { method: "POST" });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || "Attention update failed");
+    }
+    const data = await res.json();
+    const suffix = data.updated_modules
+      ? ` on ${data.updated_modules} attention modules`
+      : " (will apply when a model is loaded)";
+    setStatus(`${enabled ? "Enabled QK-FP8" : "Restored PyTorch attention"}${suffix}`);
+  } catch (err) {
+    ui.qkFp8Input.checked = !enabled;
+    setStatus(err?.message || "Attention update failed", true);
+  } finally {
+    ui.qkFp8Input.disabled = false;
   }
 });
 
@@ -673,6 +699,7 @@ ui.saveOutputBtn.addEventListener("click", async () => {
 // Run generation using current settings and selected inputs.
 ui.generateBtn.addEventListener("click", async () => {
   ui.generateBtn.disabled = true;
+  ui.qkFp8Input.disabled = true;
   ui.saveOutputBtn.disabled = true;
   setStatus("");
   ui.outputMeta.textContent = "Generating...";
@@ -764,6 +791,7 @@ ui.generateBtn.addEventListener("click", async () => {
     hideProgress();
   } finally {
     ui.generateBtn.disabled = false;
+    ui.qkFp8Input.disabled = false;
   }
 });
 
@@ -785,6 +813,7 @@ ui.copyOutputBtn.addEventListener("click", async () => {
   const res = await fetch("/models");
   const data = await res.json();
   state.modelDefaults = data.defaults || {};
+  ui.qkFp8Input.checked = data.attention_impl === "qk-fp8";
   ui.modelSelect.innerHTML = "";
   data.models.forEach((name) => {
     const opt = document.createElement("option");
