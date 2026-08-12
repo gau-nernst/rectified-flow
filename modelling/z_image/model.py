@@ -4,11 +4,13 @@ import dataclasses
 
 import torch
 import torch.nn.functional as F
+from gn_kernels.cutedsl.sm120 import sm120_gated_gemm_nvfp4
+from gn_kernels.quant_utils import quantize_nvfp4_triton
 from torch import Tensor, nn
 
 from ..attn import dispatch_attn
 from ..flux1.model import timestep_embedding
-from ..linear import Linear
+from ..linear import Linear, nvfp4_mm
 from ..rope import RopeND, apply_rope
 from ..utils import load_hf_state_dict, make_merge_hook
 from .gated_norm import gated_norm
@@ -35,14 +37,16 @@ class Attention(nn.Module):
         self.norm_k = nn.RMSNorm(self.head_dim, eps=eps)
         self.to_out = nn.Sequential(Linear(dim, dim, bias=False))
         self.eps = eps
+        self.attn_impl = "pt"
 
         self.register_load_state_dict_pre_hook(make_merge_hook(["to_q", "to_k", "to_v"], "qkv"))
 
     def forward(self, x: Tensor, pe: Tensor):
         q, k, v = self.qkv(x).unflatten(2, (-1, self.head_dim)).chunk(3, dim=2)
-        q = apply_rope(q, pe, self.norm_q.weight, self.eps)
-        k = apply_rope(k, pe, self.norm_k.weight, self.eps)
-        out = dispatch_attn(q, k, v).flatten(2)
+        qk_dtype = torch.float8_e4m3fn if self.attn_impl == "qk-fp8" else x.dtype
+        q = apply_rope(q, pe, self.norm_q.weight, self.eps, out_dtype=qk_dtype)
+        k = apply_rope(k, pe, self.norm_k.weight, self.eps, out_dtype=qk_dtype)
+        out = dispatch_attn(q, k, v, self.attn_impl).flatten(2)
         return self.to_out(out)
 
 
@@ -54,7 +58,29 @@ class FeedForward(nn.Module):
         self.w2 = Linear(hidden_dim, dim, bias=False)
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        if all(w.is_nvfp4() for w in (self.w1, self.w3, self.w2)):
+            # assume w1.input_scale == w3.input_scale
+            B, L, C = x.shape
+            xq, xs = quantize_nvfp4_triton(x.view(B * L, C), self.w1.input_scale)
+            xq, xs = sm120_gated_gemm_nvfp4.mm(
+                xq,
+                xs,
+                self.w1.input_scale,
+                self.w1.weight.view(torch.float4_e2m1fn_x2),
+                self.w1.weight_scale,
+                self.w1.weight_scale_2,
+                self.w3.weight.view(torch.float4_e2m1fn_x2),
+                self.w3.weight_scale,
+                self.w3.weight_scale_2,
+                self.w2.input_scale,
+            )
+            out = nvfp4_mm(xq, xs, self.w2.input_scale, self.w2.weight, self.w2.weight_scale, self.w2.weight_scale_2)
+            out = out.unflatten(0, (B, L))
+
+        else:
+            out = self.w2(F.silu(self.w1(x)) * self.w3(x))
+
+        return out
 
 
 class Block(nn.Module):

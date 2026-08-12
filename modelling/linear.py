@@ -32,8 +32,7 @@ class Linear(nn.Module):
         dims = x.shape[:-1]
         x = x.view(-1, x.shape[-1])
 
-        if hasattr(self, "weight_scale_2"):
-            # nvfp4
+        if self.is_nvfp4():
             xq, xs = quantize_nvfp4_triton(x, self.input_scale)
             out = nvfp4_mm(xq, xs, self.input_scale, self.weight, self.weight_scale, self.weight_scale_2, self.bias)
 
@@ -42,3 +41,12 @@ class Linear(nn.Module):
             out = F.linear(x, self.weight, self.bias)
 
         return out.view(*dims, -1)
+
+    def is_nvfp4(self):
+        return hasattr(self, "weight_scale_2")
+
+    def extra_repr(self):
+        extra = f"W={tuple(self.weight.shape)}"
+        if self.is_nvfp4():
+            extra += ", quant=nvfp4"
+        return extra

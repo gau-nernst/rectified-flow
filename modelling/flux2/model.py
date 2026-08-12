@@ -24,7 +24,7 @@ class MLP(nn.ModuleList):
         self.append(Linear(mlp_dim, dim, bias=False))
 
     def forward(self, x: Tensor) -> Tensor:
-        if hasattr(self[0], "weight_scale_2") and hasattr(self[2], "weight_scale_2"):
+        if self[0].is_nvfp4() and self[2].is_nvfp4():
             w1, w3 = self[0].weight.view(torch.float4_e2m1fn_x2).chunk(2, dim=0)
             w1_sf, w3_sf = self[0].weight_scale.chunk(2, dim=0)
             xs_2 = self[0].input_scale
@@ -48,12 +48,12 @@ class MLP(nn.ModuleList):
 # - no bias.
 # - gelu is replaced with swiglu
 class DoubleStreamBlock(nn.Module):
-    def __init__(self, dim: int, mlp_ratio: float, attn_impl: str = "pt", eps: float = 1e-6) -> None:
+    def __init__(self, dim: int, mlp_ratio: float, eps: float = 1e-6) -> None:
         super().__init__()
         self.head_dim = 128
         self.eps = eps
         mlp_dim = int(dim * mlp_ratio)
-        self.attn_impl = attn_impl
+        self.attn_impl = "pt"
 
         self.img_attn = nn.Module()
         self.txt_attn = nn.Module()
@@ -120,13 +120,13 @@ class DoubleStreamBlock(nn.Module):
 
 
 class SingleStreamBlock(nn.Module):
-    def __init__(self, dim: int, mlp_ratio: float, attn_impl: str = "pt", eps: float = 1e-6) -> None:
+    def __init__(self, dim: int, mlp_ratio: float, eps: float = 1e-6) -> None:
         super().__init__()
         self.head_dim = 128
         self.dim = dim
         self.mlp_dim = int(dim * mlp_ratio)
-        self.attn_impl = attn_impl
         self.eps = eps
+        self.attn_impl = "pt"
 
         self.linear1 = Linear(dim, dim * 3 + self.mlp_dim * 2, bias=False)  # qkv and mlp_in
         self.linear2 = Linear(dim + self.mlp_dim, dim, bias=False)  # proj and mlp_out
@@ -146,7 +146,7 @@ class SingleStreamBlock(nn.Module):
         shift, scale, gate = mod
         x_mod = modulate(x, shift, scale, res, gate)
 
-        if hasattr(self.linear1, "weight_scale_2"):
+        if self.linear1.is_nvfp4():
             xs_2 = self.linear1.input_scale
             ws_2 = self.linear1.weight_scale_2
             split_sizes = [self.dim * 3, self.mlp_dim, self.mlp_dim]
