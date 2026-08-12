@@ -226,7 +226,7 @@ def flux2_generate(
         for i, ref_lat in enumerate(ref_latents):
             h, w, _ = ref_lat.shape
             ref_ropes.append(flux.make_img_rope(h, w, t=10 * (i + 1)))
-            flat_latents.append(ref_lat.flatten(1, 2))
+            flat_latents.append(ref_lat.flatten(0, 1))
 
         rope = torch.cat([txt_rope, img_rope, *ref_ropes], dim=0)
         ref_imgs = torch.cat(flat_latents, dim=0).unsqueeze(0).expand(B, -1, -1)
