@@ -44,10 +44,12 @@ def create_name_map_hook(pairs: list[tuple[str, str]]):
 
 def make_merge_hook(old_keys: list[str], new_key: str):
     def hook(module, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
-        if f"{prefix}{old_keys[0]}.weight" not in state_dict:
-            return
-        w_list = [state_dict.pop(f"{prefix}{key}.weight") for key in old_keys]
-        state_dict[f"{prefix}{new_key}.weight"] = torch.cat(w_list, dim=0)
+        for suffix in ("weight", "weight_scale_inv"):
+            if f"{prefix}{old_keys[0]}.{suffix}" not in state_dict:
+                continue
+
+            w_list = [state_dict.pop(f"{prefix}{key}.{suffix}") for key in old_keys]
+            state_dict[f"{prefix}{new_key}.{suffix}"] = torch.cat(w_list, dim=0)
 
     return hook
 

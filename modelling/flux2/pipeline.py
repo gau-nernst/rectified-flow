@@ -8,10 +8,11 @@ import torch
 from PIL import Image
 from torch import Tensor, nn
 from tqdm import tqdm
-from transformers import AutoTokenizer, PreTrainedTokenizer, Qwen3Model
+from transformers import AutoTokenizer, PreTrainedTokenizer
 
 from ..autoencoder import load_autoencoder
 from ..offload import PerLayerOffloadCUDAStream
+from ..qwen3 import Qwen3ForCausalLM
 from ..solvers import get_solver
 from .model import Flux2, load_flux2
 
@@ -20,7 +21,7 @@ from .model import Flux2, load_flux2
 class Flux2Qwen3TextEncoder(nn.Module):
     def __init__(self, model_id: str):
         super().__init__()
-        self.model = Qwen3Model.from_pretrained(model_id, dtype="auto")
+        self.model = Qwen3ForCausalLM.from_pretrained(model_id).model
         self.tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_id)
 
         # TODO: we can truncate Qwen3 to 27 layers
@@ -48,13 +49,8 @@ class Flux2Qwen3TextEncoder(nn.Module):
             max_length=512,
             return_tensors="pt",
         )
-
-        # TODO: use varlen
         device = next(self.parameters()).device
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        outputs = self.model(**inputs, output_hidden_states=True, use_cache=False)
-
-        outputs = [outputs.hidden_states[idx] for idx in self.output_indices]
+        outputs = self.model(inputs["input_ids"].to(device), output_indices=self.output_indices)
         return torch.cat(outputs, dim=-1)
 
 
