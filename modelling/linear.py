@@ -104,6 +104,7 @@ def _fp8_1d2d_kernel(
     tl.static_assert(K % BLOCK_K == 0)
     pid_n = tl.program_id(0)
     pid_m = tl.program_id(1)
+    pid_m, pid_n = tl.swizzle2d(pid_m, pid_n, tl.num_programs(1), tl.num_programs(0), 8)
 
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -131,7 +132,7 @@ def _fp8_1d2d_kernel(
             tmp = tl.dot_scaled(x, sfx, "e4m3", w, sfw, "e4m3")
         else:
             tmp = tl.dot(x, w)
-        acc += tmp * xs.to(tl.float32) * ws.to(tl.float32)
+        acc += tmp * (xs.to(tl.float32) * ws.to(tl.float32))
 
         x_ptrs += BLOCK_K
         w_ptrs += BLOCK_K
