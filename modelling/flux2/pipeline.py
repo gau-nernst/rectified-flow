@@ -211,6 +211,7 @@ def flux2_generate(
 
     num_steps = len(timesteps) - 1
     solver_ = get_solver(solver, timesteps)
+    timesteps_tensor = torch.tensor(timesteps).to("cuda", non_blocking=True)
 
     img_rope = flux.make_img_rope(H, W)
     txt_rope = flux.make_txt_rope(txt.shape[1])
@@ -240,7 +241,7 @@ def flux2_generate(
             imgs = latents
 
         # only keep the velocity for the latents being denoised.
-        t = torch.tensor([timesteps[i]], device="cuda")
+        t = timesteps_tensor[None, i]
         v = flux(imgs, t, txt, rope, guidance)[:, :img_len].float()
 
         # classifier-free guidance
