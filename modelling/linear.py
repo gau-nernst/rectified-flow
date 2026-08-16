@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 from gn_kernels import quantize_nvfp4_triton
+from gn_kernels.cutedsl.sm120 import sm120_mm_fp8_1d2d
 from torch import Tensor, nn
 
 
@@ -49,7 +50,7 @@ class Linear(nn.Module):
 
         elif self.is_fp8_1d2d():
             x, xs = fp8_quantize(x)
-            out = fp8_1d2d_mm(x, xs, self.weight, self.weight_scale_inv, self.bias, add)
+            out = sm120_mm_fp8_1d2d.mm(x, xs, self.weight, self.weight_scale_inv, self.bias, add)
 
         else:
             # bf16
