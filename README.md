@@ -3,9 +3,6 @@
 Supported models:
 
 - [FLUX.1-dev](https://huggingface.co/black-forest-labs/FLUX.1-dev) and its derivatives: [Flex.1-alpha](https://huggingface.co/ostris/Flex.1-alpha)
-- Wan2.2 (WIP)
-  - Wan2.2-TI2V-5B: T2V and I2V
-  - Wan2.2-T2V-A14B and Wan2.2-I2V-A14B: WIP
 - Z-Image: [Base](https://huggingface.co/Tongyi-MAI/Z-Image) and [Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo). Turbo-NVFP4 from Comfy-UI.
 - [FLUX.2-klein](https://github.com/black-forest-labs/flux2). T2I and TI2I. NVFP4 checkpoints are supported.
 

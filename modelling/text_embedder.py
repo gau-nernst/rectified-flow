@@ -83,15 +83,3 @@ def load_clip_l(output_key: str | int | list[str | int] = "pooler_output") -> Te
     )
     tokenizer = AutoTokenizer.from_pretrained("openai/clip-vit-large-patch14")
     return TextEmbedder(model, tokenizer, 77, output_key)
-
-
-def load_umt5_xxl(max_length: int = 512) -> TextEmbedder:
-    # official Wan2.2 uses their own implementation and weight mapping for umt5
-    # use umt5 from diffusers version for convenience
-    model = UMT5EncoderModel.from_pretrained(
-        "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
-        dtype=torch.bfloat16,
-        subfolder="text_encoder",
-    )
-    tokenizer = AutoTokenizer.from_pretrained("google/umt5-xxl")
-    return TextEmbedder(model, tokenizer, max_length, "last_hidden_state", use_attn_mask=True)
